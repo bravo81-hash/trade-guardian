@@ -228,31 +228,21 @@ if uploaded_files:
 
             active_df[['Action', 'Signal_Type']] = active_df.apply(apply_action, axis=1)
             
-            # ACTION CENTER (TOP)
-            urgent = active_df[active_df['Action'] != ""]
-            if not urgent.empty:
-                st.markdown("### 🚨 Action Center")
-                # Using columns to organize alerts nicely
-                for _, row in urgent.iterrows():
-                    sig = row['Signal_Type']
-                    # High contrast styling for alerts
-                    if sig == "SUCCESS": 
-                        st.success(f"**{row['Name']}**: {row['Action']}")
-                    elif sig == "ERROR": 
-                        st.error(f"**{row['Name']}**: {row['Action']}")
-                    elif sig == "WARNING": 
-                        st.warning(f"**{row['Name']}**: {row['Action']}")
-                    else: 
-                        st.info(f"**{row['Name']}**: {row['Action']}")
-                st.divider()
-
+            # --- TOP METRICS ---
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Active Trades", len(active_df))
+            c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}")
+            c3.metric("Open P&L", f"${active_df['P&L'].sum():,.0f}")
+            
+            st.divider()
+            
             # --- STRATEGY TABS (VERTICAL SCROLL FIX) ---
             st.markdown("### 🏛️ Active Trades by Strategy")
             
-            # Sub-Tabs for compactness
+            # Sub-Tabs
             strat_tabs = st.tabs(["🔹 130/160", "🔸 160/190", "🐳 M200", "📋 Summary"])
             
-            # Common Styling Function (High Contrast)
+            # Styles
             def style_table(styler):
                 return styler.applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
                                        else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
@@ -263,20 +253,32 @@ if uploaded_files:
 
             cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega']
 
-            # Helper to render table
             def render_tab(tab, strategy_name):
                 with tab:
                     subset = active_df[active_df['Strategy'] == strategy_name].copy()
                     bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                     
-                    # Benchmark Header
+                    # 1. ALERT TILES (LOCALIZED ACTION CENTER)
+                    urgent = subset[subset['Action'] != ""]
+                    if not urgent.empty:
+                        for _, row in urgent.iterrows():
+                            sig = row['Signal_Type']
+                            msg = f"**{row['Name']}**: {row['Action']}"
+                            if sig == "SUCCESS": st.success(msg)
+                            elif sig == "ERROR": st.error(msg)
+                            elif sig == "WARNING": st.warning(msg)
+                            else: st.info(msg)
+                    
+                    st.divider()
+
+                    # 2. METRICS HEADER
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
                     c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
                     c3.metric("Avg Hold", f"{bench['dit']:.0f}d")
                     
+                    # 3. TABLE
                     if not subset.empty:
-                        # Total Row
                         sum_row = pd.DataFrame({
                             'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
@@ -308,19 +310,31 @@ if uploaded_files:
             with strat_tabs[3]:
                 # Strategy Overview Table
                 strat_agg = active_df.groupby('Strategy').agg({
-                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Name': 'count'
+                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Name': 'count', 'Daily Yield %': 'mean'
                 }).reset_index()
+                
+                # Trend Logic
+                strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
                 
                 # Total Row
                 tot = pd.DataFrame({
                     'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
                     'Debit': [strat_agg['Debit'].sum()], 'Theta': [strat_agg['Theta'].sum()],
-                    'Name': [strat_agg['Name'].sum()]
+                    'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                    'Trend': ['-']
                 })
                 agg_final = pd.concat([strat_agg, tot], ignore_index=True)
                 
+                # Styling
+                def highlight_trend(val):
+                    if '🟢' in str(val): return 'color: green; font-weight: bold'
+                    if '🔴' in str(val): return 'color: red; font-weight: bold'
+                    return ''
+
                 st.dataframe(
-                    agg_final.style.format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Theta': "{:.0f}"})
+                    agg_final.style
+                    .format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Theta': "{:.0f}", 'Daily Yield %': lambda x: safe_fmt(x, "{:.2f}%")})
+                    .applymap(highlight_trend, subset=['Trend'])
                     .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(agg_final)-1 else '' for _ in x], axis=1),
                     use_container_width=True
                 )
@@ -369,13 +383,25 @@ if uploaded_files:
             
             active_df = df[df['Status'] == 'Active'].copy()
             if not active_df.empty:
-                st.markdown("#### 🚀 Capital Efficiency Curve")
+                st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
+                st.caption("Are your trades gaining momentum or stalling? Look for the 'Dip Valley' around Day 15-25.")
+                
                 fig = px.scatter(
-                    active_df, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
-                    hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
+                    active_df, 
+                    x='Days Held', 
+                    y='Daily Yield %', 
+                    color='Strategy', 
+                    size='Debit',
+                    hover_data=['Name', 'P&L'],
+                    title="Real-Time Efficiency: Yield vs Age"
                 )
+                
+                # Dynamic Baseline Lines
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
-                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"Target ({y_130:.2f}%)")
+                y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
+                
+                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
+                fig.add_hline(y=y_m200, line_dash="dash", line_color="green", annotation_text=f"M200 Target ({y_m200:.2f}%)")
                 st.plotly_chart(fig, use_container_width=True)
 
             expired_df = df[df['Status'] == 'Expired'].copy()
@@ -389,7 +415,13 @@ if uploaded_files:
                 c3.metric("Trades Analyzed", len(expired_df))
                 
                 st.plotly_chart(
-                    px.scatter(expired_df, x='Debit/Lot', y='P&L', color='Strategy', title="Winning Zone: Entry Price vs Profit"), 
+                    px.scatter(
+                        expired_df, 
+                        x='Debit/Lot', 
+                        y='P&L', 
+                        color='Strategy', 
+                        title="Winning Zone: Entry Price vs Profit"
+                    ), 
                     use_container_width=True
                 )
             else:
