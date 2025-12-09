@@ -220,13 +220,17 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            # --- ACTION LOGIC ---
-            def apply_action(row):
+            # --- ACTION LOGIC (FIXED) ---
+            # We calculate results as a list of dictionaries, then make a DataFrame
+            action_results = []
+            for _, row in active_df.iterrows():
                 bench = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
                 act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], bench)
-                return pd.Series([act, sig])
-
-            active_df[['Action', 'Signal_Type']] = active_df.apply(apply_action, axis=1)
+                action_results.append({'Action': act, 'Signal_Type': sig})
+            
+            # Robust merge
+            action_df = pd.DataFrame(action_results, index=active_df.index)
+            active_df = pd.concat([active_df, action_df], axis=1)
             
             # --- STRATEGY TABS ---
             st.markdown("### 🏛️ Active Trades by Strategy")
@@ -250,7 +254,7 @@ if uploaded_files:
                     subset = active_df[active_df['Strategy'] == strategy_name].copy()
                     bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                     
-                    # 1. ALERT TILES (LOCALIZED)
+                    # 1. ALERT TILES
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -261,8 +265,7 @@ if uploaded_files:
                             elif sig == "ERROR": st.error(msg)
                             elif sig == "WARNING": st.warning(msg)
                             else: st.info(msg)
-                    
-                    st.divider()
+                        st.divider()
 
                     # 2. METRICS HEADER
                     c1, c2, c3 = st.columns(3)
@@ -405,7 +408,6 @@ if uploaded_files:
                     title="Real-Time Efficiency: Yield vs Age"
                 )
                 
-                # Dynamic Baseline Lines
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
                 y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
                 
