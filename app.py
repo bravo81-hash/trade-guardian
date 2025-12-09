@@ -220,17 +220,19 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            # --- ACTION LOGIC (FIXED) ---
-            # We calculate results as a list of dictionaries, then make a DataFrame
-            action_results = []
+            # --- ACTION LOGIC (ROBUST LOOP) ---
+            # Replaces the fragile apply() call
+            act_list = []
+            sig_list = []
+            
             for _, row in active_df.iterrows():
                 bench = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
                 act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], bench)
-                action_results.append({'Action': act, 'Signal_Type': sig})
-            
-            # Robust merge
-            action_df = pd.DataFrame(action_results, index=active_df.index)
-            active_df = pd.concat([active_df, action_df], axis=1)
+                act_list.append(act)
+                sig_list.append(sig)
+                
+            active_df['Action'] = act_list
+            active_df['Signal_Type'] = sig_list
             
             # --- STRATEGY TABS ---
             st.markdown("### 🏛️ Active Trades by Strategy")
@@ -254,7 +256,7 @@ if uploaded_files:
                     subset = active_df[active_df['Strategy'] == strategy_name].copy()
                     bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                     
-                    # 1. ALERT TILES
+                    # 1. ALERT TILES (LOCALIZED)
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -313,6 +315,7 @@ if uploaded_files:
                 total_row = pd.DataFrame({
                     'Strategy': ['TOTAL'], 
                     'P&L': [strat_agg['P&L'].sum()],
+                    'Debit': [strat_agg['Debit'].sum()],
                     'Theta': [strat_agg['Theta'].sum()], 
                     'Delta': [strat_agg['Delta'].sum()],
                     'Name': [strat_agg['Name'].sum()], 
@@ -323,8 +326,8 @@ if uploaded_files:
                 final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
                 
                 # Display Config
-                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Theta', 'Delta', 'Name']].copy()
-                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Active Trades']
                 
                 def highlight_trend(val):
                     if '🟢' in str(val): return 'color: green; font-weight: bold'
@@ -339,7 +342,8 @@ if uploaded_files:
                 st.dataframe(
                     display_agg.style
                     .format({
-                        'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
+                        'Total P&L': "${:,.0f}", 'Total Debit': "${:,.0f}",
+                        'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
                         'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
                     })
                     .applymap(highlight_trend, subset=['Trend'])
@@ -408,6 +412,7 @@ if uploaded_files:
                     title="Real-Time Efficiency: Yield vs Age"
                 )
                 
+                # Dynamic Baseline Lines
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
                 y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
                 
