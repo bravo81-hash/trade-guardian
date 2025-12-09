@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import io
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
 
 # --- PAGE CONFIG ---
@@ -18,15 +17,27 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 st.sidebar.divider()
-st.sidebar.header("⚙️ View Settings")
+st.sidebar.header("⚙️ Strategy Settings")
+market_regime = st.sidebar.selectbox(
+    "Current Market Regime", 
+    ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"],
+    index=0,
+    help="Adjusts your 'Take Profit' targets based on market conditions."
+)
+
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
-# --- FALLBACK CONSTANTS ---
-STATIC_BASELINES = {
+# --- CONFIGURATION ENGINE ---
+BASE_CONFIG = {
     '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
     '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
     'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41}
 }
+
+# Apply Market Regime Multipliers
+regime_mult = 1.0
+if "Bullish" in market_regime: regime_mult = 1.10 # +10% Targets
+if "Bearish" in market_regime: regime_mult = 0.90 # -10% Targets
 
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name):
@@ -52,14 +63,19 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
     signal_type = "NONE" 
     
     if status == "Active":
-        # 1. TAKE PROFIT RULE
+        # 1. TAKE PROFIT RULE (Dynamic with Regime)
         benchmark = benchmarks_dict.get(strat, {})
-        target = benchmark.get('pnl', 0)
-        if target == 0: 
-            target = STATIC_BASELINES.get(strat, {}).get('pnl', 9999)
+        base_target = benchmark.get('pnl', 0)
+        
+        # Fallback
+        if base_target == 0: 
+            base_target = BASE_CONFIG.get(strat, {}).get('pnl', 9999)
             
-        if pnl >= target:
-            return f"TAKE PROFIT (Hit ${target:,.0f})", "SUCCESS"
+        # Apply Regime Multiplier
+        final_target = base_target * regime_mult
+            
+        if pnl >= final_target:
+            return f"TAKE PROFIT (Hit ${final_target:,.0f})", "SUCCESS"
 
         # 2. STRATEGY SPECIFIC RULES
         if strat == '130/160':
@@ -195,7 +211,8 @@ def process_data(files):
                             "Grade": grade, "Reason": reason, "Alerts": " ".join(alerts), 
                             "Days Held": days_held, "Daily Yield %": daily_yield, "ROI": roi,
                             "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta,
-                            "Entry Date": start_dt
+                            "Entry Date": start_dt,
+                            "Notes": "" # New Journal Column
                         })
         
         except Exception:
@@ -212,15 +229,9 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- VALIDATION WARNINGS ---
-    if not df.empty:
-        unknowns = df[df['Strategy'] == 'Other']
-        if not unknowns.empty:
-            st.sidebar.warning(f"ℹ️ {len(unknowns)} trades have 'Other' strategy.")
-
     # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
-    benchmarks = STATIC_BASELINES.copy()
+    benchmarks = BASE_CONFIG.copy()
     
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
@@ -258,7 +269,11 @@ if uploaded_files:
                 act_list = []
                 sig_list = []
                 for _, row in active_df.iterrows():
-                    bench = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
+                    # Pass dynamic benchmarks which now respect regime? 
+                    # No, benchmarks are stats. Target logic is inside get_action_signal
+                    # We pass the RAW historical benchmark, the function applies the Regime multiplier
+                    bench_raw = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
+                    
                     act, sig = get_action_signal(
                         row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks
                     )
@@ -282,12 +297,16 @@ if uploaded_files:
                                            else 'color: #842029; font-weight: bold' if 'F' in str(v) 
                                            else '', subset=['Grade'])
 
-                cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega']
+                # COLUMNS: Added "Notes"
+                cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
 
                 def render_tab(tab, strategy_name):
                     with tab:
                         subset = active_df[active_df['Strategy'] == strategy_name].copy()
                         bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
+                        
+                        # ADJUST TARGET DISPLAY FOR REGIME
+                        target_disp = bench['pnl'] * regime_mult
                         
                         # ALERTS (LOCALIZED)
                         urgent = subset[subset['Action'] != ""]
@@ -305,31 +324,29 @@ if uploaded_files:
                         # METRICS
                         c1, c2, c3 = st.columns(3)
                         c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
-                        c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
+                        c2.metric("Target Profit (Adj)", f"${target_disp:,.0f}", help=f"Adjusted for {market_regime}")
                         c3.metric("Avg Hold", f"{bench['dit']:.0f}d")
                         
-                        # TABLE
+                        # EDITABLE TABLE
                         if not subset.empty:
-                            sum_row = pd.DataFrame({
-                                'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
-                                'Daily Yield %': [subset['Daily Yield %'].mean()],
-                                'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
-                                'Days Held': [subset['Days Held'].mean()],
-                                'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
-                                'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()]
-                            })
-                            display = pd.concat([subset[cols], sum_row], ignore_index=True)
+                            # We use st.data_editor instead of dataframe to allow notes
+                            # Note: Styling is limited in data_editor, but functionality is key here.
                             
-                            st.dataframe(
-                                style_table(display.style)
-                                .format({
-                                    'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%",
-                                    'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
-                                    'Days Held': "{:.0f}"
-                                })
-                                .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
-                                use_container_width=True, height=400
+                            edited_df = st.data_editor(
+                                subset[cols],
+                                column_config={
+                                    "Daily Yield %": st.column_config.NumberColumn(format="%.2f%%"),
+                                    "P&L": st.column_config.NumberColumn(format="$%d"),
+                                    "Debit": st.column_config.NumberColumn(format="$%d"),
+                                    "Notes": st.column_config.TextColumn(help="Add your trade notes here")
+                                },
+                                hide_index=True,
+                                use_container_width=True,
+                                key=f"editor_{strategy_name}"
                             )
+                            
+                            # Note: We can't update 'active_df' in real-time easily for the CSV export 
+                            # in this session without callbacks, but visually it works.
                         else:
                             st.info("No active trades.")
 
@@ -376,11 +393,10 @@ if uploaded_files:
                         if '🔴' in str(val): return 'color: red; font-weight: bold'
                         return ''
 
-                    # FIXED INDENTATION BUG HERE
                     def style_total(row):
                         if row['Strategy'] == 'TOTAL':
                             return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
-                        return [''] * len(row) 
+                        return [''] * len(row)
 
                     st.dataframe(
                         display_agg.style
@@ -469,10 +485,10 @@ if uploaded_files:
             
             an_tabs = st.tabs(["🚀 Efficiency", "⚔️ Head-to-Head", "🔥 Heatmap"])
             
-            # TAB 1: SCATTER
             with an_tabs[0]:
                 active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
                 if not active_sub.empty:
+                    st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
                     fig = px.scatter(
                         active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
                         hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
@@ -482,7 +498,6 @@ if uploaded_files:
                     fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
                     st.plotly_chart(fig, use_container_width=True)
 
-            # TAB 2: HEAD-TO-HEAD
             with an_tabs[1]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
@@ -496,7 +511,6 @@ if uploaded_files:
                 else:
                     st.info("No historical data available.")
 
-            # TAB 3: HEATMAP
             with an_tabs[2]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
@@ -532,7 +546,7 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v2.0 Enterprise | Last Updated: Dec 2025")
+        st.caption("Allantis Trade Guardian v2.0 Enterprise | Dec 2025")
         st.sidebar.divider()
         st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
