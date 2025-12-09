@@ -20,11 +20,11 @@ st.sidebar.divider()
 st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
-# --- FALLBACK CONSTANTS (Used only if no history file is dropped) ---
+# --- FALLBACK CONSTANTS ---
 STATIC_BASELINES = {
-    '130/160': 0.13, 
-    '160/190': 0.28,
-    'M200':    0.56
+    '130/160': {'yield': 0.13, 'pnl': 0, 'roi': 0, 'dit': 0},
+    '160/190': {'yield': 0.28, 'pnl': 0, 'roi': 0, 'dit': 0},
+    'M200':    {'yield': 0.56, 'pnl': 0, 'roi': 0, 'dit': 0}
 }
 
 # --- HELPER FUNCTIONS ---
@@ -167,15 +167,24 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # CALCULATE DYNAMIC TARGETS FROM HISTORY
+    # --- CALCULATE BENCHMARKS FROM HISTORY ---
+    # We want benchmarks based ONLY on Expired (Closed) trades.
     expired_df = df[df['Status'] == 'Expired']
-    dynamic_baselines = STATIC_BASELINES.copy()
+    
+    # Default to static, update if history exists
+    benchmarks = STATIC_BASELINES.copy()
     
     if not expired_df.empty:
-        # Calculate historical average daily yield per strategy
-        hist_stats = expired_df.groupby('Strategy')['Daily Yield %'].mean()
-        for strat, yield_val in hist_stats.items():
-            dynamic_baselines[strat] = yield_val
+        hist_grp = expired_df.groupby('Strategy')
+        for strat, grp in hist_grp:
+            # Filter for winners to get 'Ideal' targets? Or All? 
+            # Usually Benchmark = All closed trades to be realistic.
+            benchmarks[strat] = {
+                'yield': grp['Daily Yield %'].mean(),
+                'pnl': grp['P&L'].mean(),
+                'roi': grp['ROI'].mean(),
+                'dit': grp['Days Held'].mean()
+            }
             
     # TABS
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
@@ -192,7 +201,7 @@ if uploaded_files:
             
             st.divider()
             
-            # --- STRATEGY OVERVIEW ---
+            # STRATEGY OVERVIEW
             st.markdown("### 🏛️ Strategy Overview")
             
             strat_agg = active_df.groupby('Strategy').agg({
@@ -200,8 +209,9 @@ if uploaded_files:
                 'Name': 'count', 'Daily Yield %': 'mean' 
             }).reset_index()
             
-            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= dynamic_baselines.get(r['Strategy'], 0) else "🔴 Lagging", axis=1)
-            strat_agg['Target %'] = strat_agg['Strategy'].map(dynamic_baselines)
+            # Compare Current Yield vs Historical Benchmark Yield
+            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
+            strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
             
             total_row = pd.DataFrame({
                 'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
@@ -244,24 +254,20 @@ if uploaded_files:
             def render_strategy_table(strategy_name, label, icon):
                 subset = active_df[active_df['Strategy'] == strategy_name].copy()
                 
-                # Dynamic Header Metrics
-                count = len(subset)
-                avg_pnl = subset['P&L'].mean() if not subset.empty else 0
-                avg_roi = subset['ROI'].mean() if not subset.empty else 0
-                avg_dit = subset['Days Held'].mean() if not subset.empty else 0
-                avg_yield = subset['Daily Yield %'].mean() if not subset.empty else 0
-                target = dynamic_baselines.get(strategy_name, 0)
+                # GET HISTORICAL BENCHMARKS FOR HEADER
+                # Fallback to 0 if no history
+                bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                 
-                header_text = f"{icon} {label} | Avg P&L: ${avg_pnl:,.0f} ({avg_roi:.1f}%) | Avg DIT: {avg_dit:.0f}d | Yield: {avg_yield:.2f}%/d (Target: {target:.2f}%)"
+                header_text = f"{icon} {label} | Hist. Avg: ${bench['pnl']:,.0f} ({bench['roi']:.1f}%) | Avg Hold: {bench['dit']:.0f}d | Target Yield: {bench['yield']:.2f}%/d"
                 
-                with st.expander(header_text, expanded=(count > 0)):
+                with st.expander(header_text, expanded=(not subset.empty)):
                     if not subset.empty:
                         sum_row = pd.DataFrame({
                             'Name': ['TOTAL / AVG'], 'Grade': [''],
-                            'Daily Yield %': [avg_yield],
+                            'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Debit/Lot': [subset['Debit/Lot'].mean()],
-                            'Days Held': [avg_dit],
+                            'Days Held': [subset['Days Held'].mean()],
                             'Delta': [subset['Delta'].sum()], 'Gamma': [subset['Gamma'].sum()],
                             'Theta': [subset['Theta'].sum()], 'Vega': [subset['Vega'].sum()],
                             'Alerts': ['']
@@ -279,7 +285,7 @@ if uploaded_files:
                             use_container_width=True
                         )
                     else:
-                        st.info(f"No active trades for {strategy_name}")
+                        st.info(f"No active trades. (Historical Target: {bench['yield']:.2f}%/d)")
 
             render_strategy_table('130/160', "130/160 Strategies", "🔹")
             render_strategy_table('160/190', "160/190 Strategies", "🔸")
@@ -343,8 +349,8 @@ if uploaded_files:
                 )
                 
                 # Dynamic Baseline Lines
-                y_130 = dynamic_baselines.get('130/160', 0.13)
-                y_m200 = dynamic_baselines.get('M200', 0.56)
+                y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
+                y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
                 
                 fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
                 fig.add_hline(y=y_m200, line_dash="dash", line_color="green", annotation_text=f"M200 Target ({y_m200:.2f}%)")
@@ -399,4 +405,4 @@ if uploaded_files:
         """)
 
 else:
-    st.info("👋 Upload Active & Expired files to begin.")
+    st.info("👋 Upload TODAY'S Active file to see health.")
