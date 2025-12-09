@@ -21,8 +21,7 @@ st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
 # --- FALLBACK CONSTANTS ---
-# Used if no history file is present
-STATIC_BENCHMARKS = {
+STATIC_BASELINES = {
     '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
     '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
     'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41}
@@ -48,37 +47,30 @@ def safe_fmt(val, fmt_str):
 
 # --- SMART EXIT ENGINE ---
 def get_action_signal(strat, status, days_held, pnl, benchmark_pnl):
-    """
-    Generates actionable signals based on rules + historical benchmarks.
-    """
     action = ""
-    signal_type = "NONE" # NONE, INFO, WARNING, SUCCESS
+    signal_type = "NONE" 
     
     if status == "Active":
-        # 1. TAKE PROFIT RULE (Dynamic)
-        # If P&L is > Historical Average (or static target if history missing)
+        # 1. TAKE PROFIT RULE
         target = benchmark_pnl if benchmark_pnl > 0 else STATIC_BENCHMARKS.get(strat, {}).get('pnl', 9999)
         if pnl >= target:
-            return f"🟢 TAKE PROFIT (Hit ${target:,.0f})", "SUCCESS"
+            return f"TAKE PROFIT (Hit ${target:,.0f})", "SUCCESS"
 
         # 2. STRATEGY SPECIFIC RULES
         if strat == '130/160':
-            # Kill Rule: >25 Days and flat
             if 25 <= days_held <= 35 and pnl < 100:
-                return "🔴 KILL (Stale >25d)", "ERROR"
+                return "KILL (Stale >25d)", "ERROR"
             
         elif strat == '160/190':
-            # Patience Rule
             if days_held < 30:
-                return "⏳ COOKING (Do Not Touch)", "INFO"
+                return "COOKING (Do Not Touch)", "INFO"
             elif 30 <= days_held <= 40:
-                return "👀 WATCH (Entering Profit Zone)", "WARNING"
+                return "WATCH (Profit Zone)", "WARNING"
 
         elif strat == 'M200':
-            # U-Turn Check
             if 12 <= days_held <= 16:
-                if pnl > 200: return "✨ DAY 14 CHECK (Green=Roll)", "SUCCESS"
-                else: return "🔒 DAY 14 CHECK (Red=Hold)", "WARNING"
+                if pnl > 200: return "DAY 14 CHECK (Green)", "SUCCESS"
+                else: return "DAY 14 CHECK (Red)", "WARNING"
                 
     return action, signal_type
 
@@ -206,17 +198,16 @@ if uploaded_files:
     
     # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
-    benchmarks = STATIC_BENCHMARKS.copy()
+    benchmarks = STATIC_BASELINES.copy()
     
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
-            # Filter for winners only for P&L targets
             winners = grp[grp['P&L'] > 0]
             if not winners.empty:
                 benchmarks[strat] = {
                     'yield': grp['Daily Yield %'].mean(),
-                    'pnl': winners['P&L'].mean(), # Target Avg Win
+                    'pnl': winners['P&L'].mean(),
                     'roi': winners['ROI'].mean(),
                     'dit': winners['Days Held'].mean()
                 }
@@ -229,9 +220,7 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            # --- ACTION CENTER (TOP PRIORITY) ---
-            
-            # Apply Action Logic using Benchmarks
+            # --- ACTION LOGIC ---
             def apply_action(row):
                 bench = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
                 act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], bench)
@@ -239,108 +228,102 @@ if uploaded_files:
 
             active_df[['Action', 'Signal_Type']] = active_df.apply(apply_action, axis=1)
             
-            # Filter for Urgent Actions
+            # ACTION CENTER (TOP)
             urgent = active_df[active_df['Action'] != ""]
-            
             if not urgent.empty:
                 st.markdown("### 🚨 Action Center")
-                c1, c2, c3 = st.columns([1, 4, 1]) # Layout spacing
-                
+                # Using columns to organize alerts nicely
                 for _, row in urgent.iterrows():
                     sig = row['Signal_Type']
-                    msg = f"**{row['Name']}** ({row['Strategy']}): {row['Action']}"
+                    # High contrast styling for alerts
+                    if sig == "SUCCESS": 
+                        st.success(f"**{row['Name']}**: {row['Action']}")
+                    elif sig == "ERROR": 
+                        st.error(f"**{row['Name']}**: {row['Action']}")
+                    elif sig == "WARNING": 
+                        st.warning(f"**{row['Name']}**: {row['Action']}")
+                    else: 
+                        st.info(f"**{row['Name']}**: {row['Action']}")
+                st.divider()
+
+            # --- STRATEGY TABS (VERTICAL SCROLL FIX) ---
+            st.markdown("### 🏛️ Active Trades by Strategy")
+            
+            # Sub-Tabs for compactness
+            strat_tabs = st.tabs(["🔹 130/160", "🔸 160/190", "🐳 M200", "📋 Summary"])
+            
+            # Common Styling Function (High Contrast)
+            def style_table(styler):
+                return styler.applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
+                                       else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
+                                       else '', subset=['Action']) \
+                             .applymap(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
+                                       else 'color: #842029; font-weight: bold' if 'F' in str(v) 
+                                       else '', subset=['Grade'])
+
+            cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega']
+
+            # Helper to render table
+            def render_tab(tab, strategy_name):
+                with tab:
+                    subset = active_df[active_df['Strategy'] == strategy_name].copy()
+                    bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                     
-                    if sig == "SUCCESS": st.success(msg)
-                    elif sig == "ERROR": st.error(msg)
-                    elif sig == "WARNING": st.warning(msg)
-                    else: st.info(msg)
-            
-            st.divider()
-            
-            # --- STRATEGY OVERVIEW ---
-            st.markdown("### 🏛️ Strategy Overview")
-            
-            strat_agg = active_df.groupby('Strategy').agg({
-                'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
-                'Name': 'count', 'Daily Yield %': 'mean' 
-            }).reset_index()
-            
-            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
-            strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
-            
-            total_row = pd.DataFrame({
-                'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
-                'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
-                'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
-                'Trend': ['-'], 'Target %': ['-']
-            })
-            
-            final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
-            
-            display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Theta', 'Delta', 'Name']].copy()
-            display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']
-            
-            def highlight_trend(val):
-                if '🟢' in str(val): return 'color: green; font-weight: bold'
-                if '🔴' in str(val): return 'color: red; font-weight: bold'
-                return ''
-
-            def style_total(row):
-                if row['Strategy'] == 'TOTAL':
-                    return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(
-                display_agg.style
-                .format({
-                    'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
-                    'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
-                })
-                .applymap(highlight_trend, subset=['Trend'])
-                .apply(style_total, axis=1), 
-                use_container_width=True
-            )
-            
-            st.divider()
-            st.markdown("### 📋 Trade Details (By Strategy)")
-            
-            disp_cols = ['Name', 'Action', 'Grade', 'P&L', 'Debit', 'Days Held', 'Daily Yield %', 'Delta', 'Gamma', 'Theta', 'Vega']
-            
-            def render_strategy_table(strategy_name, label, icon):
-                subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                
-                bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
-                
-                header_text = f"{icon} {label} | Hist. Avg Win: ${bench['pnl']:,.0f} | Avg Hold: {bench['dit']:.0f}d | Target Yield: {bench['yield']:.2f}%/d"
-                
-                with st.expander(header_text, expanded=(not subset.empty)):
+                    # Benchmark Header
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
+                    c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
+                    c3.metric("Avg Hold", f"{bench['dit']:.0f}d")
+                    
                     if not subset.empty:
+                        # Total Row
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL / AVG'], 'Action': [''], 'Grade': [''],
+                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Days Held': [subset['Days Held'].mean()],
-                            'Delta': [subset['Delta'].sum()], 'Gamma': [subset['Gamma'].sum()],
-                            'Theta': [subset['Theta'].sum()], 'Vega': [subset['Vega'].sum()],
+                            'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
+                            'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()]
                         })
-                        display_subset = pd.concat([subset[disp_cols], sum_row], ignore_index=True)
+                        display = pd.concat([subset[cols], sum_row], ignore_index=True)
                         
                         st.dataframe(
-                            display_subset.style.format({
-                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 
-                                'Days Held': "{:.0f}", 'Daily Yield %': "{:.2f}%", 'Vega': "{:.0f}"
+                            style_table(display.style)
+                            .format({
+                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%",
+                                'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
+                                'Days Held': "{:.0f}"
                             })
-                            .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display_subset)-1 else '' for _ in x], axis=1)
-                            .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade'])
-                            .apply(lambda x: ['background-color: #d4edda; font-weight: bold' if 'TAKE PROFIT' in str(v) else 'background-color: #f8d7da; font-weight: bold' if 'KILL' in str(v) else '' for v in x], subset=['Action']),
-                            use_container_width=True
+                            .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
+                            use_container_width=True, height=400
                         )
                     else:
-                        st.info(f"No active trades. (Target P&L: ${bench['pnl']:,.0f})")
+                        st.info("No active trades.")
 
-            render_strategy_table('130/160', "130/160 Strategies", "🔹")
-            render_strategy_table('160/190', "160/190 Strategies", "🔸")
-            render_strategy_table('M200', "M200 Strategies", "🐳")
+            render_tab(strat_tabs[0], '130/160')
+            render_tab(strat_tabs[1], '160/190')
+            render_tab(strat_tabs[2], 'M200')
+            
+            # Summary Tab
+            with strat_tabs[3]:
+                # Strategy Overview Table
+                strat_agg = active_df.groupby('Strategy').agg({
+                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Name': 'count'
+                }).reset_index()
+                
+                # Total Row
+                tot = pd.DataFrame({
+                    'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
+                    'Debit': [strat_agg['Debit'].sum()], 'Theta': [strat_agg['Theta'].sum()],
+                    'Name': [strat_agg['Name'].sum()]
+                })
+                agg_final = pd.concat([strat_agg, tot], ignore_index=True)
+                
+                st.dataframe(
+                    agg_final.style.format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Theta': "{:.0f}"})
+                    .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(agg_final)-1 else '' for _ in x], axis=1),
+                    use_container_width=True
+                )
 
     # 2. VALIDATOR
     with tab2:
@@ -386,25 +369,13 @@ if uploaded_files:
             
             active_df = df[df['Status'] == 'Active'].copy()
             if not active_df.empty:
-                st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
-                st.caption("Are your trades gaining momentum or stalling? Look for the 'Dip Valley' around Day 15-25.")
-                
+                st.markdown("#### 🚀 Capital Efficiency Curve")
                 fig = px.scatter(
-                    active_df, 
-                    x='Days Held', 
-                    y='Daily Yield %', 
-                    color='Strategy', 
-                    size='Debit',
-                    hover_data=['Name', 'P&L'],
-                    title="Real-Time Efficiency: Yield vs Age"
+                    active_df, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
+                    hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
                 )
-                
-                # Dynamic Baseline Lines
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
-                y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
-                
-                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
-                fig.add_hline(y=y_m200, line_dash="dash", line_color="green", annotation_text=f"M200 Target ({y_m200:.2f}%)")
+                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"Target ({y_130:.2f}%)")
                 st.plotly_chart(fig, use_container_width=True)
 
             expired_df = df[df['Status'] == 'Expired'].copy()
@@ -418,13 +389,7 @@ if uploaded_files:
                 c3.metric("Trades Analyzed", len(expired_df))
                 
                 st.plotly_chart(
-                    px.scatter(
-                        expired_df, 
-                        x='Debit/Lot', 
-                        y='P&L', 
-                        color='Strategy', 
-                        title="Winning Zone: Entry Price vs Profit"
-                    ), 
+                    px.scatter(expired_df, x='Debit/Lot', y='P&L', color='Strategy', title="Winning Zone: Entry Price vs Profit"), 
                     use_container_width=True
                 )
             else:
