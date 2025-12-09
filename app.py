@@ -67,7 +67,6 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
         benchmark = benchmarks_dict.get(strat, {})
         base_target = benchmark.get('pnl', 0)
         
-        # Fallback to static if dynamic benchmark is missing/zero
         if base_target == 0: 
             base_target = BASE_CONFIG.get(strat, {}).get('pnl', 9999)
             
@@ -225,27 +224,21 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- CALCULATE BENCHMARKS (ROBUST MERGE) ---
+    # --- CALCULATE BENCHMARKS (ROBUST) ---
     expired_df = df[df['Status'] == 'Expired']
-    
-    # 1. Start with hardcoded defaults
     benchmarks = BASE_CONFIG.copy()
     
-    # 2. Update with real history ONLY if valid
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
             if not winners.empty:
-                # Calculate real stats
-                real_pnl = winners['P&L'].mean()
-                real_yield = grp['Daily Yield %'].mean()
-                real_dit = winners['Days Held'].mean()
-                
-                # Update specific keys, keep defaults if calc fails (e.g. 0)
-                if real_pnl > 0: benchmarks[strat]['pnl'] = real_pnl
-                if real_yield != 0: benchmarks[strat]['yield'] = real_yield
-                if real_dit > 0: benchmarks[strat]['dit'] = real_dit
+                benchmarks[strat] = {
+                    'yield': grp['Daily Yield %'].mean(),
+                    'pnl': winners['P&L'].mean(),
+                    'roi': winners['ROI'].mean(),
+                    'dit': winners['Days Held'].mean()
+                }
             
     # TABS
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
@@ -286,16 +279,7 @@ if uploaded_files:
                 
                 strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
                 
-                # STYLING
-                def style_table(styler):
-                    styler.applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
-                                           else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
-                                           else '', subset=['Action'])
-                    styler.applymap(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
-                                           else 'color: #842029; font-weight: bold' if 'F' in str(v) 
-                                           else '', subset=['Grade'])
-                    return styler
-
+                # COLUMNS
                 cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
 
                 def render_tab(tab, strategy_name):
@@ -318,23 +302,46 @@ if uploaded_files:
                                 else: st.info(msg)
                             st.divider()
 
-                        c1, c2, c3 = st.columns(3)
+                        # 4-COLUMN METRIC HEADER
+                        c1, c2, c3, c4 = st.columns(4)
                         c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
-                        c2.metric("Target Profit", f"${target_disp:,.0f}")
-                        c3.metric("Avg Hold", f"{bench['dit']:.0f}d")
+                        c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
+                        c3.metric("Target Profit", f"${target_disp:,.0f}")
+                        c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
                         
                         if not subset.empty:
-                            edited_df = st.data_editor(
-                                subset[cols],
-                                column_config={
-                                    "Daily Yield %": st.column_config.NumberColumn(format="%.2f%%"),
-                                    "P&L": st.column_config.NumberColumn(format="$%d"),
-                                    "Debit": st.column_config.NumberColumn(format="$%d"),
-                                    "Notes": st.column_config.TextColumn(help="Add notes"),
-                                },
-                                hide_index=True,
-                                use_container_width=True,
-                                key=f"editor_{strategy_name}"
+                            # CREATE TOTAL ROW
+                            sum_row = pd.DataFrame({
+                                'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
+                                'Daily Yield %': [subset['Daily Yield %'].mean()],
+                                'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
+                                'Days Held': [subset['Days Held'].mean()],
+                                'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
+                                'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()],
+                                'Notes': ['']
+                            })
+                            
+                            # Append Total to Subset for Display
+                            display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                            
+                            # RENDER WITH STYLING
+                            st.dataframe(
+                                display_df.style
+                                .format({
+                                    'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%",
+                                    'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
+                                    'Days Held': "{:.0f}"
+                                })
+                                # COLOR CODING (RESTORED APPLYMAP)
+                                .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
+                                                       else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
+                                                       else '', subset=['Action'])
+                                .applymap(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
+                                                       else 'color: #842029; font-weight: bold' if 'F' in str(v) 
+                                                       else '', subset=['Grade'])
+                                # TOTAL ROW HIGHLIGHT
+                                .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
+                                use_container_width=True
                             )
                         else:
                             st.info("No active trades.")
@@ -381,7 +388,7 @@ if uploaded_files:
 
                     def style_total(row):
                         if row['Strategy'] == 'TOTAL':
-                            return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
+                            return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row)
                         return [''] * len(row)
 
                     st.dataframe(
@@ -546,7 +553,7 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v33.0 | Final Enterprise Edition")
+        st.caption("Allantis Trade Guardian v34.0 | Final Enterprise Edition")
         st.sidebar.divider()
         st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
