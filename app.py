@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import io
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
 
 # --- PAGE CONFIG ---
@@ -278,7 +279,7 @@ if uploaded_files:
                 
                 strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
                 
-                # STYLING FIX: Reverted to applymap for compatibility
+                # STYLING (Safe Applymap)
                 def style_table(styler):
                     styler.applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
                                            else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
@@ -476,14 +477,14 @@ if uploaded_files:
                     fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
                     st.plotly_chart(fig, use_container_width=True)
 
-            # 2. PNL VS DIT (RESTORED)
+            # 2. PNL VS DIT (RESTORED, SAFE MODE)
             with an_tabs[1]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
                     st.markdown("#### ⏳ Time vs Money (Do longer trades make more?)")
                     fig = px.scatter(
                         expired_sub, x='Days Held', y='P&L', color='Strategy',
-                        size='Debit', hover_data=['Name'], trendline="ols",
+                        size='Debit', hover_data=['Name'],
                         title="P&L vs Days Held"
                     )
                     st.plotly_chart(fig, use_container_width=True)
@@ -538,7 +539,7 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v31.0 | Final Enterprise Edition")
+        st.caption("Allantis Trade Guardian v32.0 | Final Enterprise Edition")
         st.sidebar.divider()
         st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
