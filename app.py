@@ -20,8 +20,7 @@ st.sidebar.divider()
 st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
-# --- CONSTANTS: HISTORICAL BASELINES (From Deep Analysis) ---
-# Used to determine if current performance is Improving or Lagging
+# --- CONSTANTS: HISTORICAL BASELINES ---
 HISTORICAL_BASELINES = {
     '130/160': 0.13, # % per day
     '160/190': 0.28,
@@ -110,9 +109,9 @@ def process_data(files):
                             end_dt = datetime.now()
                             
                         days_held = (end_dt - start_dt).days
-                        if days_held < 1: days_held = 1 # Min 1 day for math
+                        if days_held < 1: days_held = 1 
 
-                        # EFFICIENCY METRICS (New)
+                        # EFFICIENCY METRICS
                         roi = (pnl / debit * 100) if debit > 0 else 0
                         daily_yield = roi / days_held
 
@@ -182,30 +181,24 @@ if uploaded_files:
             
             st.divider()
             
-            # --- STRATEGY OVERVIEW (WITH TRENDS) ---
+            # --- STRATEGY OVERVIEW ---
             st.markdown("### 🏛️ Strategy Overview")
             
-            # Aggregate
+            # 1. Group Data
             strat_agg = active_df.groupby('Strategy').agg({
                 'P&L': 'sum',
-                'Debit': 'sum', # For weighted avg calc
+                'Debit': 'sum',
                 'Theta': 'sum',
                 'Delta': 'sum',
                 'Name': 'count',
-                'Daily Yield %': 'mean' # Simple average of yields
+                'Daily Yield %': 'mean' 
             }).reset_index()
             
-            # Trend Logic
-            def get_trend(row):
-                base = HISTORICAL_BASELINES.get(row['Strategy'], 0)
-                curr = row['Daily Yield %']
-                if curr >= base: return "🟢 Improving"
-                return "🔴 Lagging"
-
-            strat_agg['Trend'] = strat_agg.apply(get_trend, axis=1)
+            # 2. Add Logic Cols
+            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= HISTORICAL_BASELINES.get(r['Strategy'], 0) else "🔴 Lagging", axis=1)
             strat_agg['Target %'] = strat_agg['Strategy'].map(HISTORICAL_BASELINES)
             
-            # Total Row
+            # 3. Add Total Row
             total_row = pd.DataFrame({
                 'Strategy': ['TOTAL'],
                 'P&L': [strat_agg['P&L'].sum()],
@@ -219,10 +212,13 @@ if uploaded_files:
             
             final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
             
-            # Rename for display
-            display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']].copy()
-            display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Trades']
+            # 4. FIX: Select Columns using ORIGINAL names first, THEN rename
+            # The columns in final_agg are: Strategy, P&L, Debit, Theta, Delta, Name, Daily Yield %, Trend, Target %
             
+            display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Theta', 'Delta', 'Name']].copy()
+            display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']
+            
+            # Styling
             def highlight_trend(val):
                 if '🟢' in str(val): return 'color: green; font-weight: bold'
                 if '🔴' in str(val): return 'color: red; font-weight: bold'
@@ -244,13 +240,14 @@ if uploaded_files:
             st.divider()
             st.markdown("### 📋 Trade Details (By Strategy)")
             
-            # Columns (Added Daily Yield)
+            # Columns to Display
             disp_cols = ['Name', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
             
             def render_strategy_table(strategy_name, label):
                 subset = active_df[active_df['Strategy'] == strategy_name].copy()
                 if not subset.empty:
                     with st.expander(f"{label} ({len(subset)} Trades)", expanded=True):
+                        # Summary Row
                         sum_row = pd.DataFrame({
                             'Name': ['TOTAL / AVG'], 'Grade': [''],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
@@ -322,7 +319,6 @@ if uploaded_files:
         if not df.empty:
             st.subheader("📈 Analytics & Trends")
             
-            # ACTIVE VS AGE (Efficiency Curve)
             active_df = df[df['Status'] == 'Active'].copy()
             if not active_df.empty:
                 st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
@@ -346,7 +342,6 @@ if uploaded_files:
             if not expired_df.empty:
                 st.divider()
                 st.markdown("#### 🏆 Historical Performance")
-                # Summary Stats
                 c1, c2, c3 = st.columns(3)
                 win_rate = (len(expired_df[expired_df['P&L'] > 0]) / len(expired_df)) * 100
                 c1.metric("Win Rate", f"{win_rate:.1f}%")
