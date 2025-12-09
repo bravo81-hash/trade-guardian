@@ -212,6 +212,12 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
+    # --- VALIDATION WARNINGS ---
+    if not df.empty:
+        unknowns = df[df['Strategy'] == 'Other']
+        if not unknowns.empty:
+            st.sidebar.warning(f"ℹ️ {len(unknowns)} trades have 'Other' strategy.")
+
     # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
     benchmarks = STATIC_BASELINES.copy()
@@ -329,7 +335,7 @@ if uploaded_files:
 
                 # TAB 1: OVERVIEW
                 with strat_tabs[0]:
-                    # Risk Metrics Dashboard (NEW)
+                    # Risk Metrics Dashboard
                     with st.expander("📊 Portfolio Risk Metrics", expanded=True):
                         total_delta = active_df['Delta'].sum()
                         total_theta = active_df['Theta'].sum()
@@ -370,10 +376,11 @@ if uploaded_files:
                         if '🔴' in str(val): return 'color: red; font-weight: bold'
                         return ''
 
+                    # FIXED INDENTATION BUG HERE
                     def style_total(row):
                         if row['Strategy'] == 'TOTAL':
                             return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
-                        return [''] * len(row) # Fixed Indentation here
+                        return [''] * len(row) 
 
                     st.dataframe(
                         display_agg.style
@@ -387,7 +394,7 @@ if uploaded_files:
                         use_container_width=True
                     )
                     
-                    # CSV Export (NEW)
+                    # CSV Export
                     csv = active_df.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Active Trades CSV", csv, "active_snapshot.csv", "text/csv")
 
@@ -446,7 +453,6 @@ if uploaded_files:
         if not df.empty:
             st.subheader("📈 Analytics & Trends")
             
-            # --- DATE FILTER ---
             if 'Entry Date' in df.columns:
                 min_date = df['Entry Date'].min()
                 max_date = df['Entry Date'].max()
@@ -461,10 +467,9 @@ if uploaded_files:
             else:
                 filtered_df = df
             
-            # --- TABS FOR ANALYTICS ---
             an_tabs = st.tabs(["🚀 Efficiency", "⚔️ Head-to-Head", "🔥 Heatmap"])
             
-            # TAB 1: EFFICIENCY SCATTER
+            # TAB 1: SCATTER
             with an_tabs[0]:
                 active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
                 if not active_sub.empty:
@@ -472,11 +477,12 @@ if uploaded_files:
                         active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
                         hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
                     )
+                    y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
+                    y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
+                    fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
                     st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("No active data for chart.")
 
-            # TAB 2: HEAD TO HEAD (NEW)
+            # TAB 2: HEAD-TO-HEAD
             with an_tabs[1]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
@@ -490,7 +496,7 @@ if uploaded_files:
                 else:
                     st.info("No historical data available.")
 
-            # TAB 3: HEATMAP (NEW)
+            # TAB 3: HEATMAP
             with an_tabs[2]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
@@ -526,7 +532,9 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v28.0 | Enterprise Edition")
+        st.caption("Allantis Trade Guardian v2.0 Enterprise | Last Updated: Dec 2025")
+        st.sidebar.divider()
+        st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
 else:
     st.info("👋 Upload TODAY'S Active file to see health.")
