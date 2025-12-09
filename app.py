@@ -228,13 +228,7 @@ if uploaded_files:
 
             active_df[['Action', 'Signal_Type']] = active_df.apply(apply_action, axis=1)
             
-            # --- TOP METRICS ---
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Active Trades", len(active_df))
-            c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}")
-            c3.metric("Open P&L", f"${active_df['P&L'].sum():,.0f}")
-            
-            st.divider()
+            # --- STRATEGY TABS ---
             st.markdown("### 🏛️ Active Trades by Strategy")
             
             # Sub-Tabs
@@ -267,7 +261,8 @@ if uploaded_files:
                             elif sig == "ERROR": st.error(msg)
                             elif sig == "WARNING": st.warning(msg)
                             else: st.info(msg)
-                        st.divider()
+                    
+                    st.divider()
 
                     # 2. METRICS HEADER
                     c1, c2, c3 = st.columns(3)
