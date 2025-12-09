@@ -67,6 +67,7 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
         benchmark = benchmarks_dict.get(strat, {})
         base_target = benchmark.get('pnl', 0)
         
+        # Fallback to static if dynamic benchmark is missing/zero
         if base_target == 0: 
             base_target = BASE_CONFIG.get(strat, {}).get('pnl', 9999)
             
@@ -224,21 +225,27 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- CALCULATE BENCHMARKS ---
+    # --- CALCULATE BENCHMARKS (ROBUST MERGE) ---
     expired_df = df[df['Status'] == 'Expired']
+    
+    # 1. Start with hardcoded defaults
     benchmarks = BASE_CONFIG.copy()
     
+    # 2. Update with real history ONLY if valid
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
             if not winners.empty:
-                benchmarks[strat] = {
-                    'yield': grp['Daily Yield %'].mean(),
-                    'pnl': winners['P&L'].mean(),
-                    'roi': winners['ROI'].mean(),
-                    'dit': winners['Days Held'].mean()
-                }
+                # Calculate real stats
+                real_pnl = winners['P&L'].mean()
+                real_yield = grp['Daily Yield %'].mean()
+                real_dit = winners['Days Held'].mean()
+                
+                # Update specific keys, keep defaults if calc fails (e.g. 0)
+                if real_pnl > 0: benchmarks[strat]['pnl'] = real_pnl
+                if real_yield != 0: benchmarks[strat]['yield'] = real_yield
+                if real_dit > 0: benchmarks[strat]['dit'] = real_dit
             
     # TABS
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
@@ -279,7 +286,7 @@ if uploaded_files:
                 
                 strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
                 
-                # STYLING (Safe Applymap)
+                # STYLING
                 def style_table(styler):
                     styler.applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
                                            else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
@@ -294,7 +301,7 @@ if uploaded_files:
                 def render_tab(tab, strategy_name):
                     with tab:
                         subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                        bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
+                        bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                         
                         target_disp = bench['pnl'] * regime_mult
                         
@@ -477,7 +484,7 @@ if uploaded_files:
                     fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
                     st.plotly_chart(fig, use_container_width=True)
 
-            # 2. PNL VS DIT (RESTORED, SAFE MODE)
+            # 2. PNL VS DIT (SAFE MODE)
             with an_tabs[1]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
@@ -539,7 +546,7 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v32.0 | Final Enterprise Edition")
+        st.caption("Allantis Trade Guardian v33.0 | Final Enterprise Edition")
         st.sidebar.divider()
         st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
