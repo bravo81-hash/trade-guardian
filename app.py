@@ -18,26 +18,15 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 st.sidebar.divider()
-st.sidebar.header("⚙️ Strategy Settings")
-market_regime = st.sidebar.selectbox(
-    "Current Market Regime", 
-    ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"],
-    index=0
-)
-
+st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
-# --- CONFIGURATION ---
-BASE_CONFIG = {
+# --- FALLBACK CONSTANTS ---
+STATIC_BASELINES = {
     '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
     '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
     'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41}
 }
-
-# Regime Multiplier
-regime_mult = 1.0
-if "Bullish" in market_regime: regime_mult = 1.10
-if "Bearish" in market_regime: regime_mult = 0.90
 
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name):
@@ -65,15 +54,12 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
     if status == "Active":
         # 1. TAKE PROFIT RULE
         benchmark = benchmarks_dict.get(strat, {})
-        base_target = benchmark.get('pnl', 0)
-        
-        if base_target == 0: 
-            base_target = BASE_CONFIG.get(strat, {}).get('pnl', 9999)
+        target = benchmark.get('pnl', 0)
+        if target == 0: 
+            target = STATIC_BASELINES.get(strat, {}).get('pnl', 9999)
             
-        final_target = base_target * regime_mult
-            
-        if pnl >= final_target:
-            return f"TAKE PROFIT (Hit ${final_target:,.0f})", "SUCCESS"
+        if pnl >= target:
+            return f"TAKE PROFIT (Hit ${target:,.0f})", "SUCCESS"
 
         # 2. STRATEGY SPECIFIC RULES
         if strat == '130/160':
@@ -173,6 +159,7 @@ def process_data(files):
                         days_held = (end_dt - start_dt).days
                         if days_held < 1: days_held = 1 
 
+                        # METRICS
                         roi = (pnl / debit * 100) if debit > 0 else 0
                         daily_yield = roi / days_held
 
@@ -208,11 +195,12 @@ def process_data(files):
                             "Grade": grade, "Reason": reason, "Alerts": " ".join(alerts), 
                             "Days Held": days_held, "Daily Yield %": daily_yield, "ROI": roi,
                             "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta,
-                            "Entry Date": start_dt,
-                            "Notes": "" 
+                            "Entry Date": start_dt
                         })
-        except Exception: pass 
-    
+        
+        except Exception:
+            pass 
+            
     df = pd.DataFrame(all_data)
     if not df.empty:
         df = df.sort_values(by=['Name', 'Days Held'], ascending=[True, False])
@@ -224,9 +212,15 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- CALCULATE BENCHMARKS (ROBUST) ---
+    # --- VALIDATION WARNINGS ---
+    if not df.empty:
+        unknowns = df[df['Strategy'] == 'Other']
+        if not unknowns.empty:
+            st.sidebar.warning(f"ℹ️ {len(unknowns)} trades have 'Other' strategy.")
+
+    # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
-    benchmarks = BASE_CONFIG.copy()
+    benchmarks = STATIC_BASELINES.copy()
     
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
@@ -251,7 +245,7 @@ if uploaded_files:
             if active_df.empty:
                 st.info("📭 No active trades found. Upload a current Active File.")
             else:
-                # --- PORTFOLIO HEALTH ---
+                # --- PORTFOLIO HEALTH SIDEBAR ---
                 port_yield = active_df['Daily Yield %'].mean()
                 if port_yield < 0.10:
                     st.sidebar.error(f"🚨 Yield Critical: {port_yield:.2f}%")
@@ -279,17 +273,23 @@ if uploaded_files:
                 
                 strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
                 
-                # COLUMNS
-                cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+                # Styles
+                def style_table(styler):
+                    return styler.map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
+                                           else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
+                                           else '', subset=['Action']) \
+                                 .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
+                                           else 'color: #842029; font-weight: bold' if 'F' in str(v) 
+                                           else '', subset=['Grade'])
+
+                cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega']
 
                 def render_tab(tab, strategy_name):
                     with tab:
                         subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                        bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
+                        bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                         
-                        target_disp = bench['pnl'] * regime_mult
-                        
-                        # LOCAL ALERTS
+                        # ALERTS (LOCALIZED)
                         urgent = subset[subset['Action'] != ""]
                         if not urgent.empty:
                             st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -302,61 +302,51 @@ if uploaded_files:
                                 else: st.info(msg)
                             st.divider()
 
-                        # 4-COLUMN METRIC HEADER
-                        c1, c2, c3, c4 = st.columns(4)
+                        # METRICS
+                        c1, c2, c3 = st.columns(3)
                         c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
                         c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
-                        c3.metric("Target Profit", f"${target_disp:,.0f}")
-                        c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
+                        c3.metric("Avg Hold", f"{bench['dit']:.0f}d")
                         
+                        # TABLE
                         if not subset.empty:
-                            # CREATE TOTAL ROW
                             sum_row = pd.DataFrame({
                                 'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
                                 'Daily Yield %': [subset['Daily Yield %'].mean()],
                                 'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                                 'Days Held': [subset['Days Held'].mean()],
                                 'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
-                                'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()],
-                                'Notes': ['']
+                                'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()]
                             })
+                            display = pd.concat([subset[cols], sum_row], ignore_index=True)
                             
-                            # Append Total to Subset for Display
-                            display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
-                            
-                            # RENDER WITH STYLING
                             st.dataframe(
-                                display_df.style
+                                style_table(display.style)
                                 .format({
                                     'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%",
                                     'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
                                     'Days Held': "{:.0f}"
                                 })
-                                # COLOR CODING (RESTORED APPLYMAP)
-                                .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
-                                                       else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
-                                                       else '', subset=['Action'])
-                                .applymap(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
-                                                       else 'color: #842029; font-weight: bold' if 'F' in str(v) 
-                                                       else '', subset=['Grade'])
-                                # TOTAL ROW HIGHLIGHT
-                                .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
-                                use_container_width=True
+                                .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
+                                use_container_width=True, height=400
                             )
                         else:
                             st.info("No active trades.")
 
                 # TAB 1: OVERVIEW
                 with strat_tabs[0]:
+                    # Risk Metrics Dashboard
                     with st.expander("📊 Portfolio Risk Metrics", expanded=True):
                         total_delta = active_df['Delta'].sum()
                         total_theta = active_df['Theta'].sum()
                         total_cap = active_df['Debit'].sum()
+                        
                         r1, r2, r3 = st.columns(3)
-                        r1.metric("Net Delta", f"{total_delta:,.1f}", delta="Bullish" if total_delta > 0 else "Bearish")
-                        r2.metric("Daily Theta", f"${total_theta:,.0f}")
-                        r3.metric("Capital at Risk", f"${total_cap:,.0f}")
+                        r1.metric("Net Portfolio Delta", f"{total_delta:,.1f}", delta="Bullish" if total_delta > 0 else "Bearish")
+                        r2.metric("Daily Theta Income", f"${total_theta:,.0f}")
+                        r3.metric("Capital Deployment", f"${total_cap:,.0f}")
 
+                    # Aggregation
                     strat_agg = active_df.groupby('Strategy').agg({
                         'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
                         'Name': 'count', 'Daily Yield %': 'mean' 
@@ -386,10 +376,11 @@ if uploaded_files:
                         if '🔴' in str(val): return 'color: red; font-weight: bold'
                         return ''
 
+                    # FIXED INDENTATION BUG HERE
                     def style_total(row):
                         if row['Strategy'] == 'TOTAL':
-                            return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row)
-                        return [''] * len(row)
+                            return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
+                        return [''] * len(row) 
 
                     st.dataframe(
                         display_agg.style
@@ -398,11 +389,12 @@ if uploaded_files:
                             'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
                             'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
                         })
-                        .applymap(highlight_trend, subset=['Trend'])
+                        .map(highlight_trend, subset=['Trend'])
                         .apply(style_total, axis=1), 
                         use_container_width=True
                     )
                     
+                    # CSV Export
                     csv = active_df.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Active Trades CSV", csv, "active_snapshot.csv", "text/csv")
 
@@ -475,13 +467,12 @@ if uploaded_files:
             else:
                 filtered_df = df
             
-            an_tabs = st.tabs(["🚀 Efficiency", "⏳ Time vs Money", "⚔️ Head-to-Head", "🔥 Heatmap"])
+            an_tabs = st.tabs(["🚀 Efficiency", "⚔️ Head-to-Head", "🔥 Heatmap"])
             
-            # 1. YIELD SCATTER
+            # TAB 1: SCATTER
             with an_tabs[0]:
                 active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
                 if not active_sub.empty:
-                    st.markdown("#### 🚀 Yield Efficiency (Active)")
                     fig = px.scatter(
                         active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
                         hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
@@ -491,22 +482,8 @@ if uploaded_files:
                     fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
                     st.plotly_chart(fig, use_container_width=True)
 
-            # 2. PNL VS DIT (SAFE MODE)
+            # TAB 2: HEAD-TO-HEAD
             with an_tabs[1]:
-                expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
-                if not expired_sub.empty:
-                    st.markdown("#### ⏳ Time vs Money (Do longer trades make more?)")
-                    fig = px.scatter(
-                        expired_sub, x='Days Held', y='P&L', color='Strategy',
-                        size='Debit', hover_data=['Name'],
-                        title="P&L vs Days Held"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("No expired trades to analyze.")
-
-            # 3. HEAD TO HEAD
-            with an_tabs[2]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
                     perf = expired_sub.groupby('Strategy').agg({
@@ -516,9 +493,11 @@ if uploaded_files:
                     }).reset_index()
                     perf.columns = ['Strategy', 'Count', 'Total P&L', 'Avg P&L', 'Avg Days', 'Avg Daily Yield']
                     st.dataframe(perf.style.format({'Total P&L': "${:,.0f}", 'Avg P&L': "${:,.0f}", 'Avg Days': "{:.0f}", 'Avg Daily Yield': "{:.2f}%"}), use_container_width=True)
+                else:
+                    st.info("No historical data available.")
 
-            # 4. HEATMAP
-            with an_tabs[3]:
+            # TAB 3: HEATMAP
+            with an_tabs[2]:
                 expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
                 if not expired_sub.empty:
                     fig = px.density_heatmap(
@@ -553,7 +532,7 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v34.0 | Final Enterprise Edition")
+        st.caption("Allantis Trade Guardian v2.0 Enterprise | Last Updated: Dec 2025")
         st.sidebar.divider()
         st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
