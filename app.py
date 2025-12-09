@@ -22,7 +22,8 @@ st.sidebar.header("⚙️ Strategy Settings")
 market_regime = st.sidebar.selectbox(
     "Current Market Regime", 
     ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"],
-    index=0
+    index=0,
+    help="Bullish: +10% Profit Target | Bearish: -10% Profit Target"
 )
 
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
@@ -67,6 +68,7 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
         benchmark = benchmarks_dict.get(strat, {})
         base_target = benchmark.get('pnl', 0)
         
+        # Fallback
         if base_target == 0: 
             base_target = BASE_CONFIG.get(strat, {}).get('pnl', 9999)
             
@@ -154,6 +156,7 @@ def process_data(files):
                         
                         status = "Active" if "active" in filename else "Expired"
                         
+                        # Expiration Validation
                         exp_val = row.get('Expiration', '')
                         has_exp_date = False
                         try: 
@@ -173,6 +176,7 @@ def process_data(files):
                         days_held = (end_dt - start_dt).days
                         if days_held < 1: days_held = 1 
 
+                        # Metrics
                         roi = (pnl / debit * 100) if debit > 0 else 0
                         daily_yield = roi / days_held
 
@@ -224,7 +228,7 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- CALCULATE BENCHMARKS (ROBUST) ---
+    # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
     benchmarks = BASE_CONFIG.copy()
     
@@ -302,7 +306,6 @@ if uploaded_files:
                                 else: st.info(msg)
                             st.divider()
 
-                        # 4-COLUMN METRIC HEADER
                         c1, c2, c3, c4 = st.columns(4)
                         c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
                         c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
@@ -321,10 +324,8 @@ if uploaded_files:
                                 'Notes': ['']
                             })
                             
-                            # Append Total to Subset for Display
                             display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
                             
-                            # RENDER WITH STYLING
                             st.dataframe(
                                 display_df.style
                                 .format({
@@ -332,14 +333,13 @@ if uploaded_files:
                                     'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
                                     'Days Held': "{:.0f}"
                                 })
-                                # COLOR CODING (RESTORED APPLYMAP)
+                                # REVERTED TO APPLYMAP FOR STABILITY
                                 .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
                                                        else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
                                                        else '', subset=['Action'])
                                 .applymap(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
                                                        else 'color: #842029; font-weight: bold' if 'F' in str(v) 
                                                        else '', subset=['Grade'])
-                                # TOTAL ROW HIGHLIGHT
                                 .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
                                 use_container_width=True
                             )
@@ -553,7 +553,7 @@ if uploaded_files:
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
         st.divider()
-        st.caption("Allantis Trade Guardian v34.0 | Final Enterprise Edition")
+        st.caption("Allantis Trade Guardian v35.0 | Certified Stable")
         st.sidebar.divider()
         st.sidebar.markdown("### 🎯 Quick Start\n1. Upload active file\n2. Check health alerts\n3. Review action center\n4. Export for records")
 
