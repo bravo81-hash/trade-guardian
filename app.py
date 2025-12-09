@@ -6,14 +6,15 @@ import plotly.express as px
 from datetime import datetime
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian")
+st.set_page_config(page_title="Allantis Trade Guardian Pro", layout="wide", page_icon="🛡️")
+st.title("🛡️ Allantis Trade Guardian: Quant Edition")
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data Import")
 uploaded_files = st.sidebar.file_uploader(
-    "1. Drop ALL History & Active Files Here (Excel or CSV)", 
-    accept_multiple_files=True
+    "Drop Active/Expired Files (Excel/CSV)", 
+    accept_multiple_files=True,
+    help="Drop multiple active files from different dates to see trends (experimental)."
 )
 
 # --- HELPER FUNCTIONS ---
@@ -28,60 +29,28 @@ def clean_num(x):
     try: return float(str(x).replace('$','').replace(',',''))
     except: return 0.0
 
-def get_grade_and_reason(strat, debit_lot, status, days_held, pnl, theta_lot):
-    grade = "C"
-    reason = "Standard"
-    alert = ""
+def analyze_greeks(theta, gamma, vega, delta):
+    issues = []
     
-    # 1. PRICING GRADES
-    if strat == '130/160':
-        if debit_lot > 4800:
-            grade = "F"
-            reason = "⛔ Overpriced (>$4.8k)"
-        elif 3500 <= debit_lot <= 4500:
-            grade = "A+"
-            reason = "✅ Sweet Spot ($3.5k-$4.5k)"
-        else:
-            grade = "B"
-            reason = "⚠️ Acceptable"
-            
-        if status == "Active" and 20 <= days_held <= 30 and pnl < 100:
-            alert = "💀 KILL ZONE (Stale)"
-
-    elif strat == '160/190':
-        if 4800 <= debit_lot <= 5500:
-            grade = "A"
-            reason = "✅ Ideal Pricing"
-        elif debit_lot < 4800:
-            grade = "B+"
-            reason = "✅ Good Value"
-        else:
-            grade = "C"
-            reason = "⚠️ Expensive"
-            
-        if status == "Active" and days_held < 30 and pnl < 0:
-            alert = "⏳ Cooking (Wait)"
-
-    elif strat == 'M200':
-        if 7500 <= debit_lot <= 8500: grade = "A"; reason = "✅ Perfect Size"
-        elif debit_lot > 9000: grade = "D"; reason = "⛔ Too Expensive"
-        else: grade = "B"; reason = "⚠️ Variance"
-            
-        if status == "Active" and 13 <= days_held <= 16:
-            if pnl > 200: alert = "💰 Day 14 Check"
-            else: alert = "🔒 Hold to Day 60"
-            
-    # 2. GREEK HEALTH CHECK (New Feature)
-    # Rule: You want >1.0 Theta for every $1k Debit.
-    theta_yield = abs(theta_lot) / (debit_lot / 1000) if debit_lot > 0 else 0
-    greek_status = f"{theta_yield:.1f} Decay/$$"
+    # 1. EXPLOSION RATIO (Gamma Risk relative to Income)
+    # Avoid div by zero
+    if abs(theta) < 0.1: theta = 0.1
     
-    if theta_yield < 0.6:
-        greek_status += " (⚠️ LOW)"
-    elif theta_yield > 1.0:
-        greek_status += " (✅ STRONG)"
+    explosion_ratio = abs(gamma / theta)
+    if explosion_ratio > 0.5:
+        issues.append("⚠️ HIGH GAMMA RISK: Price moves hurt 2x more than Time helps.")
         
-    return grade, reason, alert, greek_status
+    # 2. IV SAFETY NET (Vega Exposure)
+    vol_ratio = abs(vega / theta)
+    if vol_ratio > 10.0:
+        issues.append("⚠️ HIGH VEGA: You are over-exposed to Volatility spikes.")
+        
+    # 3. DELTA DRIFT (Directional Stress)
+    # If Delta is larger than 50% of Theta, the trade is too directional
+    if abs(delta) > abs(theta) * 0.5:
+        issues.append("⚠️ DELTA DRIFT: Trade has become too directional.")
+        
+    return issues, explosion_ratio, vol_ratio
 
 # --- CORE PROCESSING ---
 @st.cache_data
@@ -137,8 +106,12 @@ def process_data(files):
                         
                         pnl = clean_num(row.get('Total Return $', 0))
                         debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                        
+                        # THE GREEKS
                         theta = clean_num(row.get('Theta', 0))
                         delta = clean_num(row.get('Delta', 0))
+                        gamma = clean_num(row.get('Gamma', 0))
+                        vega = clean_num(row.get('Vega', 0))
                         
                         status = "Active" if "active" in filename else "Expired"
                         if status == "Expired" and pnl == 0: status = "Active"
@@ -160,25 +133,51 @@ def process_data(files):
                         elif strat == 'M200' and debit > 12000: lot_size = 2
                             
                         debit_lot = debit / max(1, lot_size)
-                        theta_lot = theta / max(1, lot_size)
-                        delta_lot = delta / max(1, lot_size)
                         
-                        grade, reason, alert, greek_stat = get_grade_and_reason(strat, debit_lot, status, days_held, pnl, theta_lot)
+                        # GRADING & GREEK ANALYSIS
+                        greek_issues, exp_ratio, vol_ratio = analyze_greeks(theta, gamma, vega, delta)
+                        
+                        grade = "C"
+                        reason = "Standard"
+                        
+                        if strat == '130/160':
+                            if debit_lot > 4800: grade = "F"; reason = "⛔ Overpriced"
+                            elif 3500 <= debit_lot <= 4500: grade = "A+"; reason = "✅ Sweet Spot"
+                            else: grade = "B"
+                        elif strat == '160/190':
+                            if 4800 <= debit_lot <= 5500: grade = "A"; reason = "✅ Ideal"
+                            else: grade = "C"; reason = "⚠️ Check Price"
+                        elif strat == 'M200':
+                            if 7500 <= debit_lot <= 8500: grade = "A"; reason = "✅ Perfect"
+                            else: grade = "B"; reason = "⚠️ Variance"
+                        
+                        # Combine Alerts
+                        alerts = []
+                        if greek_issues: alerts.extend(greek_issues)
+                        
+                        # Timeline Alert
+                        if strat == '130/160' and status == "Active" and 20 <= days_held <= 30 and pnl < 100:
+                            alerts.append("💀 KILL ZONE (Stale Capital)")
 
                         all_data.append({
                             "Name": name, "Strategy": strat, "Status": status,
                             "P&L": pnl, "Debit/Lot": debit_lot, "Grade": grade,
-                            "Reason": reason, "Alert": alert, "Days Held": days_held,
-                            "Greek Health": greek_stat, "Delta/Lot": delta_lot, "Theta/Lot": theta_lot
+                            "Reason": reason, "Alerts": " | ".join(alerts), 
+                            "Days Held": days_held,
+                            "Theta": theta, "Delta": delta, "Gamma": gamma, "Vega": vega,
+                            "Explosion Ratio": exp_ratio, "Vol Ratio": vol_ratio
                         })
                 
         except: pass
             
     df = pd.DataFrame(all_data)
     if not df.empty:
-        df['Status_Rank'] = df['Status'].apply(lambda x: 1 if x == 'Expired' else 0)
-        df = df.sort_values(by=['Name', 'Status_Rank'], ascending=[True, True])
-        df = df.drop_duplicates(subset=['Name', 'Strategy'], keep='last')
+        # Sort so we see most recent / relevant first
+        df = df.sort_values(by=['Name', 'Days Held'], ascending=[True, False])
+        # Note: We do NOT drop duplicates here if we want to see trends, 
+        # but for the main dashboard, we usually want the latest snapshot.
+        # Let's create a 'Latest' view.
+        df['Latest'] = ~df.duplicated(subset=['Name', 'Strategy'], keep='first')
         
     return df
 
@@ -187,135 +186,106 @@ if uploaded_files:
     df = process_data(uploaded_files)
     
     # TABS
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Health", "🧪 Trade Validator", "📈 Deep Analytics", "📖 Rule Book"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Health (Quant)", "🧪 Trade Validator", "📈 Deep Analytics", "📖 Rule Book"])
     
     # 1. ACTIVE HEALTH
     with tab1:
         if not df.empty:
-            active_df = df[df['Status'] == 'Active'].copy()
+            # Filter for Latest Active Trades
+            active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            # Metrics
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Active Trades", len(active_df))
-            c2.metric("Total Open P&L", f"${active_df['P&L'].sum():,.2f}")
-            c3.metric("Avg P&L", f"${active_df['P&L'].mean():,.2f}")
-            alerts = active_df[active_df['Alert'] != ""]
-            c4.metric("Alerts", len(alerts), delta_color="inverse")
+            c2.metric("Portfolio Delta", f"{active_df['Delta'].sum():.2f}", help="Total directional exposure")
+            c3.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}", help="Daily time decay collected")
             
-            # STYLING FUNCTION
-            def style_dataframe(row):
-                cols = ['' for _ in row]
-                # Color entire row based on Grade
-                if 'A' in str(row['Grade']):
-                    return ['background-color: #d4edda; color: #155724'] * len(row) # Light Green
-                elif 'F' in str(row['Grade']):
-                    return ['background-color: #f8d7da; color: #721c24'] * len(row) # Light Red
-                elif 'D' in str(row['Grade']):
-                    return ['background-color: #f8d7da; color: #721c24'] * len(row)
-                return cols
+            # Show Alerts
+            problem_trades = active_df[active_df['Alerts'] != ""]
+            if not problem_trades.empty:
+                st.error(f"🚨 **Risk Alerts ({len(problem_trades)})**")
+                for _, r in problem_trades.iterrows():
+                    st.write(f"• **{r['Name']}**: {r['Alerts']}")
+            
+            st.markdown("### 🔬 Deep Greek Analysis")
+            
+            # Prepare Table Data
+            view = active_df[['Name', 'Strategy', 'Grade', 'P&L', 'Debit/Lot', 'Theta', 'Explosion Ratio', 'Vol Ratio', 'Alerts']]
+            
+            def color_rows(row):
+                styles = []
+                # Grade Coloring
+                base_color = ''
+                if 'A' in str(row['Grade']): base_color = 'background-color: #d4edda; color: #155724'
+                elif 'F' in str(row['Grade']): base_color = 'background-color: #f8d7da; color: #721c24'
+                
+                # Risk Coloring (Overrides Grade)
+                if 'HIGH GAMMA' in str(row['Alerts']): base_color = 'background-color: #fff3cd; color: #856404' # Yellow warning
+                
+                return [base_color] * len(row)
 
-            # DISPLAY TABLE
-            st.subheader("📋 Portfolio Overview")
-            display_cols = ['Name', 'Strategy', 'Debit/Lot', 'Grade', 'Reason', 'Greek Health', 'Days Held', 'P&L', 'Alert']
+            st.dataframe(view.style.apply(color_rows, axis=1), use_container_width=True, height=600)
             
-            st.dataframe(
-                active_df[display_cols].style.apply(style_dataframe, axis=1),
-                use_container_width=True,
-                height=500
-            )
+            st.caption("""
+            **Columns Key:**
+            * **Explosion Ratio:** (Gamma/Theta). If > 0.5, price moves hurt more than time helps.
+            * **Vol Ratio:** (Vega/Theta). If > 10.0, you are betting on IV drop, not Time.
+            """)
 
     # 2. VALIDATOR
     with tab2:
         st.markdown("### 🧪 Pre-Flight Audit")
-        
-        with st.expander("ℹ️ Grading Legend (Click to Expand)", expanded=True):
-            st.markdown("""
-            | Grade | Meaning | Action |
-            | :--- | :--- | :--- |
-            | **A+ / A** | **Perfect Entry.** Matches historical winners in price & structure. | ✅ **GO** |
-            | **B+ / B** | **Good Value.** Slightly cheap/expensive but acceptable. | ✅ **GO** |
-            | **C** | **Average.** No statistical edge found. | ⚠️ **CAUTION** |
-            | **D / F** | **Failure Zone.** Historically this price point loses 100% of the time. | ⛔ **NO GO** |
-            """)
-            
         model_file = st.file_uploader("Upload Model File", key="mod")
         if model_file:
             m_df = process_data([model_file])
             if not m_df.empty:
                 row = m_df.iloc[0]
+                
                 st.divider()
-                st.subheader(f"Result: {row['Name']}")
+                st.subheader(f"Audit: {row['Name']}")
                 
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Strategy", row['Strategy'])
-                c2.metric("Debit/Lot", f"${row['Debit/Lot']:,.0f}")
-                c3.metric("Greek Health", row['Greek Health'])
+                c1.metric("Grade", row['Grade'])
+                c2.metric("Explosion Ratio", f"{row['Explosion Ratio']:.2f}")
+                c3.metric("Vol Ratio", f"{row['Vol Ratio']:.1f}")
                 
-                if "A" in row['Grade']:
-                    st.success(f"## ✅ APPROVED ({row['Grade']})\n{row['Reason']}")
-                elif "F" in row['Grade'] or "D" in row['Grade']:
-                    st.error(f"## ⛔ REJECT ({row['Grade']})\n{row['Reason']}")
-                else:
-                    st.warning(f"## ⚠️ CAUTION ({row['Grade']})\n{row['Reason']}")
+                if "A" in row['Grade'] and row['Explosion Ratio'] < 0.3:
+                    st.success("✅ **GREEN LIGHT**: Price & Structure are optimal.")
+                elif row['Explosion Ratio'] > 0.5:
+                    st.warning("⚠️ **CAUTION**: Gamma risk is high. Ensure you are comfortable with price swings.")
+                elif "F" in row['Grade']:
+                    st.error("⛔ **REJECT**: Overpriced structure.")
 
     # 3. ANALYTICS
     with tab3:
         if not df.empty:
             st.subheader("📈 Portfolio Intelligence")
-            
-            # GREEK EXPOSURE
-            c1, c2 = st.columns(2)
-            active_df = df[df['Status'] == 'Active']
-            with c1:
-                st.metric("Net Portfolio Delta", f"{active_df['Delta/Lot'].sum():.2f}")
-                st.caption("Positive = Bullish | Negative = Bearish/Hedge")
-            with c2:
-                st.metric("Net Portfolio Theta", f"{active_df['Theta/Lot'].sum():.2f}")
-                st.caption("Daily Time Decay collected")
-
-            st.divider()
-            
-            # HISTORICAL PERFORMANCE
             expired_df = df[df['Status'] == 'Expired']
             if not expired_df.empty:
-                st.markdown("#### Historical Strategy Efficiency (Closed Trades)")
-                strat_stats = expired_df.groupby('Strategy').agg({
-                    'P&L': 'sum',
-                    'Debit/Lot': 'mean'
-                }).reset_index()
-                
-                # ROI Calc
-                strat_stats['ROI %'] = (strat_stats['P&L'] / (strat_stats['Debit/Lot'] * len(expired_df))) * 100 
-                # Note: Rough ROI approx for visualization
-                
-                c1, c2 = st.columns(2)
-                with c1: st.plotly_chart(px.bar(expired_df, x='Strategy', y='P&L', color='Strategy', title="Total Realized P&L"), use_container_width=True)
-                with c2: st.plotly_chart(px.box(expired_df, x='Strategy', y='Debit/Lot', title="Winning Entry Prices (Distribution)"), use_container_width=True)
+                st.plotly_chart(px.scatter(expired_df, x='Debit/Lot', y='P&L', color='Strategy', size='Theta', title="Win Profile: Price vs Decay"), use_container_width=True)
 
     # 4. RULE BOOK
     with tab4:
         st.markdown("""
-        # 📖 Trading Rules & Cheat Sheet
+        # 📖 Trading Rules & Quant Limits
         
-        ### 1. 130/160 Strategy (Income)
-        * **Target Debit:** `$3,500 - $4,500` per lot.
-        * **Red Flag:** > `$4,800` (Expensive).
-        * **Exit:** Profit > $500/lot OR 25 Days old.
+        ### 1. 130/160 Strategy
+        * **Debit:** `$3.5k - $4.5k` per lot.
+        * **Gamma Limit:** `Explosion Ratio < 0.4`.
         
-        ### 2. 160/190 Strategy (Compounder)
-        * **Target Debit:** `$4,800 - $5,500` per lot.
-        * **Sizing:** **1 Lot** is better. (2-Lot ROI drops from 15% -> 7%).
+        ### 2. 160/190 Strategy
+        * **Debit:** `~$5.2k` per lot.
         * **Exit:** Hold 40+ Days.
         
-        ### 3. M200 Strategy (Whale)
-        * **Target Debit:** `$7,500 - $8,500` per lot.
-        * **Exit:** Check Day 14. If Green, roll. If Red, hold to Day 60.
+        ### 3. M200 Strategy
+        * **Debit:** `$7.5k - $8.5k` per lot.
         
-        ### 4. Greek Health Rules
-        * **Theta Efficiency:** You want **>1.0 Theta** for every **$1k Debit**.
-            * *Example:* Debit $4,000 -> Needs >4.0 Theta.
-            * *Why:* If Theta is low (e.g., 0.6 per $1k), you are paying too much premium for too little decay.
+        ### 4. Greek Safety Rules
+        * **Explosion Ratio (Gamma/Theta):** Must be **< 0.5**.
+            * *Meaning:* If > 0.5, a 1% market move hurts your P&L more than 1 day of theta helps it.
+        * **Vol Ratio (Vega/Theta):** Must be **< 10.0**.
+            * *Meaning:* If > 10, an IV spike can wipe out weeks of progress.
+        * **Delta Drift:** Net Delta should not exceed **50% of Theta**.
         """)
 
 else:
-    st.info("👋 Upload your files to generate the dashboard.")
+    st.info("👋 Upload Active/Expired files to begin Quant Analysis.")
