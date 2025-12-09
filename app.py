@@ -7,14 +7,22 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Professional")
+st.title("🛡️ Allantis Trade Guardian")
 
 # --- SIDEBAR ---
-st.sidebar.header("📂 Data Import")
+st.sidebar.header("Daily Workflow")
 uploaded_files = st.sidebar.file_uploader(
-    "Drop Active/Expired Files (Excel/CSV)", 
-    accept_multiple_files=True
+    "Drop TODAY'S Active File Here", 
+    accept_multiple_files=True,
+    help="You only need the latest file. The app calculates age/health from the 'Created At' date inside."
 )
+
+# --- CONFIG: STRATEGY RISK LIMITS (Derived from YOUR Data) ---
+RISK_CONFIG = {
+    '130/160': {'gamma_limit': 1.5, 'vega_limit': 15.0},  # Runs hotter, allow 1.5 ratio
+    '160/190': {'gamma_limit': 1.0, 'vega_limit': 10.0},  # More stable, tighter limit
+    'M200':    {'gamma_limit': 0.8, 'vega_limit': 8.0}    # Big capital, needs safety
+}
 
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name):
@@ -38,7 +46,7 @@ def process_data(files):
             filename = f.name.lower()
             df = None
             
-            # EXCEL READER
+            # EXCEL
             if filename.endswith('.xlsx') or filename.endswith('.xls'):
                 df_raw = pd.read_excel(f, header=None, engine='openpyxl')
                 header_idx = -1
@@ -51,7 +59,7 @@ def process_data(files):
                     df = df_raw.iloc[header_idx+1:].copy()
                     df.columns = df_raw.iloc[header_idx]
 
-            # CSV READER
+            # CSV
             else:
                 content = f.getvalue().decode("utf-8")
                 lines = content.split('\n')
@@ -90,6 +98,7 @@ def process_data(files):
                         vega = clean_num(row.get('Vega', 0))
                         
                         status = "Active" if "active" in filename else "Expired"
+                        # Smart Status: If file says Expired but P&L is 0/unrealized, it's Active
                         if status == "Expired" and pnl == 0: status = "Active"
                         
                         if status == "Expired":
@@ -110,7 +119,7 @@ def process_data(files):
                             
                         debit_lot = debit / max(1, lot_size)
                         
-                        # --- GRADING LOGIC (PRICE ONLY) ---
+                        # GRADING LOGIC (Entry Price)
                         grade = "C"
                         reason = "Standard"
                         
@@ -125,24 +134,24 @@ def process_data(files):
                             if 7500 <= debit_lot <= 8500: grade = "A"; reason = "Perfect Entry"
                             else: grade = "B"; reason = "Variance"
 
-                        # --- GREEK RATIOS (INFORMATIONAL) ---
-                        # Avoid div by zero
+                        # --- NEW GREEK ANALYSIS (Calibrated) ---
                         safe_theta = abs(theta) if abs(theta) > 0.1 else 0.1
                         
-                        # 1. Explosion Ratio (Gamma / Theta)
-                        # How much does price hurt vs time helps?
+                        # Ratios
                         expl_ratio = abs(gamma / safe_theta)
-                        
-                        # 2. Vol Ratio (Vega / Theta)
-                        # Are we trading Vol or Time?
                         vol_ratio = abs(vega / safe_theta)
                         
-                        # ALERTS (Only Critical Ones)
+                        # Get Limits for this Strategy
+                        limits = RISK_CONFIG.get(strat, {'gamma_limit': 1.0, 'vega_limit': 10.0})
+                        
+                        # Alerts
                         alerts = []
-                        if expl_ratio > 1.0: 
-                            alerts.append("CRITICAL GAMMA: Risk > Reward")
+                        if expl_ratio > limits['gamma_limit']: 
+                            alerts.append(f"⚠️ GAMMA SPKE ({expl_ratio:.1f})")
+                            
+                        # Stale Capital Rule (Time Based)
                         if strat == '130/160' and status == "Active" and 25 <= days_held <= 35 and pnl < 100:
-                            alerts.append("STALE CAPITAL: >25 Days Flat")
+                            alerts.append("💀 STALE (25d Flat)")
 
                         all_data.append({
                             "Name": name, "Strategy": strat, "Status": status,
@@ -157,7 +166,6 @@ def process_data(files):
             
     df = pd.DataFrame(all_data)
     if not df.empty:
-        # Sort and Dedup
         df = df.sort_values(by=['Name', 'Days Held'], ascending=[True, False])
         df['Latest'] = ~df.duplicated(subset=['Name', 'Strategy'], keep='first')
         
@@ -175,49 +183,42 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
+            # Metrics
             c1, c2, c3 = st.columns(3)
             c1.metric("Active Trades", len(active_df))
             c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}", help="Daily Time Decay")
             c3.metric("Open P&L", f"${active_df['P&L'].sum():,.0f}")
             
-            # Critical Alerts Only
+            # ALERTS
             critical = active_df[active_df['Alerts'] != ""]
             if not critical.empty:
-                st.error(f"🚨 **Attention Needed ({len(critical)})**")
+                st.error(f"🚨 **Risk Alerts ({len(critical)})**")
                 for _, r in critical.iterrows():
                     st.write(f"• **{r['Name']}**: {r['Alerts']}")
             
             st.markdown("### 📋 Trade Monitor")
             
-            # Display Columns
+            # Columns
             cols = ['Name', 'Strategy', 'Grade', 'Debit/Lot', 'P&L', 'Days Held', 'Gamma/Theta', 'Vega/Theta']
             
-            # Styling
-            def color_grade(val):
-                if 'A' in str(val): return 'color: green; font-weight: bold'
-                if 'F' in str(val): return 'color: red; font-weight: bold'
-                return 'color: orange'
+            # STYLING
+            def color_rows(row):
+                # Grade Colors
+                if 'A' in str(row['Grade']): return ['color: green; font-weight: bold'] * len(row)
+                if 'F' in str(row['Grade']): return ['color: red; font-weight: bold'] * len(row)
+                return [''] * len(row)
 
-            def color_ratios(val):
-                # Gamma Ratio formatting
-                if isinstance(val, float):
-                    if val > 0.8: return 'background-color: #f8d7da; color: red' # Dangerous
-                    if val < 0.3: return 'color: green' # Safe
-                return ''
+            def highlight_risk(s):
+                # Highlight ONLY the specific risky cell
+                return ['background-color: #fff3cd' if 'GAMMA' in str(v) else '' for v in s]
 
-            # Render Table
             st.dataframe(
                 active_df[cols].style
-                .applymap(color_grade, subset=['Grade'])
-                .applymap(color_ratios, subset=['Gamma/Theta'])
+                .apply(color_rows, axis=1)
                 .format({'Debit/Lot': "${:,.0f}", 'P&L': "${:,.0f}", 'Gamma/Theta': "{:.2f}", 'Vega/Theta': "{:.1f}"}),
                 use_container_width=True,
                 height=600
             )
-            
-            st.caption("**Metrics Key:**")
-            st.caption("* **Gamma/Theta:** Measures stability. Lower (< 0.5) is better. If > 1.0, price risk is critical.")
-            st.caption("* **Vega/Theta:** Measures volatility sensitivity. Lower is better for income trading.")
 
     # 2. VALIDATOR
     with tab2:
@@ -230,10 +231,9 @@ if uploaded_files:
                 st.divider()
                 st.subheader(f"Audit: {row['Name']}")
                 
-                c1, c2, c3 = st.columns(3)
+                c1, c2 = st.columns(2)
                 c1.metric("Grade", row['Grade'])
                 c2.metric("Gamma/Theta", f"{row['Gamma/Theta']:.2f}")
-                c3.metric("Vega/Theta", f"{row['Vega/Theta']:.1f}")
                 
                 if "A" in row['Grade']:
                     st.success(f"✅ **APPROVED:** {row['Reason']}")
@@ -248,7 +248,7 @@ if uploaded_files:
             st.subheader("📈 Portfolio Intelligence")
             expired_df = df[df['Status'] == 'Expired'].copy()
             if not expired_df.empty:
-                # FIXED: Simple Scatter Plot (No Size variable to avoid crash)
+                 # Simple Scatter
                 st.plotly_chart(
                     px.scatter(
                         expired_df, 
@@ -260,30 +260,24 @@ if uploaded_files:
                     ), 
                     use_container_width=True
                 )
-            else:
-                st.info("No expired trades found for analytics.")
 
     # 4. RULE BOOK
     with tab4:
         st.markdown("""
-        # 📖 Trading Constitution
+        # 📖 Trading Constitution (Calibrated)
         
         ### 1. 130/160 Strategy
-        * **Entry:** Monday.
-        * **Debit:** `$3.5k - $4.5k` per lot.
-        * **Safety:** Gamma/Theta Ratio should stay `< 0.5`.
-        * **Kill Rule:** If Trade is 25 days old & flat, close it.
+        * **Target:** Monday Entry. `$3.5k - $4.5k` Debit.
+        * **Risk Limit:** `Gamma/Theta < 1.5` (Your strategy runs hot, 1.5 is normal).
         
         ### 2. 160/190 Strategy
-        * **Entry:** Friday.
-        * **Debit:** `~$5.2k` per lot.
-        * **Exit:** Hold 40+ Days.
+        * **Target:** Friday Entry. `~$5.2k` Debit.
+        * **Risk Limit:** `Gamma/Theta < 1.0`.
         
         ### 3. M200 Strategy
-        * **Entry:** Wednesday.
-        * **Debit:** `$7.5k - $8.5k` per lot.
-        * **Safety:** Day 14 Check (Green=Roll, Red=Hold).
+        * **Target:** Wednesday Entry. `$7.5k - $8.5k` Debit.
+        * **Risk Limit:** `Gamma/Theta < 0.8` (Needs stability).
         """)
 
 else:
-    st.info("👋 Upload Active/Expired files to begin.")
+    st.info("👋 Upload TODAY'S Active file to see health.")
