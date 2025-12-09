@@ -21,10 +21,11 @@ st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
 # --- FALLBACK CONSTANTS ---
-STATIC_BASELINES = {
-    '130/160': {'yield': 0.13, 'pnl': 0, 'roi': 0, 'dit': 0},
-    '160/190': {'yield': 0.28, 'pnl': 0, 'roi': 0, 'dit': 0},
-    'M200':    {'yield': 0.56, 'pnl': 0, 'roi': 0, 'dit': 0}
+# Used if no history file is present
+STATIC_BENCHMARKS = {
+    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
+    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
+    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41}
 }
 
 # --- HELPER FUNCTIONS ---
@@ -44,6 +45,42 @@ def safe_fmt(val, fmt_str):
         if isinstance(val, (int, float)): return fmt_str.format(val)
         return str(val)
     except: return str(val)
+
+# --- SMART EXIT ENGINE ---
+def get_action_signal(strat, status, days_held, pnl, benchmark_pnl):
+    """
+    Generates actionable signals based on rules + historical benchmarks.
+    """
+    action = ""
+    signal_type = "NONE" # NONE, INFO, WARNING, SUCCESS
+    
+    if status == "Active":
+        # 1. TAKE PROFIT RULE (Dynamic)
+        # If P&L is > Historical Average (or static target if history missing)
+        target = benchmark_pnl if benchmark_pnl > 0 else STATIC_BENCHMARKS.get(strat, {}).get('pnl', 9999)
+        if pnl >= target:
+            return f"🟢 TAKE PROFIT (Hit ${target:,.0f})", "SUCCESS"
+
+        # 2. STRATEGY SPECIFIC RULES
+        if strat == '130/160':
+            # Kill Rule: >25 Days and flat
+            if 25 <= days_held <= 35 and pnl < 100:
+                return "🔴 KILL (Stale >25d)", "ERROR"
+            
+        elif strat == '160/190':
+            # Patience Rule
+            if days_held < 30:
+                return "⏳ COOKING (Do Not Touch)", "INFO"
+            elif 30 <= days_held <= 40:
+                return "👀 WATCH (Entering Profit Zone)", "WARNING"
+
+        elif strat == 'M200':
+            # U-Turn Check
+            if 12 <= days_held <= 16:
+                if pnl > 200: return "✨ DAY 14 CHECK (Green=Roll)", "SUCCESS"
+                else: return "🔒 DAY 14 CHECK (Red=Hold)", "WARNING"
+                
+    return action, signal_type
 
 # --- CORE PROCESSING ---
 @st.cache_data
@@ -167,24 +204,22 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- CALCULATE BENCHMARKS FROM HISTORY ---
-    # We want benchmarks based ONLY on Expired (Closed) trades.
+    # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
-    
-    # Default to static, update if history exists
-    benchmarks = STATIC_BASELINES.copy()
+    benchmarks = STATIC_BENCHMARKS.copy()
     
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
-            # Filter for winners to get 'Ideal' targets? Or All? 
-            # Usually Benchmark = All closed trades to be realistic.
-            benchmarks[strat] = {
-                'yield': grp['Daily Yield %'].mean(),
-                'pnl': grp['P&L'].mean(),
-                'roi': grp['ROI'].mean(),
-                'dit': grp['Days Held'].mean()
-            }
+            # Filter for winners only for P&L targets
+            winners = grp[grp['P&L'] > 0]
+            if not winners.empty:
+                benchmarks[strat] = {
+                    'yield': grp['Daily Yield %'].mean(),
+                    'pnl': winners['P&L'].mean(), # Target Avg Win
+                    'roi': winners['ROI'].mean(),
+                    'dit': winners['Days Held'].mean()
+                }
             
     # TABS
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
@@ -194,14 +229,35 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Active Trades", len(active_df))
-            c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}")
-            c3.metric("Open P&L", f"${active_df['P&L'].sum():,.0f}")
+            # --- ACTION CENTER (TOP PRIORITY) ---
+            
+            # Apply Action Logic using Benchmarks
+            def apply_action(row):
+                bench = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
+                act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], bench)
+                return pd.Series([act, sig])
+
+            active_df[['Action', 'Signal_Type']] = active_df.apply(apply_action, axis=1)
+            
+            # Filter for Urgent Actions
+            urgent = active_df[active_df['Action'] != ""]
+            
+            if not urgent.empty:
+                st.markdown("### 🚨 Action Center")
+                c1, c2, c3 = st.columns([1, 4, 1]) # Layout spacing
+                
+                for _, row in urgent.iterrows():
+                    sig = row['Signal_Type']
+                    msg = f"**{row['Name']}** ({row['Strategy']}): {row['Action']}"
+                    
+                    if sig == "SUCCESS": st.success(msg)
+                    elif sig == "ERROR": st.error(msg)
+                    elif sig == "WARNING": st.warning(msg)
+                    else: st.info(msg)
             
             st.divider()
             
-            # STRATEGY OVERVIEW
+            # --- STRATEGY OVERVIEW ---
             st.markdown("### 🏛️ Strategy Overview")
             
             strat_agg = active_df.groupby('Strategy').agg({
@@ -209,7 +265,6 @@ if uploaded_files:
                 'Name': 'count', 'Daily Yield %': 'mean' 
             }).reset_index()
             
-            # Compare Current Yield vs Historical Benchmark Yield
             strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
             strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
             
@@ -249,43 +304,39 @@ if uploaded_files:
             st.divider()
             st.markdown("### 📋 Trade Details (By Strategy)")
             
-            disp_cols = ['Name', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
+            disp_cols = ['Name', 'Action', 'Grade', 'P&L', 'Debit', 'Days Held', 'Daily Yield %', 'Delta', 'Gamma', 'Theta', 'Vega']
             
             def render_strategy_table(strategy_name, label, icon):
                 subset = active_df[active_df['Strategy'] == strategy_name].copy()
                 
-                # GET HISTORICAL BENCHMARKS FOR HEADER
-                # Fallback to 0 if no history
                 bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                 
-                header_text = f"{icon} {label} | Hist. Avg: ${bench['pnl']:,.0f} ({bench['roi']:.1f}%) | Avg Hold: {bench['dit']:.0f}d | Target Yield: {bench['yield']:.2f}%/d"
+                header_text = f"{icon} {label} | Hist. Avg Win: ${bench['pnl']:,.0f} | Avg Hold: {bench['dit']:.0f}d | Target Yield: {bench['yield']:.2f}%/d"
                 
                 with st.expander(header_text, expanded=(not subset.empty)):
                     if not subset.empty:
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL / AVG'], 'Grade': [''],
+                            'Name': ['TOTAL / AVG'], 'Action': [''], 'Grade': [''],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
-                            'Debit/Lot': [subset['Debit/Lot'].mean()],
                             'Days Held': [subset['Days Held'].mean()],
                             'Delta': [subset['Delta'].sum()], 'Gamma': [subset['Gamma'].sum()],
                             'Theta': [subset['Theta'].sum()], 'Vega': [subset['Vega'].sum()],
-                            'Alerts': ['']
                         })
                         display_subset = pd.concat([subset[disp_cols], sum_row], ignore_index=True)
                         
                         st.dataframe(
                             display_subset.style.format({
-                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 
-                                'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 'Days Held': "{:.0f}",
-                                'Daily Yield %': "{:.2f}%", 'Vega': "{:.0f}"
+                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 
+                                'Days Held': "{:.0f}", 'Daily Yield %': "{:.2f}%", 'Vega': "{:.0f}"
                             })
                             .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display_subset)-1 else '' for _ in x], axis=1)
-                            .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade']),
+                            .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade'])
+                            .apply(lambda x: ['background-color: #d4edda; font-weight: bold' if 'TAKE PROFIT' in str(v) else 'background-color: #f8d7da; font-weight: bold' if 'KILL' in str(v) else '' for v in x], subset=['Action']),
                             use_container_width=True
                         )
                     else:
-                        st.info(f"No active trades. (Historical Target: {bench['yield']:.2f}%/d)")
+                        st.info(f"No active trades. (Target P&L: ${bench['pnl']:,.0f})")
 
             render_strategy_table('130/160', "130/160 Strategies", "🔹")
             render_strategy_table('160/190', "160/190 Strategies", "🔸")
