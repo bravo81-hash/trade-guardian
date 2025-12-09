@@ -13,20 +13,20 @@ st.title("🛡️ Allantis Trade Guardian")
 st.sidebar.header("Daily Workflow")
 uploaded_files = st.sidebar.file_uploader(
     "Drop TODAY'S Active File Here", 
-    accept_multiple_files=True,
-    help="You only need the latest file."
+    accept_multiple_files=True
 )
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Data Settings")
-ignore_gamma = st.sidebar.checkbox("⚠️ Ignore Gamma Alerts", value=True, help="Check this if imported Gamma values are incorrect (Vendor Bug).")
+ignore_gamma = st.sidebar.checkbox("⚠️ Ignore Gamma Alerts (Bad Data)", value=True)
+ignore_vega = st.sidebar.checkbox("⚠️ Ignore Vega Alerts", value=False)
 
-# --- CONFIG ---
-# (We keep these limits for when the bug is fixed)
+# --- CONFIG: STRATEGY RISK LIMITS ---
+# Calibrated higher based on your feedback
 RISK_CONFIG = {
-    '130/160': {'gamma_limit': 1.5, 'vega_limit': 15.0},
-    '160/190': {'gamma_limit': 1.0, 'vega_limit': 10.0},
-    'M200':    {'gamma_limit': 0.8, 'vega_limit': 8.0}
+    '130/160': {'gamma_limit': 1.5, 'vega_limit': 20.0}, 
+    '160/190': {'gamma_limit': 1.0, 'vega_limit': 15.0},
+    'M200':    {'gamma_limit': 0.8, 'vega_limit': 12.0}
 }
 
 # --- HELPER FUNCTIONS ---
@@ -51,7 +51,7 @@ def process_data(files):
             filename = f.name.lower()
             df = None
             
-            # EXCEL
+            # EXCEL READER
             if filename.endswith('.xlsx') or filename.endswith('.xls'):
                 df_raw = pd.read_excel(f, header=None, engine='openpyxl')
                 header_idx = -1
@@ -64,7 +64,7 @@ def process_data(files):
                     df = df_raw.iloc[header_idx+1:].copy()
                     df.columns = df_raw.iloc[header_idx]
 
-            # CSV
+            # CSV READER
             else:
                 content = f.getvalue().decode("utf-8")
                 lines = content.split('\n')
@@ -77,7 +77,6 @@ def process_data(files):
             
             if df is not None:
                 for _, row in df.iterrows():
-                    # Date Validation
                     created_val = row.get('Created At', '')
                     is_valid_date = False
                     if isinstance(created_val, (pd.Timestamp, datetime)):
@@ -96,7 +95,6 @@ def process_data(files):
                         pnl = clean_num(row.get('Total Return $', 0))
                         debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                         
-                        # GREEKS
                         theta = clean_num(row.get('Theta', 0))
                         delta = clean_num(row.get('Delta', 0))
                         gamma = clean_num(row.get('Gamma', 0))
@@ -114,7 +112,6 @@ def process_data(files):
                         days_held = (end_dt - start_dt).days
                         if days_held < 0: days_held = 0
 
-                        # Sizing Logic
                         lot_size = 1
                         if strat == '130/160' and debit > 6000: lot_size = 2
                         elif strat == '130/160' and debit > 10000: lot_size = 3
@@ -123,12 +120,11 @@ def process_data(files):
                             
                         debit_lot = debit / max(1, lot_size)
                         
-                        # GRADING
                         grade = "C"
                         reason = "Standard"
                         
                         if strat == '130/160':
-                            if debit_lot > 4800: grade = "F"; reason = "Overpriced (> $4.8k)"
+                            if debit_lot > 4800: grade = "F"; reason = "Overpriced"
                             elif 3500 <= debit_lot <= 4500: grade = "A+"; reason = "Sweet Spot"
                             else: grade = "B"; reason = "Acceptable"
                         elif strat == '160/190':
@@ -138,30 +134,22 @@ def process_data(files):
                             if 7500 <= debit_lot <= 8500: grade = "A"; reason = "Perfect Entry"
                             else: grade = "B"; reason = "Variance"
 
-                        # GREEK RATIOS
                         safe_theta = abs(theta) if abs(theta) > 0.1 else 0.1
                         expl_ratio = abs(gamma / safe_theta)
                         vol_ratio = abs(vega / safe_theta)
                         
-                        # ALERTS LOGIC (Controlled by Toggle)
-                        limits = RISK_CONFIG.get(strat, {'gamma_limit': 1.0, 'vega_limit': 10.0})
+                        limits = RISK_CONFIG.get(strat, {'gamma_limit': 1.0, 'vega_limit': 20.0})
                         alerts = []
                         
-                        # Only trigger Greek alerts if we trust the data
-                        # Note: We pass the 'ignore_gamma' flag via the sidebar, 
-                        # but inside this cached function we return raw data.
-                        # We will filter the DISPLAY of alerts in the Main App section.
-                        
-                        # Stale Capital Rule (Always Active)
                         if strat == '130/160' and status == "Active" and 25 <= days_held <= 35 and pnl < 100:
-                            alerts.append("💀 STALE (25d Flat)")
+                            alerts.append("💀 STALE")
 
                         all_data.append({
                             "Name": name, "Strategy": strat, "Status": status,
                             "P&L": pnl, "Debit/Lot": debit_lot, "Grade": grade,
                             "Reason": reason, "Alerts": alerts, 
                             "Days Held": days_held,
-                            "Theta": theta, "Gamma": gamma, "Vega": vega,
+                            "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta,
                             "Gamma/Theta": expl_ratio, "Vega/Theta": vol_ratio,
                             "Limits": limits
                         })
@@ -187,69 +175,73 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            # --- DYNAMIC ALERT FILTERING ---
-            # We construct the final alerts string here based on the Checkbox
+            # --- STRATEGY AGGREGATION (NEW) ---
+            st.markdown("### 🏛️ Strategy Overview")
+            strat_agg = active_df.groupby('Strategy').agg({
+                'P&L': 'sum',
+                'Theta': 'sum',
+                'Delta': 'sum',
+                'Vega': 'sum',
+                'Name': 'count'
+            }).reset_index()
+            strat_agg.columns = ['Strategy', 'Total P&L', 'Net Theta', 'Net Delta', 'Net Vega', 'Active Trades']
+            
+            # Formatting for display
+            st.dataframe(
+                strat_agg.style.format({
+                    'Total P&L': "${:,.0f}", 
+                    'Net Theta': "{:,.0f}", 
+                    'Net Delta': "{:,.1f}", 
+                    'Net Vega': "{:,.0f}"
+                }), 
+                use_container_width=True
+            )
+            
+            st.divider()
+            
+            # --- TRADE TABLE ---
             def finalize_alerts(row):
-                final_alerts = list(row['Alerts']) # Start with non-greek alerts
-                
-                # If Gamma Checking is ENABLED (checkbox unchecked)
+                final_alerts = list(row['Alerts'])
                 if not ignore_gamma:
                     if row['Gamma/Theta'] > row['Limits']['gamma_limit']:
-                        final_alerts.append(f"⚠️ GAMMA SPIKE ({row['Gamma/Theta']:.1f})")
-                
-                # Vega is assumed valid, but we can verify later
-                if row['Vega/Theta'] > row['Limits']['vega_limit']:
-                     final_alerts.append(f"⚠️ HIGH VEGA ({row['Vega/Theta']:.1f})")
-                     
+                        final_alerts.append(f"⚠️ GAMMA ({row['Gamma/Theta']:.1f})")
+                if not ignore_vega:
+                    if row['Vega/Theta'] > row['Limits']['vega_limit']:
+                         final_alerts.append(f"⚠️ VEGA ({row['Vega/Theta']:.1f})")
                 return " | ".join(final_alerts)
 
             active_df['Display_Alerts'] = active_df.apply(finalize_alerts, axis=1)
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Active Trades", len(active_df))
-            c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}")
-            c3.metric("Open P&L", f"${active_df['P&L'].sum():,.0f}")
             
-            # ALERTS
+            # ALERTS BANNER
             critical = active_df[active_df['Display_Alerts'] != ""]
             if not critical.empty:
                 st.error(f"🚨 **Attention Needed ({len(critical)})**")
                 for _, r in critical.iterrows():
                     st.write(f"• **{r['Name']}**: {r['Display_Alerts']}")
             
-            st.markdown("### 📋 Trade Monitor")
+            st.markdown("### 📋 Trade Details")
             
-            # Columns
-            cols = ['Name', 'Strategy', 'Grade', 'Debit/Lot', 'P&L', 'Days Held', 'Gamma', 'Gamma/Theta']
+            # Columns (Added Vega/VegaTheta)
+            cols = ['Name', 'Strategy', 'Grade', 'P&L', 'Days Held', 'Gamma/Theta', 'Vega', 'Vega/Theta']
             
-            # STYLING
             def color_grade(val):
                 if 'A' in str(val): return 'color: green; font-weight: bold'
                 if 'F' in str(val): return 'color: red; font-weight: bold'
                 return 'color: orange'
 
-            def color_gamma(val):
-                # Only color if we are trusting the data
-                if not ignore_gamma:
-                    if val > 1.5: return 'background-color: #f8d7da; color: red'
-                else:
-                    return 'color: gray' # Gray out if ignored
+            def color_risk(val):
+                if isinstance(val, float) and val > 20.0 and not ignore_vega: 
+                    return 'background-color: #f8d7da; color: red'
                 return ''
 
-            # Rename for display clarity
-            display_df = active_df.copy()
-            
             st.dataframe(
-                display_df[cols].style
+                active_df[cols].style
                 .applymap(color_grade, subset=['Grade'])
-                .applymap(color_gamma, subset=['Gamma/Theta'])
-                .format({'Debit/Lot': "${:,.0f}", 'P&L': "${:,.0f}", 'Gamma': "{:.2f}", 'Gamma/Theta': "{:.2f}"}),
+                .applymap(color_risk, subset=['Vega/Theta'])
+                .format({'P&L': "${:,.0f}", 'Gamma/Theta': "{:.2f}", 'Vega': "{:.0f}", 'Vega/Theta': "{:.1f}"}),
                 use_container_width=True,
                 height=600
             )
-            
-            if ignore_gamma:
-                st.caption("ℹ️ **Note:** Gamma Alerts are currently **DISABLED** (See sidebar). Values shown are for manual verification only.")
 
     # 2. VALIDATOR
     with tab2:
@@ -261,18 +253,12 @@ if uploaded_files:
                 row = m_df.iloc[0]
                 st.divider()
                 st.subheader(f"Audit: {row['Name']}")
-                
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Grade", row['Grade'])
-                c2.metric("Gamma (Raw)", f"{row['Gamma']:.2f}")
-                c3.metric("Theta", f"{row['Theta']:.1f}")
-                
-                if "A" in row['Grade']:
-                    st.success(f"✅ **APPROVED:** {row['Reason']}")
-                elif "F" in row['Grade']:
-                    st.error(f"⛔ **REJECT:** {row['Reason']}")
-                else:
-                    st.warning(f"⚠️ **CHECK:** {row['Reason']}")
+                c2.metric("Vega Ratio", f"{row['Vega/Theta']:.1f}")
+                c3.metric("Vega Raw", f"{row['Vega']:.0f}")
+                if "A" in row['Grade']: st.success("✅ APPROVED")
+                else: st.warning("⚠️ CHECK")
 
     # 3. ANALYTICS
     with tab3:
@@ -291,8 +277,6 @@ if uploaded_files:
                     ), 
                     use_container_width=True
                 )
-            else:
-                st.info("No expired trades found for analytics.")
 
     # 4. RULE BOOK
     with tab4:
@@ -301,17 +285,15 @@ if uploaded_files:
         
         ### 1. 130/160 Strategy
         * **Entry:** Monday.
-        * **Debit:** `$3.5k - $4.5k` per lot.
-        * **Safety:** Gamma/Theta Ratio < 1.5.
+        * **Debit:** `$3.5k - $4.5k`.
         
         ### 2. 160/190 Strategy
         * **Entry:** Friday.
-        * **Debit:** `~$5.2k` per lot.
-        * **Exit:** Hold 40+ Days.
+        * **Debit:** `~$5.2k`.
         
         ### 3. M200 Strategy
         * **Entry:** Wednesday.
-        * **Debit:** `$7.5k - $8.5k` per lot.
+        * **Debit:** `$7.5k - $8.5k`.
         """)
 
 else:
