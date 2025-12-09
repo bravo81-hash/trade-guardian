@@ -203,6 +203,7 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Settings")
+acct_size = st.sidebar.number_input("Account Size ($)", value=150000, step=5000)
 market_regime = st.sidebar.selectbox("Market Regime", ["Neutral", "Bullish (+10%)", "Bearish (-10%)"], index=0)
 regime_mult = 1.1 if "Bullish" in market_regime else 0.9 if "Bearish" in market_regime else 1.0
 
@@ -254,7 +255,7 @@ else:
         active_df = df[df['Status'] == 'Active'].copy()
         
         if not active_df.empty:
-            # Portfolio Health Sidebar
+            # Portfolio Health
             port_yield = active_df['Daily Yield %'].mean()
             if port_yield < 0.10: st.sidebar.error(f"🚨 Critical Yield: {port_yield:.2f}%")
             elif port_yield < 0.15: st.sidebar.warning(f"⚠️ Low Yield: {port_yield:.2f}%")
@@ -285,12 +286,18 @@ else:
                 agg = active_df.groupby('Strategy').agg({
                     'P&L':'sum', 'Debit':'sum', 'Theta':'sum', 'Name':'count', 'Daily Yield %':'mean'
                 }).reset_index()
+                agg.rename(columns={'Name': 'Trade Count'}, inplace=True) # Renamed per request
                 agg['Trend'] = agg.apply(lambda r: "🟢" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴", axis=1)
                 
                 total = pd.DataFrame({'Strategy':['TOTAL'], 'P&L':[agg['P&L'].sum()], 'Debit':[agg['Debit'].sum()], 
-                                      'Theta':[agg['Theta'].sum()], 'Name':[agg['Name'].sum()], 'Trend':['-']})
+                                      'Theta':[agg['Theta'].sum()], 'Trade Count':[agg['Trade Count'].sum()], 'Trend':['-']})
                 
-                st.dataframe(pd.concat([agg, total], ignore_index=True).style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Theta':"{:.0f}", 'Daily Yield %':"{:.2f}%"}), use_container_width=True)
+                st.dataframe(
+                    pd.concat([agg, total], ignore_index=True)
+                    .style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Theta':"{:.0f}", 'Daily Yield %':"{:.2f}%"})
+                    .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(agg) else '' for _ in x], axis=1),
+                    use_container_width=True
+                )
 
             # Strategy Tabs
             cols = ['Name', 'Action', 'Grade', 'P&L', 'Debit', 'Days Held', 'Daily Yield %', 'Theta', 'Delta']
@@ -300,13 +307,14 @@ else:
                     sub = active_df[active_df['Strategy'] == strat].copy()
                     bench = benchmarks.get(strat, BASE_CONFIG.get(strat))
                     
-                    # Local Alerts
+                    # COMPACT ALERT TILES
                     urgent = sub[sub['Action'] != ""]
                     if not urgent.empty:
+                        st.markdown("**🚨 Action Center**")
                         for _, r in urgent.iterrows():
-                            if "TAKE" in r['Action']: st.success(f"**{r['Name']}**: {r['Action']}")
-                            elif "KILL" in r['Action']: st.error(f"**{r['Name']}**: {r['Action']}")
-                            else: st.warning(f"**{r['Name']}**: {r['Action']}")
+                            # Thin styled alerts
+                            color = "green" if "TAKE" in r['Action'] else "red" if "KILL" in r['Action'] else "orange"
+                            st.markdown(f"<span style='color:{color}; font-weight:bold'>● {r['Name']}</span>: {r['Action']}", unsafe_allow_html=True)
                         st.divider()
 
                     # Benchmarks
@@ -327,7 +335,8 @@ else:
                             display.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
                             .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
                             .applymap(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
-                            .apply(lambda x: ['background-color: #d1d5db; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
+                            # LIGHTER GREY TOTAL ROW
+                            .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
                     else: st.info("No active trades.")
@@ -371,7 +380,7 @@ else:
                 c2.metric("Debit Total", f"${row['Debit']:,.0f}")
                 c3.metric("Debit Per Lot", f"${row['Debit/Lot']:,.0f}")
                 
-                # --- COMPARISON (NEW) ---
+                # COMPARISON
                 if not expired_df.empty:
                     similar = expired_df[
                         (expired_df['Strategy'] == row['Strategy']) & 
@@ -414,42 +423,52 @@ else:
                     fig = px.scatter(exp_sub, x='Days Held', y='P&L', color='Strategy', size='Debit')
                     st.plotly_chart(fig, use_container_width=True)
             
-            with an_tabs[2]: # Head to Head
+            with an_tabs[2]: 
                 if not exp_sub.empty:
                     perf = exp_sub.groupby('Strategy').agg({'P&L':['count','mean','sum'], 'Days Held':'mean', 'Daily Yield %':'mean'}).reset_index()
                     st.dataframe(perf, use_container_width=True)
             
-            with an_tabs[3]: # Heatmap
+            with an_tabs[3]: 
                 if not exp_sub.empty:
                     fig = px.density_heatmap(exp_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
 
-    # 4. ALLOCATION (NEW)
+    # 4. ALLOCATION (DYNAMIC)
     with tabs[3]:
-        st.markdown("### 💰 Portfolio Allocation (Based on $150k Account)")
+        st.markdown(f"### 💰 Portfolio Allocation (Based on ${acct_size:,.0f})")
         st.info("💡 **Barbell Approach:** Balance high-growth M200 with steady 130/160 cash flow.")
+        
+        reserve = acct_size * 0.20
+        deployable = acct_size - reserve
         
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("#### 🐳 M200 (40%)")
-            st.metric("Allocation", "$48,000")
+            st.metric("Allocation", f"${deployable * 0.40:,.0f}")
             st.caption("Growth Engine. Enter Wed. Max 6 Trades.")
         with c2:
             st.markdown("#### 🔸 160/190 (30%)")
-            st.metric("Allocation", "$36,000")
+            st.metric("Allocation", f"${deployable * 0.30:,.0f}")
             st.caption("Stabilizer. Enter Fri. Max 7 Trades.")
         with c3:
             st.markdown("#### 🔹 130/160 (30%)")
-            st.metric("Allocation", "$36,000")
+            st.metric("Allocation", f"${deployable * 0.30:,.0f}")
             st.caption("Income Engine. Enter Mon. Max 9 Trades.")
             
         st.progress(0.8)
-        st.caption("Cash Reserve: 20% ($30,000) for repairs/opportunities.")
+        st.caption(f"Cash Reserve: 20% (${reserve:,.0f}) for repairs/opportunities.")
 
     # 5. JOURNAL
     with tabs[4]:
         st.markdown("### 📓 Trade Journal")
-        edited = st.data_editor(df[['id','Name','Strategy','P&L','Notes']], key="journal", hide_index=True, use_container_width=True)
+        
+        # Strategy Filter
+        all_strats = list(df['Strategy'].unique())
+        sel_strat = st.selectbox("Filter by Strategy", ["All"] + all_strats)
+        
+        j_df = df if sel_strat == "All" else df[df['Strategy'] == sel_strat]
+        
+        edited = st.data_editor(j_df[['id','Name','Strategy','P&L','Notes']], key="journal", hide_index=True, use_container_width=True)
         if st.button("💾 Save Notes"):
             conn = get_db_connection()
             for i, r in edited.iterrows():
@@ -458,22 +477,30 @@ else:
             st.success("Saved!")
             st.rerun()
 
-    # 6. RULES
+    # 6. RULES (DETAILED)
     with tabs[5]:
         st.markdown("""
         ### 1. 130/160 Strategy (Income Engine)
-        * **Entry:** Monday. **Debit:** `$3.5k-$4.5k`. **Stop:** >`$4.8k`.
-        * **Manage:** Kill if >25 days and flat.
+        * **Target Entry:** Monday.
+        * **Debit Target:** `$3,500 - $4,500` per lot.
+        * **Stop Rule:** Never pay > `$4,800` per lot.
+        * **Management:** * **Kill Rule:** If trade is **>25 days old** AND profit is **flat/negative (<$100)**, EXIT immediately. Dead money.
+            * **Take Profit:** Target **~$600** (Historical Avg).
         
         ### 2. 160/190 Strategy (Compounder)
-        * **Entry:** Friday. **Debit:** `~$5.2k`. **Size:** 1 Lot.
-        * **Exit:** Hold 40-50 Days.
+        * **Target Entry:** Friday.
+        * **Debit Target:** `~$5,200` per lot.
+        * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI efficiency).
+        * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days (Cooking Phase).
         
         ### 3. M200 Strategy (Whale)
-        * **Entry:** Wednesday. **Debit:** `$7.5k-$8.5k`.
-        * **Manage:** Day 14 Check. Green=Roll, Red=Hold.
+        * **Target Entry:** Wednesday.
+        * **Debit Target:** `$7,500 - $8,500` per lot.
+        * **Management:** Check P&L at **Day 14**.
+            * If **Green (>$200):** Exit or Roll.
+            * If **Red/Flat:** HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
 
     # QUICK START
     st.sidebar.divider()
-    st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Export for Records")
+    st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
