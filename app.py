@@ -170,7 +170,7 @@ if uploaded_files:
             
             st.divider()
             
-            # --- STRATEGY OVERVIEW (WITH TOTAL) ---
+            # --- STRATEGY OVERVIEW ---
             st.markdown("### 🏛️ Strategy Overview")
             strat_agg = active_df.groupby('Strategy').agg({
                 'P&L': 'sum',
@@ -194,45 +194,62 @@ if uploaded_files:
             final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
             final_agg.columns = ['Strategy', 'Total P&L', 'Net Theta', 'Net Delta', 'Net Vega', 'Trades']
             
+            # STYLING FOR TOTAL ROW
+            def highlight_total_row(row):
+                if row['Strategy'] == 'TOTAL':
+                    return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
+                return [''] * len(row)
+
             st.dataframe(
                 final_agg.style.format({
                     'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Net Vega': "{:,.0f}"
-                }).apply(lambda x: ['font-weight: bold; background-color: #f0f2f6' if x.name == len(final_agg)-1 else '' for _ in x], axis=1), 
+                }).apply(highlight_total_row, axis=1), 
                 use_container_width=True
             )
             
             st.divider()
             st.markdown("### 📋 Trade Details (By Strategy)")
             
-            # Styling Function
-            def style_rows(row):
-                if 'A' in str(row['Grade']): return ['color: green; font-weight: bold'] * len(row)
-                if 'F' in str(row['Grade']): return ['color: red; font-weight: bold'] * len(row)
-                return [''] * len(row)
-
             # Columns to Display
             disp_cols = ['Name', 'Grade', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
             
-            # 130/160 SECTION
-            with st.expander("🔹 130/160 Strategies", expanded=True):
-                s1 = active_df[active_df['Strategy'] == '130/160']
-                if not s1.empty:
-                    st.dataframe(s1[disp_cols].style.apply(style_rows, axis=1).format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 'Gamma': "{:.2f}"}), use_container_width=True)
-                else: st.info("No active trades.")
+            def render_strategy_table(strategy_name, label):
+                subset = active_df[active_df['Strategy'] == strategy_name].copy()
+                if not subset.empty:
+                    with st.expander(f"{label} ({len(subset)} Trades)", expanded=True):
+                        # Create Summary Row
+                        sum_row = pd.DataFrame({
+                            'Name': ['TOTAL / AVG'],
+                            'Grade': [''],
+                            'P&L': [subset['P&L'].sum()],
+                            'Debit': [subset['Debit'].sum()],
+                            'Debit/Lot': [subset['Debit/Lot'].mean()],
+                            'Days Held': [subset['Days Held'].mean()],
+                            'Delta': [subset['Delta'].sum()],
+                            'Gamma': [subset['Gamma'].sum()],
+                            'Theta': [subset['Theta'].sum()],
+                            'Vega': [subset['Vega'].sum()],
+                            'Alerts': ['']
+                        })
+                        
+                        # Append Summary
+                        display_subset = pd.concat([subset[disp_cols], sum_row], ignore_index=True)
+                        
+                        # Style
+                        st.dataframe(
+                            display_subset.style.format({
+                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 
+                                'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 'Days Held': "{:.0f}"
+                            }).apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display_subset)-1 else '' for _ in x], axis=1)
+                            .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade']),
+                            use_container_width=True
+                        )
+                else:
+                    st.info(f"No active {strategy_name} trades.")
 
-            # 160/190 SECTION
-            with st.expander("🔸 160/190 Strategies", expanded=True):
-                s2 = active_df[active_df['Strategy'] == '160/190']
-                if not s2.empty:
-                    st.dataframe(s2[disp_cols].style.apply(style_rows, axis=1).format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 'Gamma': "{:.2f}"}), use_container_width=True)
-                else: st.info("No active trades.")
-
-            # M200 SECTION
-            with st.expander("🐳 M200 Strategies", expanded=True):
-                s3 = active_df[active_df['Strategy'] == 'M200']
-                if not s3.empty:
-                    st.dataframe(s3[disp_cols].style.apply(style_rows, axis=1).format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 'Gamma': "{:.2f}"}), use_container_width=True)
-                else: st.info("No active trades.")
+            render_strategy_table('130/160', "🔹 130/160 Strategies")
+            render_strategy_table('160/190', "🔸 160/190 Strategies")
+            render_strategy_table('M200', "🐳 M200 Strategies")
 
     # 2. VALIDATOR
     with tab2:
@@ -240,12 +257,15 @@ if uploaded_files:
         
         with st.expander("ℹ️ Grading System Legend (Click to view)", expanded=True):
             st.markdown("""
-            | Grade | Strategy | Metric | Why? |
+            | Strategy | Grade | Debit Range (Per Lot) | Verdict |
             | :--- | :--- | :--- | :--- |
-            | **A+** | 130/160 | Debit `$3.5k - $4.5k` | Historical Sweet Spot. Highest Win Rate. |
-            | **F** | 130/160 | Debit `> $4.8k` | **Danger Zone.** 100% of historical losses occurred here. |
-            | **A** | 160/190 | Debit `$4.8k - $5.5k` | Ideal pricing for this structure. |
-            | **A** | M200 | Debit `$7.5k - $8.5k` | Matches the "Whale" winner profile. |
+            | **130/160** | **A+** | `$3,500 - $4,500` | ✅ **Sweet Spot** (Highest statistical win rate) |
+            | **130/160** | **B** | `< $3,500` or `$4,500-$4,800` | ⚠️ **Acceptable** (Watch volatility) |
+            | **130/160** | **F** | `> $4,800` | ⛔ **Overpriced** (Historical failure rate 100%) |
+            | **160/190** | **A** | `$4,800 - $5,500` | ✅ **Ideal** Pricing |
+            | **160/190** | **C** | `> $5,500` | ⚠️ **Expensive** (Reduces ROI efficiency) |
+            | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** "Whale" sizing |
+            | **M200** | **B** | Any other price | ⚠️ **Variance** from mean |
             """)
             
         model_file = st.file_uploader("Upload Model File", key="mod")
