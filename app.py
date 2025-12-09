@@ -20,6 +20,14 @@ st.sidebar.divider()
 st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
+# --- CONSTANTS: HISTORICAL BASELINES (From Deep Analysis) ---
+# Used to determine if current performance is Improving or Lagging
+HISTORICAL_BASELINES = {
+    '130/160': 0.13, # % per day
+    '160/190': 0.28,
+    'M200':    0.56
+}
+
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name):
     g = str(group_name).upper()
@@ -102,7 +110,11 @@ def process_data(files):
                             end_dt = datetime.now()
                             
                         days_held = (end_dt - start_dt).days
-                        if days_held < 0: days_held = 0
+                        if days_held < 1: days_held = 1 # Min 1 day for math
+
+                        # EFFICIENCY METRICS (New)
+                        roi = (pnl / debit * 100) if debit > 0 else 0
+                        daily_yield = roi / days_held
 
                         # LOT SIZE LOGIC
                         lot_size = 1
@@ -128,7 +140,7 @@ def process_data(files):
                             if 7500 <= debit_lot <= 8500: grade = "A"; reason = "Perfect Entry"
                             else: grade = "B"; reason = "Variance"
 
-                        # ALERTS (Simple Time/P&L Check only)
+                        # ALERTS
                         alerts = []
                         if strat == '130/160' and status == "Active" and 25 <= days_held <= 35 and pnl < 100:
                             alerts.append("💀 STALE CAPITAL")
@@ -137,7 +149,7 @@ def process_data(files):
                             "Name": name, "Strategy": strat, "Status": status,
                             "P&L": pnl, "Debit": debit, "Debit/Lot": debit_lot, 
                             "Grade": grade, "Reason": reason, "Alerts": " ".join(alerts), 
-                            "Days Held": days_held,
+                            "Days Held": days_held, "Daily Yield %": daily_yield,
                             "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta
                         })
                 
@@ -170,77 +182,94 @@ if uploaded_files:
             
             st.divider()
             
-            # --- STRATEGY OVERVIEW ---
+            # --- STRATEGY OVERVIEW (WITH TRENDS) ---
             st.markdown("### 🏛️ Strategy Overview")
+            
+            # Aggregate
             strat_agg = active_df.groupby('Strategy').agg({
                 'P&L': 'sum',
+                'Debit': 'sum', # For weighted avg calc
                 'Theta': 'sum',
                 'Delta': 'sum',
-                'Vega': 'sum',
-                'Name': 'count'
+                'Name': 'count',
+                'Daily Yield %': 'mean' # Simple average of yields
             }).reset_index()
             
-            # Create Total Row
+            # Trend Logic
+            def get_trend(row):
+                base = HISTORICAL_BASELINES.get(row['Strategy'], 0)
+                curr = row['Daily Yield %']
+                if curr >= base: return "🟢 Improving"
+                return "🔴 Lagging"
+
+            strat_agg['Trend'] = strat_agg.apply(get_trend, axis=1)
+            strat_agg['Target %'] = strat_agg['Strategy'].map(HISTORICAL_BASELINES)
+            
+            # Total Row
             total_row = pd.DataFrame({
                 'Strategy': ['TOTAL'],
                 'P&L': [strat_agg['P&L'].sum()],
                 'Theta': [strat_agg['Theta'].sum()],
                 'Delta': [strat_agg['Delta'].sum()],
-                'Vega': [strat_agg['Vega'].sum()],
-                'Name': [strat_agg['Name'].sum()]
+                'Name': [strat_agg['Name'].sum()],
+                'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                'Trend': ['-'],
+                'Target %': ['-']
             })
             
-            # Append Total
             final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
-            final_agg.columns = ['Strategy', 'Total P&L', 'Net Theta', 'Net Delta', 'Net Vega', 'Trades']
             
-            # STYLING FOR TOTAL ROW
-            def highlight_total_row(row):
+            # Rename for display
+            display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']].copy()
+            display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Trades']
+            
+            def highlight_trend(val):
+                if '🟢' in str(val): return 'color: green; font-weight: bold'
+                if '🔴' in str(val): return 'color: red; font-weight: bold'
+                return ''
+
+            def style_total(row):
                 if row['Strategy'] == 'TOTAL':
                     return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
                 return [''] * len(row)
 
             st.dataframe(
-                final_agg.style.format({
-                    'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Net Vega': "{:,.0f}"
-                }).apply(highlight_total_row, axis=1), 
+                display_agg.style
+                .format({'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Yield/Day': "{:.2f}%", 'Target': "{:.2f}%"})
+                .applymap(highlight_trend, subset=['Trend'])
+                .apply(style_total, axis=1), 
                 use_container_width=True
             )
             
             st.divider()
             st.markdown("### 📋 Trade Details (By Strategy)")
             
-            # Columns to Display
-            disp_cols = ['Name', 'Grade', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
+            # Columns (Added Daily Yield)
+            disp_cols = ['Name', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
             
             def render_strategy_table(strategy_name, label):
                 subset = active_df[active_df['Strategy'] == strategy_name].copy()
                 if not subset.empty:
                     with st.expander(f"{label} ({len(subset)} Trades)", expanded=True):
-                        # Create Summary Row
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL / AVG'],
-                            'Grade': [''],
-                            'P&L': [subset['P&L'].sum()],
-                            'Debit': [subset['Debit'].sum()],
+                            'Name': ['TOTAL / AVG'], 'Grade': [''],
+                            'Daily Yield %': [subset['Daily Yield %'].mean()],
+                            'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Debit/Lot': [subset['Debit/Lot'].mean()],
                             'Days Held': [subset['Days Held'].mean()],
-                            'Delta': [subset['Delta'].sum()],
-                            'Gamma': [subset['Gamma'].sum()],
-                            'Theta': [subset['Theta'].sum()],
-                            'Vega': [subset['Vega'].sum()],
+                            'Delta': [subset['Delta'].sum()], 'Gamma': [subset['Gamma'].sum()],
+                            'Theta': [subset['Theta'].sum()], 'Vega': [subset['Vega'].sum()],
                             'Alerts': ['']
                         })
-                        
-                        # Append Summary
                         display_subset = pd.concat([subset[disp_cols], sum_row], ignore_index=True)
                         
-                        # Style
                         st.dataframe(
                             display_subset.style.format({
                                 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 
-                                'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 'Days Held': "{:.0f}"
-                            }).apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display_subset)-1 else '' for _ in x], axis=1)
+                                'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 'Days Held': "{:.0f}",
+                                'Daily Yield %': "{:.2f}%"
+                            })
+                            .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display_subset)-1 else '' for _ in x], axis=1)
                             .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade']),
                             use_container_width=True
                         )
@@ -291,10 +320,32 @@ if uploaded_files:
     # 3. ANALYTICS
     with tab3:
         if not df.empty:
-            st.subheader("📈 Historical Analytics")
-            expired_df = df[df['Status'] == 'Expired'].copy()
+            st.subheader("📈 Analytics & Trends")
             
+            # ACTIVE VS AGE (Efficiency Curve)
+            active_df = df[df['Status'] == 'Active'].copy()
+            if not active_df.empty:
+                st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
+                st.caption("Are your trades gaining momentum or stalling? Look for the 'Dip Valley' around Day 15-25.")
+                
+                fig = px.scatter(
+                    active_df, 
+                    x='Days Held', 
+                    y='Daily Yield %', 
+                    color='Strategy', 
+                    size='Debit',
+                    hover_data=['Name', 'P&L'],
+                    title="Real-Time Efficiency: Yield vs Age"
+                )
+                # Add Baseline Markers
+                fig.add_hline(y=0.13, line_dash="dash", line_color="blue", annotation_text="130/160 Target")
+                fig.add_hline(y=0.56, line_dash="dash", line_color="green", annotation_text="M200 Target")
+                st.plotly_chart(fig, use_container_width=True)
+
+            expired_df = df[df['Status'] == 'Expired'].copy()
             if not expired_df.empty:
+                st.divider()
+                st.markdown("#### 🏆 Historical Performance")
                 # Summary Stats
                 c1, c2, c3 = st.columns(3)
                 win_rate = (len(expired_df[expired_df['P&L'] > 0]) / len(expired_df)) * 100
@@ -302,28 +353,18 @@ if uploaded_files:
                 c2.metric("Total Profit", f"${expired_df['P&L'].sum():,.0f}")
                 c3.metric("Trades Analyzed", len(expired_df))
                 
-                st.divider()
-                
-                c1, c2 = st.columns(2)
-                with c1: 
-                    st.markdown("**Profit by Strategy**")
-                    st.plotly_chart(px.bar(expired_df, x='Strategy', y='P&L', color='Strategy'), use_container_width=True)
-                
-                with c2: 
-                    st.markdown("**Entry Price Sweet Spots**")
-                    st.plotly_chart(
-                        px.scatter(
-                            expired_df, 
-                            x='Debit/Lot', 
-                            y='P&L', 
-                            color='Strategy', 
-                            hover_data=['Days Held'],
-                            title="Win Profile: Price vs Profit"
-                        ), 
-                        use_container_width=True
-                    )
+                st.plotly_chart(
+                    px.scatter(
+                        expired_df, 
+                        x='Debit/Lot', 
+                        y='P&L', 
+                        color='Strategy', 
+                        title="Winning Zone: Entry Price vs Profit"
+                    ), 
+                    use_container_width=True
+                )
             else:
-                st.info("No Expired trades found in current upload. Drop historical files to populate analytics.")
+                st.info("No Expired trades found in current upload. Drop historical files to see long-term stats.")
 
     # 4. RULE BOOK
     with tab4:
