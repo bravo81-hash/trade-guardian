@@ -12,7 +12,7 @@ st.title("🛡️ Allantis Trade Guardian")
 # --- SIDEBAR ---
 st.sidebar.header("Daily Workflow")
 uploaded_files = st.sidebar.file_uploader(
-    "Drop TODAY'S Active File (Excel/CSV)", 
+    "Drop Active & History Files (Excel/CSV)", 
     accept_multiple_files=True
 )
 
@@ -20,8 +20,8 @@ st.sidebar.divider()
 st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
-# --- CONSTANTS ---
-HISTORICAL_BASELINES = {
+# --- FALLBACK CONSTANTS (Used only if no history file is dropped) ---
+STATIC_BASELINES = {
     '130/160': 0.13, 
     '160/190': 0.28,
     'M200':    0.56
@@ -40,13 +40,10 @@ def clean_num(x):
     except: return 0.0
 
 def safe_fmt(val, fmt_str):
-    """Safely formats a value, handling non-numeric strings gracefully."""
     try:
-        if isinstance(val, (int, float)):
-            return fmt_str.format(val)
+        if isinstance(val, (int, float)): return fmt_str.format(val)
         return str(val)
-    except:
-        return str(val)
+    except: return str(val)
 
 # --- CORE PROCESSING ---
 @st.cache_data
@@ -153,7 +150,7 @@ def process_data(files):
                             "Name": name, "Strategy": strat, "Status": status,
                             "P&L": pnl, "Debit": debit, "Debit/Lot": debit_lot, 
                             "Grade": grade, "Reason": reason, "Alerts": " ".join(alerts), 
-                            "Days Held": days_held, "Daily Yield %": daily_yield,
+                            "Days Held": days_held, "Daily Yield %": daily_yield, "ROI": roi,
                             "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta
                         })
                 
@@ -170,6 +167,17 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
+    # CALCULATE DYNAMIC TARGETS FROM HISTORY
+    expired_df = df[df['Status'] == 'Expired']
+    dynamic_baselines = STATIC_BASELINES.copy()
+    
+    if not expired_df.empty:
+        # Calculate historical average daily yield per strategy
+        hist_stats = expired_df.groupby('Strategy')['Daily Yield %'].mean()
+        for strat, yield_val in hist_stats.items():
+            dynamic_baselines[strat] = yield_val
+            
+    # TABS
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
     
     # 1. ACTIVE DASHBOARD
@@ -188,27 +196,18 @@ if uploaded_files:
             st.markdown("### 🏛️ Strategy Overview")
             
             strat_agg = active_df.groupby('Strategy').agg({
-                'P&L': 'sum',
-                'Debit': 'sum',
-                'Theta': 'sum',
-                'Delta': 'sum',
-                'Name': 'count',
-                'Daily Yield %': 'mean' 
+                'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                'Name': 'count', 'Daily Yield %': 'mean' 
             }).reset_index()
             
-            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= HISTORICAL_BASELINES.get(r['Strategy'], 0) else "🔴 Lagging", axis=1)
-            strat_agg['Target %'] = strat_agg['Strategy'].map(HISTORICAL_BASELINES)
+            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= dynamic_baselines.get(r['Strategy'], 0) else "🔴 Lagging", axis=1)
+            strat_agg['Target %'] = strat_agg['Strategy'].map(dynamic_baselines)
             
-            # Total Row
             total_row = pd.DataFrame({
-                'Strategy': ['TOTAL'],
-                'P&L': [strat_agg['P&L'].sum()],
-                'Theta': [strat_agg['Theta'].sum()],
-                'Delta': [strat_agg['Delta'].sum()],
-                'Name': [strat_agg['Name'].sum()],
-                'Daily Yield %': [active_df['Daily Yield %'].mean()],
-                'Trend': ['-'],
-                'Target %': ['-']
+                'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
+                'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
+                'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                'Trend': ['-'], 'Target %': ['-']
             })
             
             final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
@@ -226,15 +225,11 @@ if uploaded_files:
                     return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
                 return [''] * len(row)
 
-            # FIXED: Safe formatting with lambda to handle '-' strings
             st.dataframe(
                 display_agg.style
                 .format({
-                    'Total P&L': "${:,.0f}", 
-                    'Net Theta': "{:,.0f}", 
-                    'Net Delta': "{:,.1f}",
-                    'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
-                    'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                    'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
+                    'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
                 })
                 .applymap(highlight_trend, subset=['Trend'])
                 .apply(style_total, axis=1), 
@@ -246,17 +241,27 @@ if uploaded_files:
             
             disp_cols = ['Name', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
             
-            def render_strategy_table(strategy_name, label):
+            def render_strategy_table(strategy_name, label, icon):
                 subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                if not subset.empty:
-                    with st.expander(f"{label} ({len(subset)} Trades)", expanded=True):
-                        # Summary Row
+                
+                # Dynamic Header Metrics
+                count = len(subset)
+                avg_pnl = subset['P&L'].mean() if not subset.empty else 0
+                avg_roi = subset['ROI'].mean() if not subset.empty else 0
+                avg_dit = subset['Days Held'].mean() if not subset.empty else 0
+                avg_yield = subset['Daily Yield %'].mean() if not subset.empty else 0
+                target = dynamic_baselines.get(strategy_name, 0)
+                
+                header_text = f"{icon} {label} | Avg P&L: ${avg_pnl:,.0f} ({avg_roi:.1f}%) | Avg DIT: {avg_dit:.0f}d | Yield: {avg_yield:.2f}%/d (Target: {target:.2f}%)"
+                
+                with st.expander(header_text, expanded=(count > 0)):
+                    if not subset.empty:
                         sum_row = pd.DataFrame({
                             'Name': ['TOTAL / AVG'], 'Grade': [''],
-                            'Daily Yield %': [subset['Daily Yield %'].mean()],
+                            'Daily Yield %': [avg_yield],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Debit/Lot': [subset['Debit/Lot'].mean()],
-                            'Days Held': [subset['Days Held'].mean()],
+                            'Days Held': [avg_dit],
                             'Delta': [subset['Delta'].sum()], 'Gamma': [subset['Gamma'].sum()],
                             'Theta': [subset['Theta'].sum()], 'Vega': [subset['Vega'].sum()],
                             'Alerts': ['']
@@ -273,12 +278,12 @@ if uploaded_files:
                             .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade']),
                             use_container_width=True
                         )
-                else:
-                    st.info(f"No active {strategy_name} trades.")
+                    else:
+                        st.info(f"No active trades for {strategy_name}")
 
-            render_strategy_table('130/160', "🔹 130/160 Strategies")
-            render_strategy_table('160/190', "🔸 160/190 Strategies")
-            render_strategy_table('M200', "🐳 M200 Strategies")
+            render_strategy_table('130/160', "130/160 Strategies", "🔹")
+            render_strategy_table('160/190', "160/190 Strategies", "🔸")
+            render_strategy_table('M200', "M200 Strategies", "🐳")
 
     # 2. VALIDATOR
     with tab2:
@@ -336,8 +341,13 @@ if uploaded_files:
                     hover_data=['Name', 'P&L'],
                     title="Real-Time Efficiency: Yield vs Age"
                 )
-                fig.add_hline(y=0.13, line_dash="dash", line_color="blue", annotation_text="130/160 Target")
-                fig.add_hline(y=0.56, line_dash="dash", line_color="green", annotation_text="M200 Target")
+                
+                # Dynamic Baseline Lines
+                y_130 = dynamic_baselines.get('130/160', 0.13)
+                y_m200 = dynamic_baselines.get('M200', 0.56)
+                
+                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
+                fig.add_hline(y=y_m200, line_dash="dash", line_color="green", annotation_text=f"M200 Target ({y_m200:.2f}%)")
                 st.plotly_chart(fig, use_container_width=True)
 
             expired_df = df[df['Status'] == 'Expired'].copy()
@@ -389,4 +399,4 @@ if uploaded_files:
         """)
 
 else:
-    st.info("👋 Upload TODAY'S Active file to see health.")
+    st.info("👋 Upload Active & Expired files to begin.")
