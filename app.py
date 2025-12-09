@@ -194,7 +194,7 @@ def process_data(files):
                             "Grade": grade, "Reason": reason, "Alerts": " ".join(alerts), 
                             "Days Held": days_held, "Daily Yield %": daily_yield, "ROI": roi,
                             "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta,
-                            "Entry Date": start_dt  # Added for Filtering
+                            "Entry Date": start_dt
                         })
         
         except Exception:
@@ -211,6 +211,12 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
+    # --- VALIDATION WARNINGS ---
+    if not df.empty:
+        unknowns = df[df['Strategy'] == 'Other']
+        if not unknowns.empty:
+            st.sidebar.warning(f"ℹ️ {len(unknowns)} trades have 'Other' strategy.")
+
     # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
     benchmarks = STATIC_BASELINES.copy()
@@ -238,10 +244,12 @@ if uploaded_files:
             if active_df.empty:
                 st.info("📭 No active trades found. Upload a current Active File.")
             else:
-                # --- PORTFOLIO HEALTH CHECK (SIDEBAR ALERT) ---
+                # --- PORTFOLIO HEALTH CHECK (3-TIER SIDEBAR ALERT) ---
                 port_yield = active_df['Daily Yield %'].mean()
                 if port_yield < 0.10:
-                    st.sidebar.warning(f"⚠️ Portfolio Yield Low ({port_yield:.2f}%). Target > 0.15%")
+                    st.sidebar.error(f"🚨 Critical Yield ({port_yield:.2f}%)")
+                elif port_yield < 0.15:
+                    st.sidebar.warning(f"⚠️ Below Target ({port_yield:.2f}%)")
                 else:
                     st.sidebar.success(f"✅ Portfolio Healthy ({port_yield:.2f}%)")
 
@@ -280,7 +288,7 @@ if uploaded_files:
                         subset = active_df[active_df['Strategy'] == strategy_name].copy()
                         bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                         
-                        # 1. ALERT TILES
+                        # 1. ALERT TILES (LOCALIZED)
                         urgent = subset[subset['Action'] != ""]
                         if not urgent.empty:
                             st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -358,7 +366,7 @@ if uploaded_files:
                     def style_total(row):
                         if row['Strategy'] == 'TOTAL':
                             return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
-                        return [''] * len(row)
+                    return [''] * len(row)
 
                     st.dataframe(
                         display_agg.style
@@ -416,7 +424,7 @@ if uploaded_files:
                 c2.metric("Debit Total", f"${row['Debit']:,.0f}")
                 c3.metric("Debit Per Lot", f"${row['Debit/Lot']:,.0f}")
                 
-                # --- COMPARISON (NEW) ---
+                # COMPARISON
                 if not expired_df.empty:
                     similar = expired_df[
                         (expired_df['Strategy'] == row['Strategy']) & 
@@ -438,37 +446,42 @@ if uploaded_files:
         if not df.empty:
             st.subheader("📈 Analytics & Trends")
             
-            # --- DATE FILTER (NEW) ---
+            # DATE FILTER
             min_date = df['Entry Date'].min()
             max_date = df['Entry Date'].max()
             
             # Default to full range
             date_range = st.date_input("Filter by Entry Date", [min_date, max_date])
             
-            # Filter Data
             if len(date_range) == 2:
                 start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-                # Ensure we capture end of day
                 end_d = end_d + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-                
                 filtered_df = df[(df['Entry Date'] >= start_d) & (df['Entry Date'] <= end_d)]
             else:
                 filtered_df = df
             
-            # Active Plot
             active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
             if not active_sub.empty:
-                st.markdown("#### 🚀 Capital Efficiency Curve")
+                st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
+                st.caption("Are your trades gaining momentum or stalling? Look for the 'Dip Valley' around Day 15-25.")
+                
                 fig = px.scatter(
-                    active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
-                    hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
+                    active_sub, 
+                    x='Days Held', 
+                    y='Daily Yield %', 
+                    color='Strategy', 
+                    size='Debit',
+                    hover_data=['Name', 'P&L'],
+                    title="Real-Time Efficiency: Yield vs Age"
                 )
+                
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
                 y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
+                
                 fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
+                fig.add_hline(y=y_m200, line_dash="dash", line_color="green", annotation_text=f"M200 Target ({y_m200:.2f}%)")
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Expired Plot
             expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
             if not expired_sub.empty:
                 st.divider()
@@ -481,7 +494,10 @@ if uploaded_files:
                 
                 st.plotly_chart(
                     px.scatter(
-                        expired_sub, x='Debit/Lot', y='P&L', color='Strategy', 
+                        expired_sub, 
+                        x='Debit/Lot', 
+                        y='P&L', 
+                        color='Strategy', 
                         title="Winning Zone: Entry Price vs Profit"
                     ), 
                     use_container_width=True
@@ -513,6 +529,9 @@ if uploaded_files:
             * If Green > $200: Exit or Roll.
             * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
+        
+        st.divider()
+        st.caption("Allantis Trade Guardian v1.5 Enterprise | Dec 2025")
 
 else:
     st.info("👋 Upload TODAY'S Active file to see health.")
