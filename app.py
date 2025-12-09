@@ -47,16 +47,12 @@ def safe_fmt(val, fmt_str):
 
 # --- SMART EXIT ENGINE ---
 def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
-    """
-    Generates actionable signals based on rules + historical benchmarks.
-    """
     action = ""
     signal_type = "NONE" 
     
     if status == "Active":
-        # 1. TAKE PROFIT RULE (Use passed benchmarks)
+        # 1. TAKE PROFIT RULE
         benchmark = benchmarks_dict.get(strat, {})
-        # Fallback to static if dynamic benchmark is missing/zero
         target = benchmark.get('pnl', 0)
         if target == 0: 
             target = STATIC_BASELINES.get(strat, {}).get('pnl', 9999)
@@ -141,10 +137,8 @@ def process_data(files):
                         gamma = clean_num(row.get('Gamma', 0))
                         vega = clean_num(row.get('Vega', 0))
                         
-                        # Status Detection
                         status = "Active" if "active" in filename else "Expired"
                         
-                        # Check expiration date existence
                         exp_val = row.get('Expiration', '')
                         has_exp_date = False
                         try: 
@@ -153,18 +147,15 @@ def process_data(files):
                                 has_exp_date = True
                         except: pass
 
-                        # If marked Expired but has $0 P&L and NO expiration date, treat as Active
                         if status == "Expired" and pnl == 0 and not has_exp_date:
                             status = "Active"
                         
                         if status == "Expired" and has_exp_date:
-                            pass # end_dt already set
+                            pass
                         else:
                             end_dt = datetime.now()
                             
                         days_held = (end_dt - start_dt).days
-                        
-                        # Handle Same Day Trades
                         if days_held < 1: days_held = 1 
 
                         # METRICS
@@ -202,16 +193,16 @@ def process_data(files):
                             "P&L": pnl, "Debit": debit, "Debit/Lot": debit_lot, 
                             "Grade": grade, "Reason": reason, "Alerts": " ".join(alerts), 
                             "Days Held": days_held, "Daily Yield %": daily_yield, "ROI": roi,
-                            "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta
+                            "Theta": theta, "Gamma": gamma, "Vega": vega, "Delta": delta,
+                            "Entry Date": start_dt  # Added for Filtering
                         })
         
         except Exception:
-            pass # Skip failed files silently (or log if needed)
+            pass 
             
     df = pd.DataFrame(all_data)
     if not df.empty:
         df = df.sort_values(by=['Name', 'Days Held'], ascending=[True, False])
-        # Deduplication: Keep most recent snapshot
         df['Latest'] = ~df.duplicated(subset=['Name', 'Strategy'], keep='first')
         
     return df
@@ -220,12 +211,6 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # --- VALIDATION WARNINGS ---
-    if not df.empty:
-        unknowns = df[df['Strategy'] == 'Other']
-        if not unknowns.empty:
-            st.sidebar.warning(f"ℹ️ {len(unknowns)} trades have 'Other' strategy.")
-
     # --- CALCULATE BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired']
     benchmarks = STATIC_BASELINES.copy()
@@ -253,18 +238,20 @@ if uploaded_files:
             if active_df.empty:
                 st.info("📭 No active trades found. Upload a current Active File.")
             else:
+                # --- PORTFOLIO HEALTH CHECK (SIDEBAR ALERT) ---
+                port_yield = active_df['Daily Yield %'].mean()
+                if port_yield < 0.10:
+                    st.sidebar.warning(f"⚠️ Portfolio Yield Low ({port_yield:.2f}%). Target > 0.15%")
+                else:
+                    st.sidebar.success(f"✅ Portfolio Healthy ({port_yield:.2f}%)")
+
                 # --- ACTION LOGIC ---
                 act_list = []
                 sig_list = []
-                
                 for _, row in active_df.iterrows():
                     bench = benchmarks.get(row['Strategy'], {}).get('pnl', 0)
                     act, sig = get_action_signal(
-                        row['Strategy'], 
-                        row['Status'], 
-                        row['Days Held'], 
-                        row['P&L'], 
-                        benchmarks
+                        row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks
                     )
                     act_list.append(act)
                     sig_list.append(sig)
@@ -277,7 +264,7 @@ if uploaded_files:
                 
                 strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
                 
-                # Styles (Updated to .map for future-proofing)
+                # Styles
                 def style_table(styler):
                     return styler.map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
                                            else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
@@ -293,7 +280,7 @@ if uploaded_files:
                         subset = active_df[active_df['Strategy'] == strategy_name].copy()
                         bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                         
-                        # 1. ALERT TILES (LOCALIZED)
+                        # 1. ALERT TILES
                         urgent = subset[subset['Action'] != ""]
                         if not urgent.empty:
                             st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -344,15 +331,13 @@ if uploaded_files:
                         'Name': 'count', 'Daily Yield %': 'mean' 
                     }).reset_index()
                     
-                    # Trend Logic
                     strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
                     strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
                     
-                    # Total Row (FIXED: Added 'Debit' to prevent KeyError)
                     total_row = pd.DataFrame({
                         'Strategy': ['TOTAL'], 
                         'P&L': [strat_agg['P&L'].sum()],
-                        'Debit': [strat_agg['Debit'].sum()], # <--- CRITICAL FIX HERE
+                        'Debit': [strat_agg['Debit'].sum()],
                         'Theta': [strat_agg['Theta'].sum()], 
                         'Delta': [strat_agg['Delta'].sum()],
                         'Name': [strat_agg['Name'].sum()], 
@@ -362,7 +347,6 @@ if uploaded_files:
                     
                     final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
                     
-                    # Display Config
                     display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
                     display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Active Trades']
                     
@@ -386,6 +370,16 @@ if uploaded_files:
                         .map(highlight_trend, subset=['Trend'])
                         .apply(style_total, axis=1), 
                         use_container_width=True
+                    )
+                    
+                    # BONUS: EXPORT BUTTON
+                    csv = active_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "📥 Download Active Trades CSV",
+                        csv,
+                        "active_trades_snapshot.csv",
+                        "text/csv",
+                        key='download-csv'
                     )
 
                 render_tab(strat_tabs[1], '130/160')
@@ -422,6 +416,16 @@ if uploaded_files:
                 c2.metric("Debit Total", f"${row['Debit']:,.0f}")
                 c3.metric("Debit Per Lot", f"${row['Debit/Lot']:,.0f}")
                 
+                # --- COMPARISON (NEW) ---
+                if not expired_df.empty:
+                    similar = expired_df[
+                        (expired_df['Strategy'] == row['Strategy']) & 
+                        (expired_df['Debit/Lot'].between(row['Debit/Lot']*0.9, row['Debit/Lot']*1.1))
+                    ]
+                    if not similar.empty:
+                        avg_win = similar[similar['P&L']>0]['P&L'].mean()
+                        st.info(f"📊 **Historical Context:** Found {len(similar)} similar trades. Average Win: **${avg_win:,.0f}**")
+                
                 if "A" in row['Grade']:
                     st.success(f"✅ **APPROVED:** {row['Reason']}")
                 elif "F" in row['Grade']:
@@ -434,51 +438,56 @@ if uploaded_files:
         if not df.empty:
             st.subheader("📈 Analytics & Trends")
             
-            active_df = df[df['Status'] == 'Active'].copy()
-            if not active_df.empty:
-                st.markdown("#### 🚀 Capital Efficiency Curve (Active Trades)")
-                st.caption("Are your trades gaining momentum or stalling? Look for the 'Dip Valley' around Day 15-25.")
+            # --- DATE FILTER (NEW) ---
+            min_date = df['Entry Date'].min()
+            max_date = df['Entry Date'].max()
+            
+            # Default to full range
+            date_range = st.date_input("Filter by Entry Date", [min_date, max_date])
+            
+            # Filter Data
+            if len(date_range) == 2:
+                start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+                # Ensure we capture end of day
+                end_d = end_d + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
                 
+                filtered_df = df[(df['Entry Date'] >= start_d) & (df['Entry Date'] <= end_d)]
+            else:
+                filtered_df = df
+            
+            # Active Plot
+            active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
+            if not active_sub.empty:
+                st.markdown("#### 🚀 Capital Efficiency Curve")
                 fig = px.scatter(
-                    active_df, 
-                    x='Days Held', 
-                    y='Daily Yield %', 
-                    color='Strategy', 
-                    size='Debit',
-                    hover_data=['Name', 'P&L'],
-                    title="Real-Time Efficiency: Yield vs Age"
+                    active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
+                    hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
                 )
-                
-                # Dynamic Baseline Lines
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
                 y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
-                
                 fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
-                fig.add_hline(y=y_m200, line_dash="dash", line_color="green", annotation_text=f"M200 Target ({y_m200:.2f}%)")
                 st.plotly_chart(fig, use_container_width=True)
 
-            expired_df = df[df['Status'] == 'Expired'].copy()
-            if not expired_df.empty:
+            # Expired Plot
+            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+            if not expired_sub.empty:
                 st.divider()
                 st.markdown("#### 🏆 Historical Performance")
                 c1, c2, c3 = st.columns(3)
-                win_rate = (len(expired_df[expired_df['P&L'] > 0]) / len(expired_df)) * 100
+                win_rate = (len(expired_sub[expired_sub['P&L'] > 0]) / len(expired_sub)) * 100
                 c1.metric("Win Rate", f"{win_rate:.1f}%")
-                c2.metric("Total Profit", f"${expired_df['P&L'].sum():,.0f}")
-                c3.metric("Trades Analyzed", len(expired_df))
+                c2.metric("Total Profit", f"${expired_sub['P&L'].sum():,.0f}")
+                c3.metric("Trades Analyzed", len(expired_sub))
                 
                 st.plotly_chart(
                     px.scatter(
-                        expired_df, 
-                        x='Debit/Lot', 
-                        y='P&L', 
-                        color='Strategy', 
+                        expired_sub, x='Debit/Lot', y='P&L', color='Strategy', 
                         title="Winning Zone: Entry Price vs Profit"
                     ), 
                     use_container_width=True
                 )
             else:
-                st.info("No Expired trades found in current upload. Drop historical files to see long-term stats.")
+                st.info("No Expired trades found for this period.")
 
     # 4. RULE BOOK
     with tab4:
