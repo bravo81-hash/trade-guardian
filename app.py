@@ -228,16 +228,52 @@ if uploaded_files:
 
             active_df[['Action', 'Signal_Type']] = active_df.apply(apply_action, axis=1)
             
-            # --- TOP METRICS ---
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Active Trades", len(active_df))
-            c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}")
-            c3.metric("Open P&L", f"${active_df['P&L'].sum():,.0f}")
+            # --- STRATEGY OVERVIEW ---
+            st.markdown("### 🏛️ Strategy Overview")
+            
+            strat_agg = active_df.groupby('Strategy').agg({
+                'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                'Name': 'count', 'Daily Yield %': 'mean' 
+            }).reset_index()
+            
+            strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
+            strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
+            
+            total_row = pd.DataFrame({
+                'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
+                'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
+                'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                'Trend': ['-'], 'Target %': ['-']
+            })
+            
+            final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
+            
+            display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Theta', 'Delta', 'Name']].copy()
+            display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']
+            
+            def highlight_trend(val):
+                if '🟢' in str(val): return 'color: green; font-weight: bold'
+                if '🔴' in str(val): return 'color: red; font-weight: bold'
+                return ''
+
+            def style_total(row):
+                if row['Strategy'] == 'TOTAL':
+                    return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(
+                display_agg.style
+                .format({
+                    'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
+                    'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                })
+                .applymap(highlight_trend, subset=['Trend'])
+                .apply(style_total, axis=1), 
+                use_container_width=True
+            )
             
             st.divider()
-            
-            # --- STRATEGY TABS (VERTICAL SCROLL FIX) ---
-            st.markdown("### 🏛️ Active Trades by Strategy")
+            st.markdown("### 📋 Active Trades by Strategy")
             
             # Sub-Tabs
             strat_tabs = st.tabs(["🔹 130/160", "🔸 160/190", "🐳 M200", "📋 Summary"])
@@ -258,7 +294,7 @@ if uploaded_files:
                     subset = active_df[active_df['Strategy'] == strategy_name].copy()
                     bench = benchmarks.get(strategy_name, {'pnl':0, 'roi':0, 'dit':0, 'yield':0})
                     
-                    # 1. ALERT TILES (LOCALIZED ACTION CENTER)
+                    # 1. ALERT TILES
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         for _, row in urgent.iterrows():
@@ -308,34 +344,14 @@ if uploaded_files:
             
             # Summary Tab
             with strat_tabs[3]:
-                # Strategy Overview Table
-                strat_agg = active_df.groupby('Strategy').agg({
-                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Name': 'count', 'Daily Yield %': 'mean'
-                }).reset_index()
-                
-                # Trend Logic
-                strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
-                
-                # Total Row
-                tot = pd.DataFrame({
-                    'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()],
-                    'Debit': [strat_agg['Debit'].sum()], 'Theta': [strat_agg['Theta'].sum()],
-                    'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
-                    'Trend': ['-']
-                })
-                agg_final = pd.concat([strat_agg, tot], ignore_index=True)
-                
-                # Styling
-                def highlight_trend(val):
-                    if '🟢' in str(val): return 'color: green; font-weight: bold'
-                    if '🔴' in str(val): return 'color: red; font-weight: bold'
-                    return ''
-
                 st.dataframe(
-                    agg_final.style
-                    .format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Theta': "{:.0f}", 'Daily Yield %': lambda x: safe_fmt(x, "{:.2f}%")})
+                    final_agg.style
+                    .format({
+                        'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
+                        'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                    })
                     .applymap(highlight_trend, subset=['Trend'])
-                    .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(agg_final)-1 else '' for _ in x], axis=1),
+                    .apply(style_total, axis=1), 
                     use_container_width=True
                 )
 
@@ -396,7 +412,6 @@ if uploaded_files:
                     title="Real-Time Efficiency: Yield vs Age"
                 )
                 
-                # Dynamic Baseline Lines
                 y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
                 y_m200 = benchmarks.get('M200', {}).get('yield', 0.56)
                 
