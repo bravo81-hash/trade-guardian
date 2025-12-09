@@ -20,9 +20,9 @@ st.sidebar.divider()
 st.sidebar.header("⚙️ View Settings")
 show_closed = st.sidebar.checkbox("Show Expired Trades in Analytics", value=True)
 
-# --- CONSTANTS: HISTORICAL BASELINES ---
+# --- CONSTANTS ---
 HISTORICAL_BASELINES = {
-    '130/160': 0.13, # % per day
+    '130/160': 0.13, 
     '160/190': 0.28,
     'M200':    0.56
 }
@@ -38,6 +38,15 @@ def get_strategy(group_name):
 def clean_num(x):
     try: return float(str(x).replace('$','').replace(',',''))
     except: return 0.0
+
+def safe_fmt(val, fmt_str):
+    """Safely formats a value, handling non-numeric strings gracefully."""
+    try:
+        if isinstance(val, (int, float)):
+            return fmt_str.format(val)
+        return str(val)
+    except:
+        return str(val)
 
 # --- CORE PROCESSING ---
 @st.cache_data
@@ -93,7 +102,6 @@ def process_data(files):
                         pnl = clean_num(row.get('Total Return $', 0))
                         debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                         
-                        # RAW GREEKS
                         theta = clean_num(row.get('Theta', 0))
                         delta = clean_num(row.get('Delta', 0))
                         gamma = clean_num(row.get('Gamma', 0))
@@ -111,11 +119,10 @@ def process_data(files):
                         days_held = (end_dt - start_dt).days
                         if days_held < 1: days_held = 1 
 
-                        # EFFICIENCY METRICS
+                        # METRICS
                         roi = (pnl / debit * 100) if debit > 0 else 0
                         daily_yield = roi / days_held
 
-                        # LOT SIZE LOGIC
                         lot_size = 1
                         if strat == '130/160' and debit > 6000: lot_size = 2
                         elif strat == '130/160' and debit > 10000: lot_size = 3
@@ -124,7 +131,6 @@ def process_data(files):
                             
                         debit_lot = debit / max(1, lot_size)
                         
-                        # GRADING LOGIC
                         grade = "C"
                         reason = "Standard"
                         
@@ -139,7 +145,6 @@ def process_data(files):
                             if 7500 <= debit_lot <= 8500: grade = "A"; reason = "Perfect Entry"
                             else: grade = "B"; reason = "Variance"
 
-                        # ALERTS
                         alerts = []
                         if strat == '130/160' and status == "Active" and 25 <= days_held <= 35 and pnl < 100:
                             alerts.append("💀 STALE CAPITAL")
@@ -165,7 +170,6 @@ def process_data(files):
 if uploaded_files:
     df = process_data(uploaded_files)
     
-    # TABS
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
     
     # 1. ACTIVE DASHBOARD
@@ -173,7 +177,6 @@ if uploaded_files:
         if not df.empty:
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
-            # --- TOP METRICS ---
             c1, c2, c3 = st.columns(3)
             c1.metric("Active Trades", len(active_df))
             c2.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}")
@@ -184,7 +187,6 @@ if uploaded_files:
             # --- STRATEGY OVERVIEW ---
             st.markdown("### 🏛️ Strategy Overview")
             
-            # 1. Group Data
             strat_agg = active_df.groupby('Strategy').agg({
                 'P&L': 'sum',
                 'Debit': 'sum',
@@ -194,11 +196,10 @@ if uploaded_files:
                 'Daily Yield %': 'mean' 
             }).reset_index()
             
-            # 2. Add Logic Cols
             strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= HISTORICAL_BASELINES.get(r['Strategy'], 0) else "🔴 Lagging", axis=1)
             strat_agg['Target %'] = strat_agg['Strategy'].map(HISTORICAL_BASELINES)
             
-            # 3. Add Total Row
+            # Total Row
             total_row = pd.DataFrame({
                 'Strategy': ['TOTAL'],
                 'P&L': [strat_agg['P&L'].sum()],
@@ -212,13 +213,9 @@ if uploaded_files:
             
             final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
             
-            # 4. FIX: Select Columns using ORIGINAL names first, THEN rename
-            # The columns in final_agg are: Strategy, P&L, Debit, Theta, Delta, Name, Daily Yield %, Trend, Target %
-            
             display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Theta', 'Delta', 'Name']].copy()
             display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Net Theta', 'Net Delta', 'Active Trades']
             
-            # Styling
             def highlight_trend(val):
                 if '🟢' in str(val): return 'color: green; font-weight: bold'
                 if '🔴' in str(val): return 'color: red; font-weight: bold'
@@ -229,9 +226,16 @@ if uploaded_files:
                     return ['background-color: #e6e9ef; color: black; font-weight: bold'] * len(row)
                 return [''] * len(row)
 
+            # FIXED: Safe formatting with lambda to handle '-' strings
             st.dataframe(
                 display_agg.style
-                .format({'Total P&L': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Yield/Day': "{:.2f}%", 'Target': "{:.2f}%"})
+                .format({
+                    'Total P&L': "${:,.0f}", 
+                    'Net Theta': "{:,.0f}", 
+                    'Net Delta': "{:,.1f}",
+                    'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
+                    'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                })
                 .applymap(highlight_trend, subset=['Trend'])
                 .apply(style_total, axis=1), 
                 use_container_width=True
@@ -240,7 +244,6 @@ if uploaded_files:
             st.divider()
             st.markdown("### 📋 Trade Details (By Strategy)")
             
-            # Columns to Display
             disp_cols = ['Name', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Debit/Lot', 'Days Held', 'Delta', 'Gamma', 'Theta', 'Vega', 'Alerts']
             
             def render_strategy_table(strategy_name, label):
@@ -264,7 +267,7 @@ if uploaded_files:
                             display_subset.style.format({
                                 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Debit/Lot': "${:,.0f}", 
                                 'Gamma': "{:.2f}", 'Delta': "{:.1f}", 'Theta': "{:.1f}", 'Days Held': "{:.0f}",
-                                'Daily Yield %': "{:.2f}%"
+                                'Daily Yield %': "{:.2f}%", 'Vega': "{:.0f}"
                             })
                             .apply(lambda x: ['background-color: #e6e9ef; color: black; font-weight: bold' if x.name == len(display_subset)-1 else '' for _ in x], axis=1)
                             .apply(lambda x: ['color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '' for v in x], subset=['Grade']),
@@ -281,7 +284,7 @@ if uploaded_files:
     with tab2:
         st.markdown("### 🧪 Pre-Flight Audit")
         
-        with st.expander("ℹ️ Grading System Legend (Click to view)", expanded=True):
+        with st.expander("ℹ️ Grading System Legend", expanded=True):
             st.markdown("""
             | Strategy | Grade | Debit Range (Per Lot) | Verdict |
             | :--- | :--- | :--- | :--- |
@@ -333,7 +336,6 @@ if uploaded_files:
                     hover_data=['Name', 'P&L'],
                     title="Real-Time Efficiency: Yield vs Age"
                 )
-                # Add Baseline Markers
                 fig.add_hline(y=0.13, line_dash="dash", line_color="blue", annotation_text="130/160 Target")
                 fig.add_hline(y=0.56, line_dash="dash", line_color="green", annotation_text="M200 Target")
                 st.plotly_chart(fig, use_container_width=True)
