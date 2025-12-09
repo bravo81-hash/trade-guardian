@@ -172,11 +172,7 @@ def process_data(files):
             
     df = pd.DataFrame(all_data)
     if not df.empty:
-        # Sort so we see most recent / relevant first
         df = df.sort_values(by=['Name', 'Days Held'], ascending=[True, False])
-        # Note: We do NOT drop duplicates here if we want to see trends, 
-        # but for the main dashboard, we usually want the latest snapshot.
-        # Let's create a 'Latest' view.
         df['Latest'] = ~df.duplicated(subset=['Name', 'Strategy'], keep='first')
         
     return df
@@ -191,7 +187,6 @@ if uploaded_files:
     # 1. ACTIVE HEALTH
     with tab1:
         if not df.empty:
-            # Filter for Latest Active Trades
             active_df = df[(df['Status'] == 'Active') & (df['Latest'] == True)].copy()
             
             c1, c2, c3 = st.columns(3)
@@ -199,7 +194,6 @@ if uploaded_files:
             c2.metric("Portfolio Delta", f"{active_df['Delta'].sum():.2f}", help="Total directional exposure")
             c3.metric("Portfolio Theta", f"{active_df['Theta'].sum():.0f}", help="Daily time decay collected")
             
-            # Show Alerts
             problem_trades = active_df[active_df['Alerts'] != ""]
             if not problem_trades.empty:
                 st.error(f"🚨 **Risk Alerts ({len(problem_trades)})**")
@@ -208,19 +202,14 @@ if uploaded_files:
             
             st.markdown("### 🔬 Deep Greek Analysis")
             
-            # Prepare Table Data
             view = active_df[['Name', 'Strategy', 'Grade', 'P&L', 'Debit/Lot', 'Theta', 'Explosion Ratio', 'Vol Ratio', 'Alerts']]
             
             def color_rows(row):
                 styles = []
-                # Grade Coloring
                 base_color = ''
                 if 'A' in str(row['Grade']): base_color = 'background-color: #d4edda; color: #155724'
                 elif 'F' in str(row['Grade']): base_color = 'background-color: #f8d7da; color: #721c24'
-                
-                # Risk Coloring (Overrides Grade)
-                if 'HIGH GAMMA' in str(row['Alerts']): base_color = 'background-color: #fff3cd; color: #856404' # Yellow warning
-                
+                if 'HIGH GAMMA' in str(row['Alerts']): base_color = 'background-color: #fff3cd; color: #856404'
                 return [base_color] * len(row)
 
             st.dataframe(view.style.apply(color_rows, axis=1), use_container_width=True, height=600)
@@ -259,9 +248,27 @@ if uploaded_files:
     with tab3:
         if not df.empty:
             st.subheader("📈 Portfolio Intelligence")
-            expired_df = df[df['Status'] == 'Expired']
+            expired_df = df[df['Status'] == 'Expired'].copy()
             if not expired_df.empty:
-                st.plotly_chart(px.scatter(expired_df, x='Debit/Lot', y='P&L', color='Strategy', size='Theta', title="Win Profile: Price vs Decay"), use_container_width=True)
+                # FIX: Create Positive Theta for Sizing to prevent Plotly Crash
+                expired_df['Abs_Theta'] = expired_df['Theta'].abs()
+                # Ensure no zeros for size
+                expired_df.loc[expired_df['Abs_Theta'] < 0.1, 'Abs_Theta'] = 0.1
+                
+                st.plotly_chart(
+                    px.scatter(
+                        expired_df, 
+                        x='Debit/Lot', 
+                        y='P&L', 
+                        color='Strategy', 
+                        size='Abs_Theta', 
+                        hover_data=['Theta'],
+                        title="Win Profile: Price vs Decay (Size = Theta Strength)"
+                    ), 
+                    use_container_width=True
+                )
+            else:
+                st.info("No expired trades found for analytics.")
 
     # 4. RULE BOOK
     with tab4:
