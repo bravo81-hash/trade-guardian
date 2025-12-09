@@ -15,10 +15,10 @@ tab1, tab2, tab3 = st.tabs(["📊 Active Health", "🧪 Model Trade Lab", "📈 
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data Import")
+# FIX: Removed type="csv" to prevent graying out files on Mac
 uploaded_files = st.sidebar.file_uploader(
     "1. Drop ALL History & Active Files Here", 
     accept_multiple_files=True, 
-    type="csv",
     help="You can drop multiple files. The app will merge them and remove duplicates automatically."
 )
 
@@ -166,7 +166,12 @@ with tab1:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Active Trades", len(active_df))
         c2.metric("Open P&L", f"${active_df['P&L'].sum():,.2f}")
-        c3.metric("Avg P&L / Trade", f"${active_df['P&L'].mean():,.2f}")
+        
+        if len(active_df) > 0:
+            c3.metric("Avg P&L / Trade", f"${active_df['P&L'].mean():,.2f}")
+        else:
+            c3.metric("Avg P&L / Trade", "$0.00")
+            
         alerts = active_df[active_df['Alert'] != ""]
         c4.metric("Alerts", len(alerts), delta_color="inverse")
         
@@ -193,7 +198,8 @@ with tab1:
 with tab2:
     st.markdown("### 🧪 Trade Validator")
     st.markdown("Drop a hypothetical trade file here to grade it before execution.")
-    model_file = st.file_uploader("Upload Model CSV", type="csv", key="model_uploader")
+    # FIX: Removed type="csv"
+    model_file = st.file_uploader("Upload Model CSV", key="model_uploader")
     
     if model_file:
         model_df = process_data([model_file])
