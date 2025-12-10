@@ -272,7 +272,7 @@ else:
                 }
 
     # --- TABS ---
-    tabs = st.tabs(["📊 Dashboard", "🧪 Validator", "📈 Analytics", "💰 Allocation", "📓 Journal", "📖 Rules"])
+    tabs = st.tabs(["📊 Dashboard", "🧪 Validator", "📈 Analytics", "📜 Timeline", "💰 Allocation", "📓 Journal", "📖 Rules"])
 
     # 1. DASHBOARD
     with tabs[0]:
@@ -352,13 +352,13 @@ else:
                         sum_row = pd.DataFrame({'Name':['TOTAL'], 'Action':['-'], 'Grade':['-'], 'P&L':[sub['P&L'].sum()], 
                                                 'Debit':[sub['Debit'].sum()], 'Days Held':[sub['Days Held'].mean()], 
                                                 'Daily Yield %':[sub['Daily Yield %'].mean()], 'Theta':[sub['Theta'].sum()], 'Delta':[sub['Delta'].sum()]})
-                        display = pd.concat([sub[cols], sum_row], ignore_index=True)
+                        display_df = pd.concat([sub[cols], sum_row], ignore_index=True)
                         
                         st.dataframe(
-                            display.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
-                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
-                            .map(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
-                            .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
+                            display_df.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
+                            .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
+                            .applymap(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
+                            .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
                     else: st.info("No active trades.")
@@ -394,7 +394,6 @@ else:
             try:
                 if model_file.name.endswith('.xlsx'): m_df = pd.read_excel(model_file)
                 else: 
-                    # Smart Read
                     m_df = pd.read_csv(model_file)
                     if 'Name' not in m_df.columns:
                         model_file.seek(0)
@@ -426,8 +425,12 @@ else:
                     c2.metric("Debit Total", f"${debit:,.0f}")
                     c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
                     
+                    # COMPARISON
                     if not expired_df.empty:
-                        similar = expired_df[(expired_df['Strategy'] == strat) & (expired_df['Debit/Lot'].between(debit_lot*0.9, debit_lot*1.1))]
+                        similar = expired_df[
+                            (expired_df['Strategy'] == strat) & 
+                            (expired_df['Debit/Lot'].between(debit_lot*0.9, debit_lot*1.1))
+                        ]
                         if not similar.empty:
                             avg_win = similar[similar['P&L']>0]['P&L'].mean()
                             st.info(f"📊 **Historical Context:** Found {len(similar)} similar trades. Average Win: **${avg_win:,.0f}**")
@@ -466,8 +469,14 @@ else:
             with an_tabs[2]: 
                 exp_sub = filt_df[filt_df['Status']=='Expired']
                 if not exp_sub.empty:
-                    perf = exp_sub.groupby('Strategy').agg({'P&L':['count','mean','sum'], 'Days Held':'mean', 'Daily Yield %':'mean'}).reset_index()
-                    st.dataframe(perf, use_container_width=True)
+                    ranking = exp_sub.groupby('Strategy').agg({
+                        'P&L': lambda x: (x > 0).sum() / len(x) * 100,
+                        'Daily Yield %': 'mean',
+                        'Days Held': 'mean'
+                    }).round(2)
+                    ranking.columns = ['Win Rate %', 'Avg Yield', 'Avg Days']
+                    ranking = ranking.sort_values('Win Rate %', ascending=False)
+                    st.dataframe(ranking, use_container_width=True)
             
             with an_tabs[3]: 
                 exp_sub = filt_df[filt_df['Status']=='Expired']
@@ -475,8 +484,23 @@ else:
                     fig = px.density_heatmap(exp_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
 
-    # 4. ALLOCATION
+    # 4. TIMELINE (NEW)
     with tabs[3]:
+        st.markdown("### 📜 Trade Timeline")
+        sel_trade_id = st.selectbox("Select Trade", df['id'].unique(), format_func=lambda x: df[df['id']==x]['Name'].iloc[0])
+        
+        conn = get_db_connection()
+        history = pd.read_sql_query("SELECT * FROM snapshots WHERE trade_id = ? ORDER BY snapshot_date", conn, params=(sel_trade_id,))
+        conn.close()
+        
+        if not history.empty:
+            fig = px.line(history, x='snapshot_date', y='pnl', title=f"P&L History: {df[df['id']==sel_trade_id]['Name'].iloc[0]}", markers=True)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No history snapshots available for this trade yet (Sync more active files).")
+
+    # 5. ALLOCATION
+    with tabs[4]:
         st.markdown(f"### 💰 Portfolio Allocation (Based on ${acct_size:,.0f})")
         st.info("💡 **Barbell Approach:** Balance high-growth M200 with steady 130/160 cash flow.")
         
@@ -500,8 +524,8 @@ else:
         st.progress(0.8)
         st.caption(f"Cash Reserve: 20% (${reserve:,.0f}) for repairs/opportunities.")
 
-    # 5. JOURNAL
-    with tabs[4]:
+    # 6. JOURNAL
+    with tabs[5]:
         st.markdown("### 📓 Trade Journal")
         all_strats = list(df['Strategy'].unique())
         sel_strat = st.selectbox("Filter by Strategy", ["All"] + all_strats)
@@ -519,8 +543,8 @@ else:
             except Exception as e:
                 st.error(f"Save failed: {e}")
 
-    # 6. RULES
-    with tabs[5]:
+    # 7. RULES
+    with tabs[6]:
         st.markdown("""
         ### 1. 130/160 Strategy (Income Engine)
         * **Target Entry:** Monday.
@@ -546,5 +570,5 @@ else:
     # QUICK START
     st.sidebar.divider()
     st.sidebar.markdown("---")
-    st.sidebar.caption("Allantis Trade Guardian v2.5 | Enterprise Edition | Dec 2024")
+    st.sidebar.caption("Allantis Trade Guardian v46.0 | Analytics Edition | Dec 2024")
     st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
