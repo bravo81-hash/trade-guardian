@@ -11,42 +11,49 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Enterprise DB")
+st.title("🛡️ Allantis Trade Guardian: Precision DB")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v2.db"
 
 def init_db():
-    if not os.path.exists(DB_NAME):
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS trades (
-                        id TEXT PRIMARY KEY,
-                        name TEXT,
-                        strategy TEXT,
-                        status TEXT,
-                        entry_date DATE,
-                        debit REAL,
-                        lot_size INTEGER,
-                        pnl REAL,
-                        notes TEXT
-                    )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_id TEXT,
-                        snapshot_date DATE,
-                        pnl REAL,
-                        theta REAL,
-                        delta REAL,
-                        gamma REAL,
-                        vega REAL,
-                        days_held INTEGER,
-                        FOREIGN KEY(trade_id) REFERENCES trades(id)
-                    )''')
-        c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
-        conn.commit()
-        conn.close()
+    # We check if DB exists. If schema is old, user should delete file, but we try to be robust.
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # TRADES TABLE (Added 'days_held' to master record)
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    strategy TEXT,
+                    status TEXT,
+                    entry_date DATE,
+                    exit_date DATE,
+                    days_held INTEGER, 
+                    debit REAL,
+                    lot_size INTEGER,
+                    pnl REAL,
+                    notes TEXT
+                )''')
+    
+    # SNAPSHOTS TABLE
+    c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id TEXT,
+                    snapshot_date DATE,
+                    pnl REAL,
+                    theta REAL,
+                    delta REAL,
+                    gamma REAL,
+                    vega REAL,
+                    days_held INTEGER,
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )''')
+    
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
+    conn.commit()
+    conn.close()
 
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
@@ -64,17 +71,11 @@ def clean_num(x):
     try: return float(str(x).replace('$','').replace(',',''))
     except: return 0.0
 
-def safe_fmt(val, fmt_str):
-    try:
-        if isinstance(val, (int, float)): return fmt_str.format(val)
-        return str(val)
-    except: return str(val)
-
 def generate_trade_id(name, strategy, entry_date):
     date_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{date_str}".replace(" ", "").replace("/", "-")
 
-# --- SYNC ENGINE ---
+# --- SYNC ENGINE (SMART DATE LOGIC) ---
 def sync_data(file_list, file_type):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -99,6 +100,7 @@ def sync_data(file_list, file_type):
                 name = str(row.get('Name', ''))
                 if name.startswith('.') or name == 'nan' or name == '' or name == 'Symbol': continue
                 
+                # Entry Date
                 created_val = row.get('Created At', '')
                 try: start_dt = pd.to_datetime(created_val)
                 except: continue
@@ -118,37 +120,62 @@ def sync_data(file_list, file_type):
                 trade_id = generate_trade_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
+                # --- CRITICAL DATE LOGIC ---
+                exit_dt = None
+                days_held = 0
+                
+                if file_type == "History":
+                    # For History files, 'Expiration' is actually the CLOSE DATE
+                    try:
+                        exit_dt = pd.to_datetime(row.get('Expiration', ''))
+                        days_held = (exit_dt - start_dt).days
+                        if days_held < 1: days_held = 1
+                    except: days_held = 1 # Fallback
+                else:
+                    # For Active files, 'Expiration' is DTE (Future).
+                    # So Days Held is (Today - Entry)
+                    days_held = (datetime.now() - start_dt).days
+                    if days_held < 1: days_held = 1
+
                 # UPSERT TRADE
                 cursor.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 data = cursor.fetchone()
                 
                 if data is None:
-                    cursor.execute('''INSERT INTO trades (id, name, strategy, status, entry_date, debit, lot_size, pnl, notes) 
-                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                   (trade_id, name, strat, status, start_dt.date(), debit, lot_size, pnl, ""))
+                    # New Insert
+                    cursor.execute('''INSERT INTO trades 
+                                      (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, notes) 
+                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                   (trade_id, name, strat, status, start_dt.date(), 
+                                    exit_dt.date() if exit_dt else None, 
+                                    days_held, debit, lot_size, pnl, ""))
                     count_new += 1
                 else:
+                    # Update Existing
                     if file_type == "History" or data[0] == "Active":
-                        cursor.execute('''UPDATE trades SET pnl = ?, status = ? WHERE id = ?''', (pnl, status, trade_id))
+                        # If History, we update the days_held to the final value
+                        if file_type == "History":
+                            cursor.execute('''UPDATE trades SET pnl=?, status=?, exit_date=?, days_held=? WHERE id=?''', 
+                                           (pnl, status, exit_dt.date() if exit_dt else None, days_held, trade_id))
+                        else:
+                            # If Active, we update days_held to current duration
+                            cursor.execute('''UPDATE trades SET pnl=?, status=?, days_held=? WHERE id=?''', 
+                                           (pnl, status, days_held, trade_id))
                         count_update += 1
 
-                # SNAPSHOT LOGIC
+                # SNAPSHOT LOGIC (Active Only)
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
                     gamma = clean_num(row.get('Gamma', 0))
                     vega = clean_num(row.get('Vega', 0))
-                    days = (datetime.now() - start_dt).days
-                    if days < 1: days = 1
                     
                     today_str = datetime.now().date()
                     cursor.execute("SELECT id FROM snapshots WHERE trade_id = ? AND snapshot_date = ?", (trade_id, today_str))
-                    snap_exists = cursor.fetchone()
-                    
-                    if not snap_exists:
+                    if not cursor.fetchone():
                         cursor.execute('''INSERT INTO snapshots (trade_id, snapshot_date, pnl, theta, delta, gamma, vega, days_held)
                                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                                       (trade_id, today_str, pnl, theta, delta, gamma, vega, days))
+                                       (trade_id, today_str, pnl, theta, delta, gamma, vega, days_held))
 
             log.append(f"✅ {file.name}: {count_new} New / {count_update} Updated")
         except Exception as e:
@@ -162,9 +189,11 @@ def sync_data(file_list, file_type):
 def load_data_from_db():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
+    
+    # We now pull days_held directly from TRADES table for accuracy
     query = """
-    SELECT t.id, t.name, t.strategy, t.status, t.entry_date, t.debit, t.lot_size, t.pnl, t.notes,
-           s.theta, s.delta, s.gamma, s.vega, s.days_held
+    SELECT t.id, t.name, t.strategy, t.status, t.entry_date, t.days_held, t.debit, t.lot_size, t.pnl, t.notes,
+           s.theta, s.delta, s.gamma, s.vega
     FROM trades t
     LEFT JOIN (SELECT * FROM snapshots WHERE id IN (SELECT MAX(id) FROM snapshots GROUP BY trade_id)) s ON t.id = s.trade_id
     """
@@ -174,6 +203,7 @@ def load_data_from_db():
     except: return pd.DataFrame()
     
     if not df.empty:
+        # Renaming for UI
         df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status', 
             'pnl': 'P&L', 'debit': 'Debit', 'notes': 'Notes',
@@ -181,15 +211,10 @@ def load_data_from_db():
             'days_held': 'Days Held'
         }, inplace=True)
         
-        df['entry_date'] = pd.to_datetime(df['entry_date'])
-        
-        # Recalculate Live Days for Active
-        mask_active = df['Status'] == 'Active'
-        df.loc[mask_active, 'calc_days'] = (datetime.now() - df.loc[mask_active, 'entry_date']).dt.days
-        df['Days Held'] = df['Days Held'].fillna(df['calc_days']) 
-        df.loc[df['Days Held'] < 1, 'Days Held'] = 1
-        
+        # Calculations
         df['Debit/Lot'] = df['Debit'] / df['lot_size']
+        # Protect against div by zero
+        df.loc[df['Days Held'] < 1, 'Days Held'] = 1
         df['Daily Yield %'] = (df['P&L'] / df['Debit'] * 100) / df['Days Held']
         
         def get_grade(row):
@@ -228,7 +253,6 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
         except Exception as e:
             st.error(f"Error: {e}")
 
-    # Restore
     uploaded_db = st.file_uploader("📥 Restore DB", type=['db', 'sqlite'], key='restore')
     if uploaded_db:
         with open(DB_NAME, "wb") as f:
@@ -242,12 +266,12 @@ acct_size = st.sidebar.number_input("Account Size ($)", value=150000, step=5000)
 market_regime = st.sidebar.selectbox("Market Regime", ["Neutral", "Bullish (+10%)", "Bearish (-10%)"], index=0)
 regime_mult = 1.1 if "Bullish" in market_regime else 0.9 if "Bearish" in market_regime else 1.0
 
-# --- CONFIG (RECALIBRATED) ---
-# NOTE: 'dit' (Days in Trade) here is the TARGET duration, not the file's 'Expiration' value.
+# --- BASE CONFIG ---
+# PNL targets are static, but Yield/Hold are now learned dynamically
 BASE_CONFIG = {
-    '130/160': {'yield': 0.33, 'pnl': 600, 'dit': 30}, 
-    '160/190': {'yield': 0.16, 'pnl': 420, 'dit': 45}, 
-    'M200':    {'yield': 0.37, 'pnl': 910, 'dit': 30}
+    '130/160': {'pnl': 600}, 
+    '160/190': {'pnl': 420}, 
+    'M200':    {'pnl': 910}
 }
 
 def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
@@ -267,25 +291,27 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
 df = load_data_from_db()
 
 if df.empty:
-    st.info("👋 Database empty. Upload your '.db' backup OR your Active/History CSVs to start.")
+    st.info("👋 Database empty. Upload files to initialize.")
 else:
-    # --- BENCHMARKS ---
+    # --- BENCHMARKS (NOW ACCURATE) ---
     expired_df = df[df['Status'] == 'Expired'].copy()
     benchmarks = BASE_CONFIG.copy()
+    
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
             if not winners.empty:
-                # We calculate Real Avg Win ($) but use Config Target Days for Yield calc
-                # to avoid the "Expiration Date" skewing yield data.
+                # We calculate TRUE stats from the new 'Days Held' logic
                 real_pnl = winners['P&L'].mean()
-                target_days = BASE_CONFIG.get(strat, {}).get('dit', 30)
+                real_days = winners['Days Held'].mean() # Accurate now!
                 avg_debit = grp['Debit'].mean()
                 
-                benchmarks[strat]['pnl'] = real_pnl
-                if avg_debit > 0:
-                    benchmarks[strat]['yield'] = (real_pnl / avg_debit * 100) / target_days
+                benchmarks[strat] = {
+                    'pnl': real_pnl,
+                    'dit': real_days,
+                    'yield': (real_pnl / avg_debit * 100) / real_days if real_days > 0 else 0
+                }
 
     # --- TABS ---
     tabs = st.tabs(["📊 Dashboard", "🧪 Validator", "📈 Analytics", "📜 Timeline", "💰 Allocation", "📓 Journal", "📖 Rules"])
@@ -295,13 +321,11 @@ else:
         active_df = df[df['Status'] == 'Active'].copy()
         
         if not active_df.empty:
-            # Portfolio Health
             port_yield = active_df['Daily Yield %'].mean()
             if port_yield < 0.10: st.sidebar.error(f"🚨 Critical Yield: {port_yield:.2f}%")
             elif port_yield < 0.15: st.sidebar.warning(f"⚠️ Low Yield: {port_yield:.2f}%")
             else: st.sidebar.success(f"✅ Healthy: {port_yield:.2f}%")
             
-            # Action Logic
             act_list, sig_list = [], []
             for _, row in active_df.iterrows():
                 act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks)
@@ -310,7 +334,6 @@ else:
             active_df['Action'] = act_list
             active_df['Signal_Type'] = sig_list
             
-            # Risk Center
             with st.expander("📊 Risk Command Center", expanded=True):
                 c1, c2, c3 = st.columns(3)
                 delta_net = active_df['Delta'].sum()
@@ -318,10 +341,8 @@ else:
                 c2.metric("Daily Theta", f"${active_df['Theta'].sum():,.0f}")
                 c3.metric("Capital at Risk", f"${active_df['Debit'].sum():,.0f}")
 
-            # Sub-Tabs
             strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
             
-            # Overview Tab
             with strat_tabs[0]:
                 agg = active_df.groupby('Strategy').agg({
                     'P&L':'sum', 'Debit':'sum', 'Theta':'sum', 'Name':'count', 'Daily Yield %':'mean'
@@ -339,7 +360,6 @@ else:
                     use_container_width=True
                 )
 
-            # Strategy Tabs
             cols = ['Name', 'Action', 'Grade', 'P&L', 'Debit', 'Days Held', 'Daily Yield %', 'Theta', 'Delta']
             
             def render_strat(tab, strat):
@@ -347,7 +367,6 @@ else:
                     sub = active_df[active_df['Strategy'] == strat].copy()
                     bench = benchmarks.get(strat, BASE_CONFIG.get(strat))
                     
-                    # ALERT TILES
                     urgent = sub[sub['Action'] != ""]
                     if not urgent.empty:
                         st.markdown("**🚨 Action Center**")
@@ -356,16 +375,14 @@ else:
                             st.markdown(f"<span style='color:{color}; font-weight:bold'>● {r['Name']}</span>: {r['Action']}", unsafe_allow_html=True)
                         st.divider()
 
-                    # Benchmarks
+                    # Benchmarks - Now using REAL Avg Hold, not Expiration DTE
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Hist. Win", f"${bench.get('pnl',0):,.0f}")
                     c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%")
                     c3.metric("Target (Adj)", f"${bench.get('pnl',0)*regime_mult:,.0f}")
-                    # CHANGED LABEL to reflect accuracy
-                    c4.metric("Target Hold", f"{bench.get('dit',0):.0f}d")
+                    c4.metric("Avg Duration", f"{bench.get('dit',0):.0f}d")
                     
                     if not sub.empty:
-                        # Total Row
                         sum_row = pd.DataFrame({'Name':['TOTAL'], 'Action':['-'], 'Grade':['-'], 'P&L':[sub['P&L'].sum()], 
                                                 'Debit':[sub['Debit'].sum()], 'Days Held':[sub['Days Held'].mean()], 
                                                 'Daily Yield %':[sub['Daily Yield %'].mean()], 'Theta':[sub['Theta'].sum()], 'Delta':[sub['Delta'].sum()]})
@@ -373,8 +390,8 @@ else:
                         
                         st.dataframe(
                             display.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
-                            .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else ('background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else ''), subset=['Action'])
-                            .applymap(lambda v: 'color: green' if 'A' in str(v) else ('color: red' if 'F' in str(v) else ''), subset=['Grade'])
+                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else ('background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else ''), subset=['Action'])
+                            .map(lambda v: 'color: green' if 'A' in str(v) else ('color: red' if 'F' in str(v) else ''), subset=['Grade'])
                             .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
@@ -392,20 +409,17 @@ else:
     # 2. VALIDATOR
     with tabs[1]:
         st.markdown("### 🧪 Pre-Flight Audit")
-        
         with st.expander("ℹ️ Grading System Legend", expanded=True):
             st.markdown("""
             | Strategy | Grade | Debit Range (Per Lot) | Verdict |
             | :--- | :--- | :--- | :--- |
-            | **130/160** | **A+** | `$3,500 - $4,500` | ✅ **Sweet Spot** (Highest statistical win rate) |
-            | **130/160** | **B** | `< $3,500` or `$4,500-$4,800` | ⚠️ **Acceptable** (Watch volatility) |
-            | **130/160** | **F** | `> $4,800` | ⛔ **Overpriced** (Historical failure rate 100%) |
-            | **160/190** | **A** | `$4,800 - $5,500` | ✅ **Ideal** Pricing |
-            | **160/190** | **C** | `> $5,500` | ⚠️ **Expensive** (Reduces ROI efficiency) |
-            | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** "Whale" sizing |
-            | **M200** | **B** | Any other price | ⚠️ **Variance** from mean |
+            | **130/160** | **A+** | `$3,500 - $4,500` | ✅ **Sweet Spot** |
+            | **130/160** | **B** | `< $3,500` or `$4,500-$4,800` | ⚠️ **Acceptable** |
+            | **130/160** | **F** | `> $4,800` | ⛔ **Overpriced** |
+            | **160/190** | **A** | `$4,800 - $5,500` | ✅ **Ideal** |
+            | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** |
             """)
-            
+        
         model_file = st.file_uploader("Upload Model File", key="mod")
         if model_file:
             try:
@@ -429,7 +443,6 @@ else:
                     elif strat == 'M200' and debit > 12000: lot_size = 2
                     
                     debit_lot = debit / lot_size
-                    
                     grade = "C"
                     if strat == '130/160': grade = "F" if debit_lot > 4800 else "A+" if 3500 <= debit_lot <= 4500 else "B"
                     if strat == '160/190': grade = "A" if 4800 <= debit_lot <= 5500 else "C"
@@ -454,8 +467,7 @@ else:
                     if "A" in grade: st.success("✅ **APPROVED:** Great Entry")
                     elif "F" in grade: st.error("⛔ **REJECT:** Overpriced")
                     else: st.warning("⚠️ **CHECK:** Acceptable Variance")
-            except Exception as e: 
-                st.error(f"Could not parse file: {str(e)}")
+            except Exception as e: st.error(f"Error: {e}")
 
     # 3. ANALYTICS
     with tabs[2]:
@@ -501,18 +513,14 @@ else:
         trade_options = df['id'].unique()
         if len(trade_options) > 0:
             sel_trade_id = st.selectbox("Select Trade", trade_options, format_func=lambda x: df[df['id']==x]['Name'].iloc[0])
-            
             conn = get_db_connection()
             history = pd.read_sql_query("SELECT * FROM snapshots WHERE trade_id = ? ORDER BY snapshot_date", conn, params=(sel_trade_id,))
             conn.close()
-            
             if not history.empty:
-                fig = px.line(history, x='snapshot_date', y='pnl', title=f"P&L History: {df[df['id']==sel_trade_id]['Name'].iloc[0]}", markers=True)
+                fig = px.line(history, x='snapshot_date', y='pnl', title=f"P&L History", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No history snapshots available.")
-        else:
-            st.info("No trades found.")
+            else: st.info("No history snapshots available.")
+        else: st.info("No trades.")
 
     # 5. ALLOCATION
     with tabs[4]:
@@ -546,44 +554,33 @@ else:
         sel_strat = st.selectbox("Filter by Strategy", ["All"] + all_strats)
         j_df = df if sel_strat == "All" else df[df['Strategy'] == sel_strat]
         
-        edited = st.data_editor(j_df[['id','Name','Strategy','P&L','Notes']], key="journal", hide_index=True, use_container_width=True)
-        if st.button("💾 Save Notes"):
+        edited = st.data_editor(j_df[['id','Name','Strategy','P&L','Days Held','Notes']], key="journal", hide_index=True, use_container_width=True)
+        if st.button("💾 Save Changes"):
             try:
                 conn = get_db_connection()
                 for i, r in edited.iterrows():
-                    conn.execute("UPDATE trades SET notes = ? WHERE id = ?", (r['Notes'], r['id']))
+                    conn.execute("UPDATE trades SET notes = ?, days_held = ? WHERE id = ?", (r['Notes'], r['Days Held'], r['id']))
                 conn.commit()
                 st.success("Saved!")
                 st.rerun()
-            except Exception as e:
-                st.error(f"Save failed: {e}")
+            except Exception as e: st.error(f"Save failed: {e}")
 
     # 7. RULES
     with tabs[6]:
         st.markdown("""
         ### 1. 130/160 Strategy (Income Engine)
-        * **Target Entry:** Monday.
-        * **Debit Target:** `$3,500 - $4,500` per lot.
-        * **Stop Rule:** Never pay > `$4,800` per lot.
-        * **Management:** * **Kill Rule:** If trade is **>25 days old** AND profit is **flat/negative (<$100)**, EXIT immediately. Dead money.
-            * **Take Profit:** Target **~$600** (Historical Avg).
+        * **Target Entry:** Monday. **Debit:** `$3.5k-$4.5k`.
+        * **Manage:** Kill if >25d & Flat. Target ~$600.
         
         ### 2. 160/190 Strategy (Compounder)
-        * **Target Entry:** Friday.
-        * **Debit Target:** `~$5,200` per lot.
-        * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI efficiency).
-        * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days (Cooking Phase).
+        * **Target Entry:** Friday. **Debit:** `~$5.2k`. 1 Lot.
+        * **Exit:** Hold 40-50d.
         
         ### 3. M200 Strategy (Whale)
-        * **Target Entry:** Wednesday.
-        * **Debit Target:** `$7,500 - $8,500` per lot.
-        * **Management:** Check P&L at **Day 14**.
-            * If **Green (>$200):** Exit or Roll.
-            * If **Red/Flat:** HOLD. Do not exit in the "Dip Valley" (Day 15-50).
+        * **Target Entry:** Wednesday. **Debit:** `$7.5k-$8.5k`.
+        * **Manage:** Day 14 Check (Green=Roll, Red=Hold).
         """)
 
-    # QUICK START
     st.sidebar.divider()
     st.sidebar.markdown("---")
-    st.sidebar.caption("Allantis Trade Guardian v51.0 | Cloud Edition | Dec 2024")
-    st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
+    st.sidebar.caption("Allantis Trade Guardian v52.0 | Precision DB | Dec 2024")
