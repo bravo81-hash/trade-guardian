@@ -159,7 +159,7 @@ def load_data_from_db():
     conn.close()
     
     if not df.empty:
-        # Standardize Columns
+        # Standardize Columns (Capitalized Headers)
         df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status', 
             'pnl': 'P&L', 'debit': 'Debit', 'notes': 'Notes',
@@ -286,7 +286,7 @@ else:
                 agg = active_df.groupby('Strategy').agg({
                     'P&L':'sum', 'Debit':'sum', 'Theta':'sum', 'Name':'count', 'Daily Yield %':'mean'
                 }).reset_index()
-                agg.rename(columns={'Name': 'Trade Count'}, inplace=True) # Renamed per request
+                agg.rename(columns={'Name': 'Trade Count'}, inplace=True)
                 agg['Trend'] = agg.apply(lambda r: "🟢" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴", axis=1)
                 
                 total = pd.DataFrame({'Strategy':['TOTAL'], 'P&L':[agg['P&L'].sum()], 'Debit':[agg['Debit'].sum()], 
@@ -423,12 +423,12 @@ else:
                     fig = px.scatter(exp_sub, x='Days Held', y='P&L', color='Strategy', size='Debit')
                     st.plotly_chart(fig, use_container_width=True)
             
-            with an_tabs[2]: 
+            with an_tabs[2]: # Head to Head
                 if not exp_sub.empty:
                     perf = exp_sub.groupby('Strategy').agg({'P&L':['count','mean','sum'], 'Days Held':'mean', 'Daily Yield %':'mean'}).reset_index()
                     st.dataframe(perf, use_container_width=True)
             
-            with an_tabs[3]: 
+            with an_tabs[3]: # Heatmap
                 if not exp_sub.empty:
                     fig = px.density_heatmap(exp_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
