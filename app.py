@@ -6,48 +6,48 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
 import shutil
+import os
 from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Enterprise DB")
+st.title("🛡️ Allantis Trade Guardian: Cloud Edition")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v2.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    # TRADES TABLE
-    c.execute('''CREATE TABLE IF NOT EXISTS trades (
-                    id TEXT PRIMARY KEY,
-                    name TEXT,
-                    strategy TEXT,
-                    status TEXT,
-                    entry_date DATE,
-                    debit REAL,
-                    lot_size INTEGER,
-                    pnl REAL,
-                    notes TEXT
-                )''')
-    # SNAPSHOTS TABLE
-    c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id TEXT,
-                    snapshot_date DATE,
-                    pnl REAL,
-                    theta REAL,
-                    delta REAL,
-                    gamma REAL,
-                    vega REAL,
-                    days_held INTEGER,
-                    FOREIGN KEY(trade_id) REFERENCES trades(id)
-                )''')
-    # INDEXES
-    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
-    conn.commit()
-    conn.close()
+    # Only create if it doesn't exist to avoid overwriting uploads
+    if not os.path.exists(DB_NAME):
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+                        id TEXT PRIMARY KEY,
+                        name TEXT,
+                        strategy TEXT,
+                        status TEXT,
+                        entry_date DATE,
+                        debit REAL,
+                        lot_size INTEGER,
+                        pnl REAL,
+                        notes TEXT
+                    )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_id TEXT,
+                        snapshot_date DATE,
+                        pnl REAL,
+                        theta REAL,
+                        delta REAL,
+                        gamma REAL,
+                        vega REAL,
+                        days_held INTEGER,
+                        FOREIGN KEY(trade_id) REFERENCES trades(id)
+                    )''')
+        c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
+        conn.commit()
+        conn.close()
 
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
@@ -119,7 +119,6 @@ def sync_data(file_list, file_type):
                 trade_id = generate_trade_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # UPSERT TRADE
                 cursor.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 data = cursor.fetchone()
                 
@@ -133,7 +132,6 @@ def sync_data(file_list, file_type):
                         cursor.execute('''UPDATE trades SET pnl = ?, status = ? WHERE id = ?''', (pnl, status, trade_id))
                         count_update += 1
 
-                # SNAPSHOT LOGIC
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
@@ -161,6 +159,8 @@ def sync_data(file_list, file_type):
 
 # --- DATA LOADER ---
 def load_data_from_db():
+    if not os.path.exists(DB_NAME): return pd.DataFrame()
+    
     conn = get_db_connection()
     query = """
     SELECT t.id, t.name, t.strategy, t.status, t.entry_date, t.debit, t.lot_size, t.pnl, t.notes,
@@ -168,8 +168,10 @@ def load_data_from_db():
     FROM trades t
     LEFT JOIN (SELECT * FROM snapshots WHERE id IN (SELECT MAX(id) FROM snapshots GROUP BY trade_id)) s ON t.id = s.trade_id
     """
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    try:
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+    except: return pd.DataFrame()
     
     if not df.empty:
         df.rename(columns={
@@ -200,13 +202,22 @@ def load_data_from_db():
 # --- INITIALIZE ---
 init_db()
 
-# --- SIDEBAR ---
-with st.sidebar.expander("📂 Data Sync", expanded=True):
-    active_files = st.file_uploader("1. ACTIVE Trades", type=['csv','xlsx'], accept_multiple_files=True, key='active')
-    history_files = st.file_uploader("2. HISTORY (Closed)", type=['csv','xlsx'], accept_multiple_files=True, key='history')
+# --- SIDEBAR: DATA MANAGEMENT ---
+with st.sidebar.expander("💾 Database Manager", expanded=True):
+    # 1. RESTORE DB
+    uploaded_db = st.file_uploader("📥 Restore 'trade_guardian_v2.db'", type=['db', 'sqlite'])
+    if uploaded_db:
+        with open(DB_NAME, "wb") as f:
+            f.write(uploaded_db.getbuffer())
+        st.success("Database Restored!")
+        st.rerun()
+        
+    # 2. SYNC FILES
+    st.caption("--- Update Data ---")
+    active_files = st.file_uploader("1. Active Files", type=['csv','xlsx'], accept_multiple_files=True, key='act')
+    history_files = st.file_uploader("2. History Files", type=['csv','xlsx'], accept_multiple_files=True, key='hist')
     
-    c1, c2 = st.columns(2)
-    if c1.button("🔄 Sync"):
+    if st.button("🔄 Sync New Data"):
         logs = []
         if active_files: logs.extend(sync_data(active_files, "Active"))
         if history_files: logs.extend(sync_data(history_files, "History"))
@@ -214,14 +225,17 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
             for l in logs: st.write(l)
             st.success("Synced!")
             st.rerun()
-            
-    if c2.button("💾 Backup"):
-        try:
-            backup_name = f"backup_{datetime.now().strftime('%Y%m%d')}.db"
-            shutil.copy(DB_NAME, backup_name)
-            st.success(f"Saved: {backup_name}")
-        except Exception as e:
-            st.error(f"Backup Failed: {e}")
+
+    # 3. BACKUP DB
+    st.caption("--- Save Progress ---")
+    if os.path.exists(DB_NAME):
+        with open(DB_NAME, "rb") as f:
+            st.download_button(
+                "💾 Download DB Backup",
+                f,
+                file_name=f"trade_guardian_backup_{datetime.now().strftime('%Y%m%d')}.db",
+                mime="application/x-sqlite3"
+            )
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Settings")
@@ -253,7 +267,7 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
 df = load_data_from_db()
 
 if df.empty:
-    st.info("👋 Database empty. Upload files to initialize.")
+    st.info("👋 Database empty. Please upload your '.db' backup OR your Active/History CSVs to start.")
 else:
     # --- BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired'].copy()
@@ -423,6 +437,7 @@ else:
                     c2.metric("Debit Total", f"${debit:,.0f}")
                     c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
                     
+                    # COMPARISON
                     if not expired_df.empty:
                         similar = expired_df[
                             (expired_df['Strategy'] == strat) & 
@@ -566,5 +581,5 @@ else:
     # QUICK START
     st.sidebar.divider()
     st.sidebar.markdown("---")
-    st.sidebar.caption("Allantis Trade Guardian v3.0 | Analytics Edition | Dec 2024")
+    st.sidebar.caption("Allantis Trade Guardian v48.0 | Cloud Edition | Dec 2024")
     st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
