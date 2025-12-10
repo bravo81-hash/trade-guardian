@@ -11,13 +11,12 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Cloud Edition")
+st.title("🛡️ Allantis Trade Guardian: Cloud DB")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v2.db"
 
 def init_db():
-    # Only create if it doesn't exist to avoid overwriting uploads
     if not os.path.exists(DB_NAME):
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -98,7 +97,7 @@ def sync_data(file_list, file_type):
                 
             for _, row in df.iterrows():
                 name = str(row.get('Name', ''))
-                if name.startswith('.') or name == 'nan' or name == '': continue
+                if name.startswith('.') or name == 'nan' or name == '' or name == 'Symbol': continue
                 
                 created_val = row.get('Created At', '')
                 try: start_dt = pd.to_datetime(created_val)
@@ -119,6 +118,7 @@ def sync_data(file_list, file_type):
                 trade_id = generate_trade_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
+                # UPSERT TRADE
                 cursor.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 data = cursor.fetchone()
                 
@@ -132,6 +132,7 @@ def sync_data(file_list, file_type):
                         cursor.execute('''UPDATE trades SET pnl = ?, status = ? WHERE id = ?''', (pnl, status, trade_id))
                         count_update += 1
 
+                # SNAPSHOT LOGIC
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
@@ -160,7 +161,6 @@ def sync_data(file_list, file_type):
 # --- DATA LOADER ---
 def load_data_from_db():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
-    
     conn = get_db_connection()
     query = """
     SELECT t.id, t.name, t.strategy, t.status, t.entry_date, t.debit, t.lot_size, t.pnl, t.notes,
@@ -204,15 +204,15 @@ init_db()
 
 # --- SIDEBAR: DATA MANAGEMENT ---
 with st.sidebar.expander("💾 Database Manager", expanded=True):
-    # 1. RESTORE DB
-    uploaded_db = st.file_uploader("📥 Restore 'trade_guardian_v2.db'", type=['db', 'sqlite'])
+    # 1. RESTORE
+    uploaded_db = st.file_uploader("📥 Restore Database (.db)", type=['db', 'sqlite'])
     if uploaded_db:
         with open(DB_NAME, "wb") as f:
             f.write(uploaded_db.getbuffer())
         st.success("Database Restored!")
         st.rerun()
         
-    # 2. SYNC FILES
+    # 2. SYNC
     st.caption("--- Update Data ---")
     active_files = st.file_uploader("1. Active Files", type=['csv','xlsx'], accept_multiple_files=True, key='act')
     history_files = st.file_uploader("2. History Files", type=['csv','xlsx'], accept_multiple_files=True, key='hist')
@@ -226,7 +226,7 @@ with st.sidebar.expander("💾 Database Manager", expanded=True):
             st.success("Synced!")
             st.rerun()
 
-    # 3. BACKUP DB
+    # 3. BACKUP
     st.caption("--- Save Progress ---")
     if os.path.exists(DB_NAME):
         with open(DB_NAME, "rb") as f:
@@ -243,11 +243,11 @@ acct_size = st.sidebar.number_input("Account Size ($)", value=150000, step=5000)
 market_regime = st.sidebar.selectbox("Market Regime", ["Neutral", "Bullish (+10%)", "Bearish (-10%)"], index=0)
 regime_mult = 1.1 if "Bullish" in market_regime else 0.9 if "Bearish" in market_regime else 1.0
 
-# --- CONFIG ---
+# --- CONFIG (UPDATED WITH REAL DATA) ---
 BASE_CONFIG = {
-    '130/160': {'yield': 0.13, 'pnl': 600}, 
-    '160/190': {'yield': 0.28, 'pnl': 420}, 
-    'M200':    {'yield': 0.56, 'pnl': 900}
+    '130/160': {'yield': 0.13, 'pnl': 600}, # Updated to $600
+    '160/190': {'yield': 0.28, 'pnl': 420}, # Updated to $420
+    'M200':    {'yield': 0.56, 'pnl': 910}  # Updated to $910
 }
 
 def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
@@ -267,7 +267,7 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
 df = load_data_from_db()
 
 if df.empty:
-    st.info("👋 Database empty. Please upload your '.db' backup OR your Active/History CSVs to start.")
+    st.info("👋 Database empty. Upload your '.db' backup OR your Active/History CSVs to start.")
 else:
     # --- BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired'].copy()
@@ -437,7 +437,6 @@ else:
                     c2.metric("Debit Total", f"${debit:,.0f}")
                     c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
                     
-                    # COMPARISON
                     if not expired_df.empty:
                         similar = expired_df[
                             (expired_df['Strategy'] == strat) & 
@@ -581,5 +580,5 @@ else:
     # QUICK START
     st.sidebar.divider()
     st.sidebar.markdown("---")
-    st.sidebar.caption("Allantis Trade Guardian v48.0 | Cloud Edition | Dec 2024")
+    st.sidebar.caption("Allantis Trade Guardian v49.0 | Cloud Edition | Dec 2024")
     st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
