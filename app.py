@@ -43,7 +43,7 @@ def init_db():
                     days_held INTEGER,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
-    # INDEXES
+    # INDEXES FOR PERFORMANCE
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
     conn.commit()
@@ -133,7 +133,7 @@ def sync_data(file_list, file_type):
                         cursor.execute('''UPDATE trades SET pnl = ?, status = ? WHERE id = ?''', (pnl, status, trade_id))
                         count_update += 1
 
-                # SNAPSHOT LOGIC
+                # SNAPSHOT LOGIC (Deduplication)
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
@@ -142,6 +142,7 @@ def sync_data(file_list, file_type):
                     days = (datetime.now() - start_dt).days
                     if days < 1: days = 1
                     
+                    # Check if snapshot exists for today
                     today_str = datetime.now().date()
                     cursor.execute("SELECT id FROM snapshots WHERE trade_id = ? AND snapshot_date = ?", (trade_id, today_str))
                     snap_exists = cursor.fetchone()
@@ -172,6 +173,7 @@ def load_data_from_db():
     conn.close()
     
     if not df.empty:
+        # Standardize Columns
         df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status', 
             'pnl': 'P&L', 'debit': 'Debit', 'notes': 'Notes',
@@ -350,13 +352,13 @@ else:
                         sum_row = pd.DataFrame({'Name':['TOTAL'], 'Action':['-'], 'Grade':['-'], 'P&L':[sub['P&L'].sum()], 
                                                 'Debit':[sub['Debit'].sum()], 'Days Held':[sub['Days Held'].mean()], 
                                                 'Daily Yield %':[sub['Daily Yield %'].mean()], 'Theta':[sub['Theta'].sum()], 'Delta':[sub['Delta'].sum()]})
-                        display = pd.concat([sub[cols], sum_row], ignore_index=True)
+                        display_df = pd.concat([sub[cols], sum_row], ignore_index=True)
                         
                         st.dataframe(
-                            display.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
-                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
-                            .map(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
-                            .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
+                            display_df.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
+                            .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
+                            .applymap(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
+                            .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
                     else: st.info("No active trades.")
@@ -423,6 +425,7 @@ else:
                     c2.metric("Debit Total", f"${debit:,.0f}")
                     c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
                     
+                    # COMPARISON
                     if not expired_df.empty:
                         similar = expired_df[
                             (expired_df['Strategy'] == strat) & 
@@ -466,9 +469,14 @@ else:
             with an_tabs[2]: 
                 exp_sub = filt_df[filt_df['Status']=='Expired']
                 if not exp_sub.empty:
-                    perf = exp_sub.groupby('Strategy').agg({'P&L':lambda x: (x>0).sum()/len(x)*100, 'Days Held':'mean', 'Daily Yield %':'mean'}).reset_index()
-                    perf.columns = ['Strategy', 'Win Rate %', 'Avg Days', 'Avg Yield']
-                    st.dataframe(perf.style.format({'Win Rate %':'{:.1f}%', 'Avg Yield':'{:.2f}%', 'Avg Days':'{:.0f}'}), use_container_width=True)
+                    ranking = exp_sub.groupby('Strategy').agg({
+                        'P&L': lambda x: (x > 0).sum() / len(x) * 100,
+                        'Daily Yield %': 'mean',
+                        'Days Held': 'mean'
+                    }).round(2)
+                    ranking.columns = ['Win Rate %', 'Avg Yield', 'Avg Days']
+                    ranking = ranking.sort_values('Win Rate %', ascending=False)
+                    st.dataframe(ranking, use_container_width=True)
             
             with an_tabs[3]: 
                 exp_sub = filt_df[filt_df['Status']=='Expired']
@@ -476,24 +484,20 @@ else:
                     fig = px.density_heatmap(exp_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
 
-    # 4. TIMELINE
+    # 4. TIMELINE (NEW)
     with tabs[3]:
         st.markdown("### 📜 Trade Timeline")
-        trade_options = df['id'].unique()
-        if len(trade_options) > 0:
-            sel_trade_id = st.selectbox("Select Trade", trade_options, format_func=lambda x: df[df['id']==x]['Name'].iloc[0])
-            
-            conn = get_db_connection()
-            history = pd.read_sql_query("SELECT * FROM snapshots WHERE trade_id = ? ORDER BY snapshot_date", conn, params=(sel_trade_id,))
-            conn.close()
-            
-            if not history.empty:
-                fig = px.line(history, x='snapshot_date', y='pnl', title=f"P&L History: {df[df['id']==sel_trade_id]['Name'].iloc[0]}", markers=True)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No history snapshots available.")
+        sel_trade_id = st.selectbox("Select Trade", df['id'].unique(), format_func=lambda x: df[df['id']==x]['Name'].iloc[0])
+        
+        conn = get_db_connection()
+        history = pd.read_sql_query("SELECT * FROM snapshots WHERE trade_id = ? ORDER BY snapshot_date", conn, params=(sel_trade_id,))
+        conn.close()
+        
+        if not history.empty:
+            fig = px.line(history, x='snapshot_date', y='pnl', title=f"P&L History: {df[df['id']==sel_trade_id]['Name'].iloc[0]}", markers=True)
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No trades found.")
+            st.info("No history snapshots available for this trade yet (Sync more active files).")
 
     # 5. ALLOCATION
     with tabs[4]:
@@ -566,5 +570,5 @@ else:
     # QUICK START
     st.sidebar.divider()
     st.sidebar.markdown("---")
-    st.sidebar.caption("Allantis Trade Guardian v3.0 | Analytics Edition | Dec 2024")
+    st.sidebar.caption("Allantis Trade Guardian v46.0 | Analytics Edition | Dec 2024")
     st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
