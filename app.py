@@ -11,29 +11,27 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Auto-Fix DB")
+st.title("🛡️ Allantis Trade Guardian: Enterprise DB")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v2.db"
 
-def init_and_migrate_db():
-    """Creates DB if missing, or upgrades schema if outdated."""
+def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
-    # 1. Create Tables if they don't exist
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
                     strategy TEXT,
                     status TEXT,
-                    entry_date DATE,
+                    entry_date TIMESTAMP,
+                    exit_date TIMESTAMP,
+                    days_held INTEGER,
                     debit REAL,
                     lot_size INTEGER,
                     pnl REAL,
                     notes TEXT
                 )''')
-    
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -46,29 +44,13 @@ def init_and_migrate_db():
                     days_held INTEGER,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
-    
-    # 2. AUTO-MIGRATE: Check for missing columns (The Fix)
-    c.execute("PRAGMA table_info(trades)")
-    columns = [info[1] for info in c.fetchall()]
-    
-    try:
-        if 'days_held' not in columns:
-            c.execute("ALTER TABLE trades ADD COLUMN days_held INTEGER")
-        if 'exit_date' not in columns:
-            c.execute("ALTER TABLE trades ADD COLUMN exit_date DATE")
-            
-        # Create Indexes
-        c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
-        
-        conn.commit()
-    except Exception as e:
-        st.error(f"Migration Error: {e}")
-    finally:
-        conn.close()
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
+    conn.commit()
+    conn.close()
 
 def get_db_connection():
-    return sqlite3.connect(DB_NAME)
+    return sqlite3.connect(DB_NAME, detect_types=sqlite3.PARSE_DECLTYPES)
 
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name, trade_name):
@@ -83,15 +65,37 @@ def clean_num(x):
     try: return float(str(x).replace('$','').replace(',',''))
     except: return 0.0
 
-def safe_fmt(val, fmt_str):
-    try:
-        if isinstance(val, (int, float)): return fmt_str.format(val)
-        return str(val)
-    except: return str(val)
-
 def generate_trade_id(name, strategy, entry_date):
     date_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{date_str}".replace(" ", "").replace("/", "-")
+
+# --- REPAIR ENGINE (NEW) ---
+def repair_database():
+    """Recalculates Days Held for all trades to fix '1 Day' bugs."""
+    conn = get_db_connection()
+    df = pd.read_sql("SELECT * FROM trades", conn)
+    
+    updates = []
+    for _, row in df.iterrows():
+        try:
+            start = pd.to_datetime(row['entry_date'])
+            status = row['status']
+            
+            if status == "Expired" and row['exit_date']:
+                end = pd.to_datetime(row['exit_date'])
+                days = (end - start).days
+            else:
+                days = (datetime.now() - start).days
+            
+            if days < 1: days = 1
+            updates.append((days, row['id']))
+        except: continue
+        
+    c = conn.cursor()
+    c.executemany("UPDATE trades SET days_held = ? WHERE id = ?", updates)
+    conn.commit()
+    conn.close()
+    return len(updates)
 
 # --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
@@ -105,22 +109,17 @@ def sync_data(file_list, file_type):
     
     for file in file_list:
         try:
-            # Smart Read: Handle CSVs with bad headers
-            if file.name.endswith('.xlsx'): 
-                df = pd.read_excel(file)
+            if file.name.endswith('.xlsx'): df = pd.read_excel(file)
             else:
                 try:
                     df = pd.read_csv(file)
                     if 'Name' not in df.columns: 
                         file.seek(0)
                         df = pd.read_csv(file, skiprows=1)
-                except Exception as e:
-                    log.append(f"❌ Read Error {file.name}: {e}")
-                    continue
+                except: continue
                 
             for _, row in df.iterrows():
                 name = str(row.get('Name', ''))
-                # Filter Garbage
                 if name.startswith('.') or name == 'nan' or name == '' or name == 'Symbol': continue
                 
                 created_val = row.get('Created At', '')
@@ -142,19 +141,20 @@ def sync_data(file_list, file_type):
                 trade_id = generate_trade_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # DATE LOGIC
+                # DATE LOGIC (Improved)
                 exit_dt = None
                 days_held = 0
                 
                 if file_type == "History":
                     try:
+                        # For history files, Expiration IS the exit date per user confirmation
                         exit_dt = pd.to_datetime(row.get('Expiration', ''))
                         days_held = (exit_dt - start_dt).days
-                        if days_held < 1: days_held = 1
-                    except: days_held = 1
+                    except: pass
                 else:
                     days_held = (datetime.now() - start_dt).days
-                    if days_held < 1: days_held = 1
+
+                if days_held < 1: days_held = 1
 
                 # UPSERT
                 cursor.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
@@ -164,21 +164,22 @@ def sync_data(file_list, file_type):
                     cursor.execute('''INSERT INTO trades 
                                       (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, notes) 
                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                   (trade_id, name, strat, status, start_dt.date(), 
-                                    exit_dt.date() if exit_dt else None, 
+                                   (trade_id, name, strat, status, start_dt, 
+                                    exit_dt if exit_dt else None, 
                                     days_held, debit, lot_size, pnl, ""))
                     count_new += 1
                 else:
-                    if file_type == "History" or data[0] == "Active":
-                        if file_type == "History":
-                            cursor.execute('''UPDATE trades SET pnl=?, status=?, exit_date=?, days_held=? WHERE id=?''', 
-                                           (pnl, status, exit_dt.date() if exit_dt else None, days_held, trade_id))
-                        else:
-                            cursor.execute('''UPDATE trades SET pnl=?, status=?, days_held=? WHERE id=?''', 
-                                           (pnl, status, days_held, trade_id))
+                    # Update Existing
+                    if file_type == "History":
+                        cursor.execute('''UPDATE trades SET pnl=?, status=?, exit_date=?, days_held=? WHERE id=?''', 
+                                       (pnl, status, exit_dt, days_held, trade_id))
+                        count_update += 1
+                    elif data[0] == "Active":
+                        cursor.execute('''UPDATE trades SET pnl=?, days_held=? WHERE id=?''', 
+                                       (pnl, days_held, trade_id))
                         count_update += 1
 
-                # SNAPSHOT
+                # SNAPSHOT (Active Only)
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
@@ -205,20 +206,16 @@ def load_data_from_db():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     
-    # Robust Query handling missing columns in OLD DBs
+    query = """
+    SELECT t.id, t.name, t.strategy, t.status, t.entry_date, t.days_held, t.debit, t.lot_size, t.pnl, t.notes,
+           s.theta, s.delta, s.gamma, s.vega
+    FROM trades t
+    LEFT JOIN (SELECT * FROM snapshots WHERE id IN (SELECT MAX(id) FROM snapshots GROUP BY trade_id)) s ON t.id = s.trade_id
+    """
     try:
-        query = """
-        SELECT t.id, t.name, t.strategy, t.status, t.entry_date, t.days_held, t.debit, t.lot_size, t.pnl, t.notes,
-               s.theta, s.delta, s.gamma, s.vega
-        FROM trades t
-        LEFT JOIN (SELECT * FROM snapshots WHERE id IN (SELECT MAX(id) FROM snapshots GROUP BY trade_id)) s ON t.id = s.trade_id
-        """
         df = pd.read_sql_query(query, conn)
-    except Exception as e:
-        st.error(f"Database Read Error: {e}. Try deleting the .db file and re-uploading.")
-        return pd.DataFrame()
-    finally:
-        conn.close()
+    except: return pd.DataFrame()
+    finally: conn.close()
     
     if not df.empty:
         df.rename(columns={
@@ -229,14 +226,8 @@ def load_data_from_db():
         }, inplace=True)
         
         df['entry_date'] = pd.to_datetime(df['entry_date'])
-        
-        mask_active = df['Status'] == 'Active'
-        df.loc[mask_active, 'calc_days'] = (datetime.now() - df.loc[mask_active, 'entry_date']).dt.days
-        df['Days Held'] = df['Days Held'].fillna(df['calc_days'])
-        df['Days Held'] = df['Days Held'].fillna(1)
-        df.loc[df['Days Held'] < 1, 'Days Held'] = 1
-        
         df['Debit/Lot'] = df['Debit'] / df['lot_size']
+        # Recalculate Yield on the fly to ensure accuracy
         df['Daily Yield %'] = (df['P&L'] / df['Debit'] * 100) / df['Days Held']
         
         def get_grade(row):
@@ -250,7 +241,7 @@ def load_data_from_db():
     return df
 
 # --- INITIALIZE ---
-init_and_migrate_db() # Run Migration on Startup
+init_db()
 
 # --- SIDEBAR ---
 with st.sidebar.expander("📂 Data Sync", expanded=True):
@@ -262,26 +253,26 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
         logs = []
         if active_files: logs.extend(sync_data(active_files, "Active"))
         if history_files: logs.extend(sync_data(history_files, "History"))
-        
-        # DISPLAY LOGS
         if logs:
             for l in logs: 
                 if "❌" in l: st.error(l)
                 else: st.success(l)
             st.rerun()
             
-    if c2.button("💾 Backup"):
+    if c2.button("🛠️ Repair DB"):
+        count = repair_database()
+        st.success(f"Repaired {count} trades. Dates corrected.")
+        st.rerun()
+
+    if st.button("💾 Backup DB"):
         try:
-            backup_name = f"trade_guardian_backup_{datetime.now().strftime('%Y%m%d')}.db"
             with open(DB_NAME, "rb") as f:
-                st.download_button("⬇️ Download DB", f, file_name=backup_name, mime="application/x-sqlite3")
-        except Exception as e:
-            st.error(f"Error: {e}")
+                st.download_button("⬇️ Download DB File", f, file_name=f"backup_{datetime.now().strftime('%Y%m%d')}.db", mime="application/x-sqlite3")
+        except Exception as e: st.error(f"Error: {e}")
 
     uploaded_db = st.file_uploader("📥 Restore DB", type=['db', 'sqlite'], key='restore')
     if uploaded_db:
-        with open(DB_NAME, "wb") as f:
-            f.write(uploaded_db.getbuffer())
+        with open(DB_NAME, "wb") as f: f.write(uploaded_db.getbuffer())
         st.success("Restored!")
         st.rerun()
 
@@ -291,11 +282,12 @@ acct_size = st.sidebar.number_input("Account Size ($)", value=150000, step=5000)
 market_regime = st.sidebar.selectbox("Market Regime", ["Neutral", "Bullish (+10%)", "Bearish (-10%)"], index=0)
 regime_mult = 1.1 if "Bullish" in market_regime else 0.9 if "Bearish" in market_regime else 1.0
 
-# --- CONFIG ---
+# --- CONFIG (DYNAMIC YIELD) ---
+# We no longer hardcode yield/days. We let the data speak.
 BASE_CONFIG = {
-    '130/160': {'yield': 0.33, 'pnl': 600, 'dit': 30}, 
-    '160/190': {'yield': 0.16, 'pnl': 420, 'dit': 45}, 
-    'M200':    {'yield': 0.37, 'pnl': 910, 'dit': 30}
+    '130/160': {'pnl': 600}, 
+    '160/190': {'pnl': 420}, 
+    'M200':    {'pnl': 910}
 }
 
 def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
@@ -315,12 +307,11 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
 df = load_data_from_db()
 
 if df.empty:
-    st.info("👋 Database empty. Upload your '.db' backup OR your Active/History CSVs to start.")
+    st.info("👋 Database empty. Upload files to initialize.")
 else:
     # --- BENCHMARKS ---
     expired_df = df[df['Status'] == 'Expired'].copy()
     benchmarks = BASE_CONFIG.copy()
-    
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
@@ -330,6 +321,7 @@ else:
                 real_days = winners['Days Held'].mean()
                 avg_debit = grp['Debit'].mean()
                 
+                # True Yield Calculation
                 benchmarks[strat] = {
                     'pnl': real_pnl,
                     'dit': real_days,
@@ -401,8 +393,8 @@ else:
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Hist. Win", f"${bench.get('pnl',0):,.0f}")
                     c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%")
-                    c3.metric("Target (Adj)", f"${bench.get('pnl',0)*regime_mult:,.0f}")
-                    c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
+                    c3.metric("Target Profit", f"${bench.get('pnl',0)*regime_mult:,.0f}")
+                    c4.metric("Avg Days Held", f"{bench.get('dit',0):.0f}d")
                     
                     if not sub.empty:
                         sum_row = pd.DataFrame({'Name':['TOTAL'], 'Action':['-'], 'Grade':['-'], 'P&L':[sub['P&L'].sum()], 
@@ -541,7 +533,7 @@ else:
             if not history.empty:
                 fig = px.line(history, x='snapshot_date', y='pnl', title=f"P&L History", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.info("No history snapshots.")
+            else: st.info("No history snapshots available.")
         else: st.info("No trades.")
 
     # 5. ALLOCATION
@@ -617,5 +609,5 @@ else:
 
     st.sidebar.divider()
     st.sidebar.markdown("---")
-    st.sidebar.caption("Allantis Trade Guardian v53.0 | Auto-Fix DB | Dec 2024")
+    st.sidebar.caption("Allantis Trade Guardian v53.0 | Auto-Repair Edition | Dec 2024")
     st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
