@@ -133,7 +133,7 @@ def sync_data(file_list, file_type):
                         cursor.execute('''UPDATE trades SET pnl = ?, status = ? WHERE id = ?''', (pnl, status, trade_id))
                         count_update += 1
 
-                # SNAPSHOT LOGIC (FIXED: Deduplication)
+                # SNAPSHOT LOGIC (Deduplication)
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
@@ -348,6 +348,7 @@ else:
                     c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
                     
                     if not sub.empty:
+                        # Total Row
                         sum_row = pd.DataFrame({'Name':['TOTAL'], 'Action':['-'], 'Grade':['-'], 'P&L':[sub['P&L'].sum()], 
                                                 'Debit':[sub['Debit'].sum()], 'Days Held':[sub['Days Held'].mean()], 
                                                 'Daily Yield %':[sub['Daily Yield %'].mean()], 'Theta':[sub['Theta'].sum()], 'Delta':[sub['Delta'].sum()]})
@@ -371,7 +372,7 @@ else:
         else:
             st.info("Empty Database. Upload 'Active' file.")
 
-    # 2. VALIDATOR (FIXED)
+    # 2. VALIDATOR
     with tabs[1]:
         st.markdown("### 🧪 Pre-Flight Audit")
         
@@ -390,10 +391,14 @@ else:
             
         model_file = st.file_uploader("Upload Model File", key="mod")
         if model_file:
-            # Manual Parsing for Validator (No DB write)
             try:
                 if model_file.name.endswith('.xlsx'): m_df = pd.read_excel(model_file)
-                else: m_df = pd.read_csv(model_file, skiprows=1 if 'Name' not in pd.read_csv(model_file).columns else 0)
+                else: 
+                    # Smart Read
+                    m_df = pd.read_csv(model_file)
+                    if 'Name' not in m_df.columns:
+                        model_file.seek(0)
+                        m_df = pd.read_csv(model_file, skiprows=1)
                 
                 if not m_df.empty:
                     row = m_df.iloc[0]
@@ -401,7 +406,6 @@ else:
                     debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                     strat = get_strategy(str(row.get('Group', '')), name)
                     
-                    # Lot Size Logic
                     lot_size = 1
                     if strat == '130/160' and debit > 6000: lot_size = 2
                     elif strat == '130/160' and debit > 10000: lot_size = 3
@@ -410,7 +414,6 @@ else:
                     
                     debit_lot = debit / lot_size
                     
-                    # Grading
                     grade = "C"
                     if strat == '130/160': grade = "F" if debit_lot > 4800 else "A+" if 3500 <= debit_lot <= 4500 else "B"
                     if strat == '160/190': grade = "A" if 4800 <= debit_lot <= 5500 else "C"
@@ -423,7 +426,6 @@ else:
                     c2.metric("Debit Total", f"${debit:,.0f}")
                     c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
                     
-                    # Comparison
                     if not expired_df.empty:
                         similar = expired_df[(expired_df['Strategy'] == strat) & (expired_df['Debit/Lot'].between(debit_lot*0.9, debit_lot*1.1))]
                         if not similar.empty:
@@ -433,9 +435,10 @@ else:
                     if "A" in grade: st.success("✅ **APPROVED:** Great Entry")
                     elif "F" in grade: st.error("⛔ **REJECT:** Overpriced")
                     else: st.warning("⚠️ **CHECK:** Acceptable Variance")
-            except: st.error("Could not parse file.")
+            except Exception as e: 
+                st.error(f"Could not parse file: {str(e)}")
 
-    # 3. ANALYTICS (FIXED SCOPING)
+    # 3. ANALYTICS
     with tabs[2]:
         if not df.empty:
             filt_df = df.copy()
@@ -455,19 +458,19 @@ else:
                     st.plotly_chart(fig, use_container_width=True)
             
             with an_tabs[1]:
-                exp_sub = filt_df[filt_df['Status']=='Expired'] # Fixed Scoping
+                exp_sub = filt_df[filt_df['Status']=='Expired']
                 if not exp_sub.empty:
                     fig = px.scatter(exp_sub, x='Days Held', y='P&L', color='Strategy', size='Debit')
                     st.plotly_chart(fig, use_container_width=True)
             
             with an_tabs[2]: 
-                exp_sub = filt_df[filt_df['Status']=='Expired'] # Fixed Scoping
+                exp_sub = filt_df[filt_df['Status']=='Expired']
                 if not exp_sub.empty:
                     perf = exp_sub.groupby('Strategy').agg({'P&L':['count','mean','sum'], 'Days Held':'mean', 'Daily Yield %':'mean'}).reset_index()
                     st.dataframe(perf, use_container_width=True)
             
             with an_tabs[3]: 
-                exp_sub = filt_df[filt_df['Status']=='Expired'] # Fixed Scoping
+                exp_sub = filt_df[filt_df['Status']=='Expired']
                 if not exp_sub.empty:
                     fig = px.density_heatmap(exp_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
@@ -523,22 +526,25 @@ else:
         * **Target Entry:** Monday.
         * **Debit Target:** `$3,500 - $4,500` per lot.
         * **Stop Rule:** Never pay > `$4,800` per lot.
-        * **Manage:** Kill if trade is **>25 days old** and profit is flat/negative.
+        * **Management:** * **Kill Rule:** If trade is **>25 days old** AND profit is **flat/negative (<$100)**, EXIT immediately. Dead money.
+            * **Take Profit:** Target **~$600** (Historical Avg).
         
         ### 2. 160/190 Strategy (Compounder)
         * **Target Entry:** Friday.
         * **Debit Target:** `~$5,200` per lot.
         * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI efficiency).
-        * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days.
+        * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days (Cooking Phase).
         
         ### 3. M200 Strategy (Whale)
         * **Target Entry:** Wednesday.
         * **Debit Target:** `$7,500 - $8,500` per lot.
         * **Management:** Check P&L at **Day 14**.
-            * If Green > $200: Exit or Roll.
-            * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
+            * If **Green (>$200):** Exit or Roll.
+            * If **Red/Flat:** HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
 
     # QUICK START
     st.sidebar.divider()
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Allantis Trade Guardian v2.5 | Enterprise Edition | Dec 2024")
     st.sidebar.markdown("### 🎯 Quick Start\n1. Upload 'Active' File\n2. Check Action Center\n3. Review Health\n4. Export Records")
