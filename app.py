@@ -5,6 +5,7 @@ import io
 import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
+import shutil
 from datetime import datetime
 
 # --- PAGE CONFIG ---
@@ -17,6 +18,7 @@ DB_NAME = "trade_guardian_v2.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
+    # TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -28,6 +30,7 @@ def init_db():
                     pnl REAL,
                     notes TEXT
                 )''')
+    # SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -40,6 +43,9 @@ def init_db():
                     days_held INTEGER,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
+    # INDEXES FOR PERFORMANCE
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trade_snap ON snapshots(trade_id)")
     conn.commit()
     conn.close()
 
@@ -113,6 +119,7 @@ def sync_data(file_list, file_type):
                 trade_id = generate_trade_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
+                # UPSERT TRADE
                 cursor.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 data = cursor.fetchone()
                 
@@ -126,6 +133,7 @@ def sync_data(file_list, file_type):
                         cursor.execute('''UPDATE trades SET pnl = ?, status = ? WHERE id = ?''', (pnl, status, trade_id))
                         count_update += 1
 
+                # SNAPSHOT LOGIC (FIXED: Deduplication)
                 if file_type == "Active":
                     theta = clean_num(row.get('Theta', 0))
                     delta = clean_num(row.get('Delta', 0))
@@ -134,9 +142,15 @@ def sync_data(file_list, file_type):
                     days = (datetime.now() - start_dt).days
                     if days < 1: days = 1
                     
-                    cursor.execute('''INSERT INTO snapshots (trade_id, snapshot_date, pnl, theta, delta, gamma, vega, days_held)
-                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                                   (trade_id, datetime.now().date(), pnl, theta, delta, gamma, vega, days))
+                    # Check if snapshot exists for today
+                    today_str = datetime.now().date()
+                    cursor.execute("SELECT id FROM snapshots WHERE trade_id = ? AND snapshot_date = ?", (trade_id, today_str))
+                    snap_exists = cursor.fetchone()
+                    
+                    if not snap_exists:
+                        cursor.execute('''INSERT INTO snapshots (trade_id, snapshot_date, pnl, theta, delta, gamma, vega, days_held)
+                                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                                       (trade_id, today_str, pnl, theta, delta, gamma, vega, days))
 
             log.append(f"✅ {file.name}: {count_new} New / {count_update} Updated")
         except Exception as e:
@@ -159,7 +173,7 @@ def load_data_from_db():
     conn.close()
     
     if not df.empty:
-        # Standardize Columns (Capitalized Headers)
+        # Standardize Columns
         df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status', 
             'pnl': 'P&L', 'debit': 'Debit', 'notes': 'Notes',
@@ -192,14 +206,24 @@ init_db()
 with st.sidebar.expander("📂 Data Sync", expanded=True):
     active_files = st.file_uploader("1. ACTIVE Trades", type=['csv','xlsx'], accept_multiple_files=True, key='active')
     history_files = st.file_uploader("2. HISTORY (Closed)", type=['csv','xlsx'], accept_multiple_files=True, key='history')
-    if st.button("🔄 Sync Database"):
+    
+    c1, c2 = st.columns(2)
+    if c1.button("🔄 Sync"):
         logs = []
         if active_files: logs.extend(sync_data(active_files, "Active"))
         if history_files: logs.extend(sync_data(history_files, "History"))
         if logs:
             for l in logs: st.write(l)
-            st.success("Sync Complete!")
+            st.success("Synced!")
             st.rerun()
+            
+    if c2.button("💾 Backup"):
+        try:
+            backup_name = f"backup_{datetime.now().strftime('%Y%m%d')}.db"
+            shutil.copy(DB_NAME, backup_name)
+            st.success(f"Saved: {backup_name}")
+        except Exception as e:
+            st.error(f"Backup Failed: {e}")
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Settings")
@@ -307,12 +331,11 @@ else:
                     sub = active_df[active_df['Strategy'] == strat].copy()
                     bench = benchmarks.get(strat, BASE_CONFIG.get(strat))
                     
-                    # COMPACT ALERT TILES
+                    # ALERT TILES
                     urgent = sub[sub['Action'] != ""]
                     if not urgent.empty:
                         st.markdown("**🚨 Action Center**")
                         for _, r in urgent.iterrows():
-                            # Thin styled alerts
                             color = "green" if "TAKE" in r['Action'] else "red" if "KILL" in r['Action'] else "orange"
                             st.markdown(f"<span style='color:{color}; font-weight:bold'>● {r['Name']}</span>: {r['Action']}", unsafe_allow_html=True)
                         st.divider()
@@ -325,7 +348,6 @@ else:
                     c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
                     
                     if not sub.empty:
-                        # Total Row
                         sum_row = pd.DataFrame({'Name':['TOTAL'], 'Action':['-'], 'Grade':['-'], 'P&L':[sub['P&L'].sum()], 
                                                 'Debit':[sub['Debit'].sum()], 'Days Held':[sub['Days Held'].mean()], 
                                                 'Daily Yield %':[sub['Daily Yield %'].mean()], 'Theta':[sub['Theta'].sum()], 'Delta':[sub['Delta'].sum()]})
@@ -333,9 +355,8 @@ else:
                         
                         st.dataframe(
                             display.style.format({'P&L':"${:,.0f}", 'Debit':"${:,.0f}", 'Daily Yield %':"{:.2f}%", 'Theta':"{:.1f}", 'Delta':"{:.1f}", 'Days Held':"{:.0f}"})
-                            .applymap(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
-                            .applymap(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
-                            # LIGHTER GREY TOTAL ROW
+                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
+                            .map(lambda v: 'color: green' if 'A' in str(v) else 'color: red' if 'F' in str(v) else '', subset=['Grade'])
                             .apply(lambda x: ['background-color: #f0f2f6; color: black; font-weight: bold' if x.name == len(display)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
@@ -350,7 +371,7 @@ else:
         else:
             st.info("Empty Database. Upload 'Active' file.")
 
-    # 2. VALIDATOR
+    # 2. VALIDATOR (FIXED)
     with tabs[1]:
         st.markdown("### 🧪 Pre-Flight Audit")
         
@@ -369,45 +390,61 @@ else:
             
         model_file = st.file_uploader("Upload Model File", key="mod")
         if model_file:
-            m_df = process_data([model_file])
-            if not m_df.empty:
-                row = m_df.iloc[0]
-                st.divider()
-                st.subheader(f"Audit: {row['Name']}")
+            # Manual Parsing for Validator (No DB write)
+            try:
+                if model_file.name.endswith('.xlsx'): m_df = pd.read_excel(model_file)
+                else: m_df = pd.read_csv(model_file, skiprows=1 if 'Name' not in pd.read_csv(model_file).columns else 0)
                 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Strategy", row['Strategy'])
-                c2.metric("Debit Total", f"${row['Debit']:,.0f}")
-                c3.metric("Debit Per Lot", f"${row['Debit/Lot']:,.0f}")
-                
-                # COMPARISON
-                if not expired_df.empty:
-                    similar = expired_df[
-                        (expired_df['Strategy'] == row['Strategy']) & 
-                        (expired_df['Debit/Lot'].between(row['Debit/Lot']*0.9, row['Debit/Lot']*1.1))
-                    ]
-                    if not similar.empty:
-                        avg_win = similar[similar['P&L']>0]['P&L'].mean()
-                        st.info(f"📊 **Historical Context:** Found {len(similar)} similar trades. Average Win: **${avg_win:,.0f}**")
-                
-                if "A" in row['Grade']:
-                    st.success(f"✅ **APPROVED:** {row['Reason']}")
-                elif "F" in row['Grade']:
-                    st.error(f"⛔ **REJECT:** {row['Reason']}")
-                else:
-                    st.warning(f"⚠️ **CHECK:** {row['Reason']}")
+                if not m_df.empty:
+                    row = m_df.iloc[0]
+                    name = str(row.get('Name', ''))
+                    debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                    strat = get_strategy(str(row.get('Group', '')), name)
+                    
+                    # Lot Size Logic
+                    lot_size = 1
+                    if strat == '130/160' and debit > 6000: lot_size = 2
+                    elif strat == '130/160' and debit > 10000: lot_size = 3
+                    elif strat == '160/190' and debit > 8000: lot_size = 2
+                    elif strat == 'M200' and debit > 12000: lot_size = 2
+                    
+                    debit_lot = debit / lot_size
+                    
+                    # Grading
+                    grade = "C"
+                    if strat == '130/160': grade = "F" if debit_lot > 4800 else "A+" if 3500 <= debit_lot <= 4500 else "B"
+                    if strat == '160/190': grade = "A" if 4800 <= debit_lot <= 5500 else "C"
+                    if strat == 'M200': grade = "A" if 7500 <= debit_lot <= 8500 else "B"
 
-    # 3. ANALYTICS
+                    st.divider()
+                    st.subheader(f"Audit: {name}")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Strategy", strat)
+                    c2.metric("Debit Total", f"${debit:,.0f}")
+                    c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
+                    
+                    # Comparison
+                    if not expired_df.empty:
+                        similar = expired_df[(expired_df['Strategy'] == strat) & (expired_df['Debit/Lot'].between(debit_lot*0.9, debit_lot*1.1))]
+                        if not similar.empty:
+                            avg_win = similar[similar['P&L']>0]['P&L'].mean()
+                            st.info(f"📊 **Historical Context:** Found {len(similar)} similar trades. Average Win: **${avg_win:,.0f}**")
+                    
+                    if "A" in grade: st.success("✅ **APPROVED:** Great Entry")
+                    elif "F" in grade: st.error("⛔ **REJECT:** Overpriced")
+                    else: st.warning("⚠️ **CHECK:** Acceptable Variance")
+            except: st.error("Could not parse file.")
+
+    # 3. ANALYTICS (FIXED SCOPING)
     with tabs[2]:
         if not df.empty:
+            filt_df = df.copy()
             if 'entry_date' in df.columns:
                 min_d, max_d = df['entry_date'].min(), df['entry_date'].max()
                 rng = st.date_input("Filter Date", [min_d, max_d])
                 if len(rng)==2: 
                     mask = (df['entry_date'] >= pd.to_datetime(rng[0])) & (df['entry_date'] <= pd.to_datetime(rng[1]))
                     filt_df = df[mask]
-                else: filt_df = df
-            else: filt_df = df
             
             an_tabs = st.tabs(["🚀 Efficiency", "⏳ Time vs Money", "⚔️ Head-to-Head", "🔥 Heatmap"])
             
@@ -418,22 +455,24 @@ else:
                     st.plotly_chart(fig, use_container_width=True)
             
             with an_tabs[1]:
-                exp_sub = filt_df[filt_df['Status']=='Expired']
+                exp_sub = filt_df[filt_df['Status']=='Expired'] # Fixed Scoping
                 if not exp_sub.empty:
                     fig = px.scatter(exp_sub, x='Days Held', y='P&L', color='Strategy', size='Debit')
                     st.plotly_chart(fig, use_container_width=True)
             
-            with an_tabs[2]: # Head to Head
+            with an_tabs[2]: 
+                exp_sub = filt_df[filt_df['Status']=='Expired'] # Fixed Scoping
                 if not exp_sub.empty:
                     perf = exp_sub.groupby('Strategy').agg({'P&L':['count','mean','sum'], 'Days Held':'mean', 'Daily Yield %':'mean'}).reset_index()
                     st.dataframe(perf, use_container_width=True)
             
-            with an_tabs[3]: # Heatmap
+            with an_tabs[3]: 
+                exp_sub = filt_df[filt_df['Status']=='Expired'] # Fixed Scoping
                 if not exp_sub.empty:
                     fig = px.density_heatmap(exp_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
 
-    # 4. ALLOCATION (DYNAMIC)
+    # 4. ALLOCATION
     with tabs[3]:
         st.markdown(f"### 💰 Portfolio Allocation (Based on ${acct_size:,.0f})")
         st.info("💡 **Barbell Approach:** Balance high-growth M200 with steady 130/160 cash flow.")
@@ -461,44 +500,43 @@ else:
     # 5. JOURNAL
     with tabs[4]:
         st.markdown("### 📓 Trade Journal")
-        
-        # Strategy Filter
         all_strats = list(df['Strategy'].unique())
         sel_strat = st.selectbox("Filter by Strategy", ["All"] + all_strats)
-        
         j_df = df if sel_strat == "All" else df[df['Strategy'] == sel_strat]
         
         edited = st.data_editor(j_df[['id','Name','Strategy','P&L','Notes']], key="journal", hide_index=True, use_container_width=True)
         if st.button("💾 Save Notes"):
-            conn = get_db_connection()
-            for i, r in edited.iterrows():
-                conn.execute("UPDATE trades SET notes = ? WHERE id = ?", (r['Notes'], r['id']))
-            conn.commit()
-            st.success("Saved!")
-            st.rerun()
+            try:
+                conn = get_db_connection()
+                for i, r in edited.iterrows():
+                    conn.execute("UPDATE trades SET notes = ? WHERE id = ?", (r['Notes'], r['id']))
+                conn.commit()
+                st.success("Saved!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Save failed: {e}")
 
-    # 6. RULES (DETAILED)
+    # 6. RULES
     with tabs[5]:
         st.markdown("""
         ### 1. 130/160 Strategy (Income Engine)
         * **Target Entry:** Monday.
         * **Debit Target:** `$3,500 - $4,500` per lot.
         * **Stop Rule:** Never pay > `$4,800` per lot.
-        * **Management:** * **Kill Rule:** If trade is **>25 days old** AND profit is **flat/negative (<$100)**, EXIT immediately. Dead money.
-            * **Take Profit:** Target **~$600** (Historical Avg).
+        * **Manage:** Kill if trade is **>25 days old** and profit is flat/negative.
         
         ### 2. 160/190 Strategy (Compounder)
         * **Target Entry:** Friday.
         * **Debit Target:** `~$5,200` per lot.
         * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI efficiency).
-        * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days (Cooking Phase).
+        * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days.
         
         ### 3. M200 Strategy (Whale)
         * **Target Entry:** Wednesday.
         * **Debit Target:** `$7,500 - $8,500` per lot.
         * **Management:** Check P&L at **Day 14**.
-            * If **Green (>$200):** Exit or Roll.
-            * If **Red/Flat:** HOLD. Do not exit in the "Dip Valley" (Day 15-50).
+            * If Green > $200: Exit or Roll.
+            * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
         """)
 
     # QUICK START
