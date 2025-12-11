@@ -9,17 +9,16 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Fresh Start (v3)")
+st.title("🛡️ Allantis Trade Guardian")
 
-# --- DATABASE ENGINE ---
-# CHANGED NAME TO FORCE A FRESH START
+# --- DATABASE ENGINE (v61) ---
 DB_NAME = "trade_guardian_v3.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # TRADES TABLE
+    # TRADES TABLE (Expanded to include v35 metrics like Gamma/Vega)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -33,6 +32,8 @@ def init_db():
                     pnl REAL,
                     theta REAL,
                     delta REAL,
+                    gamma REAL,
+                    vega REAL,
                     notes TEXT
                 )''')
     
@@ -53,8 +54,15 @@ def init_db():
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
 
+# --- CONFIGURATION (v35) ---
+BASE_CONFIG = {
+    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
+    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
+    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41}
+}
+
 # --- HELPER FUNCTIONS ---
-def get_strategy(group_name, trade_name):
+def get_strategy(group_name, trade_name=""):
     g = str(group_name).upper()
     n = str(trade_name).upper()
     if "M200" in g or "M200" in n: return "M200"
@@ -66,35 +74,50 @@ def clean_num(x):
     try: return float(str(x).replace('$', '').replace(',', ''))
     except: return 0.0
 
+def safe_fmt(val, fmt_str):
+    try:
+        if isinstance(val, (int, float)): return fmt_str.format(val)
+        return str(val)
+    except: return str(val)
+
 def generate_id(name, strategy, entry_date):
-    # Unique ID Generation
+    # Unique ID Generation (v61)
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
-# --- SMART FILE READER ---
+# --- SMART FILE READER (v61) ---
 def read_file_safely(file):
     """Handles CSVs with potential garbage rows at the top."""
     try:
-        if file.name.endswith('.xlsx'):
-            return pd.read_excel(file)
+        if file.name.endswith('.xlsx') or file.name.endswith('.xls'):
+            df_raw = pd.read_excel(file, header=None, engine='openpyxl')
+            header_idx = -1
+            for i, row in df_raw.head(20).iterrows():
+                row_str = " ".join(row.astype(str).values)
+                if "Name" in row_str and "Total Return" in row_str:
+                    header_idx = i
+                    break
+            if header_idx != -1:
+                df = df_raw.iloc[header_idx+1:].copy()
+                df.columns = df_raw.iloc[header_idx]
+                return df
+            return None
         else:
             # It's a CSV
             content = file.getvalue().decode("utf-8")
-            # Try finding the header
             lines = content.split('\n')
             header_row = 0
-            for i, line in enumerate(lines[:10]):
+            for i, line in enumerate(lines[:20]):
                 if "Name" in line and "Total Return" in line:
                     header_row = i
                     break
             
-            # Reset pointer and read
             file.seek(0)
             return pd.read_csv(file, skiprows=header_row)
     except Exception as e:
         return None
 
-# --- SYNC ENGINE ---
+# --- SYNC ENGINE (v61 Logic + v35 Data Points) ---
 def sync_data(file_list, file_type):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -124,12 +147,17 @@ def sync_data(file_list, file_type):
                 # 2. Extract Data
                 group = str(row.get('Group', ''))
                 strat = get_strategy(group, name)
+                
                 pnl = clean_num(row.get('Total Return $', 0))
                 debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                
+                # Greeks (v35 needs Gamma/Vega too)
                 theta = clean_num(row.get('Theta', 0))
                 delta = clean_num(row.get('Delta', 0))
+                gamma = clean_num(row.get('Gamma', 0))
+                vega = clean_num(row.get('Vega', 0))
                 
-                # Lot Size
+                # Lot Size Logic
                 lot_size = 1
                 if strat == '130/160' and debit > 6000: lot_size = 2
                 elif strat == '130/160' and debit > 10000: lot_size = 3
@@ -139,7 +167,7 @@ def sync_data(file_list, file_type):
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # 3. Date Logic (The Fix)
+                # 3. Date Logic (v61 Dual-Logic Fix)
                 exit_dt = None
                 days_held = 1
                 
@@ -162,26 +190,26 @@ def sync_data(file_list, file_type):
                 if existing is None:
                     # Insert New
                     c.execute('''INSERT INTO trades 
-                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, notes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (trade_id, name, strat, status, start_dt.date(), 
                          exit_dt.date() if exit_dt else None, 
-                         days_held, debit, lot_size, pnl, theta, delta, ""))
+                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, ""))
                     count_new += 1
                 else:
                     # Update Existing
                     # Only update if source is History (Truth) or currently Active
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=? 
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
                             WHERE id=?''', 
-                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, trade_id))
+                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                     elif existing[0] == "Active":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=? 
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
                             WHERE id=?''', 
-                            (pnl, days_held, theta, delta, trade_id))
+                            (pnl, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                         
                 # 5. Snapshot (Active Only)
@@ -201,7 +229,7 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# --- DATA LOADER ---
+# --- DATA LOADER (Map DB to v35 Format) ---
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
@@ -211,34 +239,56 @@ def load_data():
     finally: conn.close()
     
     if not df.empty:
-        # Standardize Columns
-        df.columns = [x.lower() for x in df.columns]
+        # Standardize Columns to v35 Format (Title Case)
+        # This ensures the visual code from v35 works without change
+        df = df.rename(columns={
+            'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
+            'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
+            'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
+            'entry_date': 'Entry Date', 'notes': 'Notes'
+        })
         
         # Types
-        df['entry_date'] = pd.to_datetime(df['entry_date'])
-        df['debit'] = df['debit'].fillna(0)
-        df['pnl'] = df['pnl'].fillna(0)
+        df['Entry Date'] = pd.to_datetime(df['Entry Date'])
+        df['Debit'] = df['Debit'].fillna(0)
+        df['P&L'] = df['P&L'].fillna(0)
         
-        # Calc
-        df['debit_lot'] = df['debit'] / df['lot_size'].replace(0, 1)
-        df['daily_yield'] = (df['pnl'] / df['debit'].replace(0, 1) * 100) / df['days_held'].replace(0, 1)
+        # Calculations
+        df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
+        df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
+        df['Daily Yield %'] = df['ROI'] / df['Days Held'].replace(0, 1)
         
-        # Grading
+        # Grading Logic (v35)
         def get_grade(row):
-            s, d = row['strategy'], row['debit_lot']
-            if s == '130/160': return "A+" if 3500<=d<=4500 else "F" if d>4800 else "B"
-            if s == '160/190': return "A" if 4800<=d<=5500 else "C"
-            if s == 'M200': return "A" if 7500<=d<=8500 else "B"
-            return "C"
-        df['grade'] = df.apply(get_grade, axis=1)
+            s, d = row['Strategy'], row['Debit/Lot']
+            reason = "Standard"
+            grade = "C"
+            if s == '130/160':
+                if d > 4800: grade="F"; reason="Overpriced (> $4.8k)"
+                elif 3500 <= d <= 4500: grade="A+"; reason="Sweet Spot"
+                else: grade="B"; reason="Acceptable"
+            elif s == '160/190':
+                if 4800 <= d <= 5500: grade="A"; reason="Ideal Pricing"
+                else: grade="C"; reason="Check Pricing"
+            elif s == 'M200':
+                if 7500 <= d <= 8500: grade="A"; reason="Perfect Entry"
+                else: grade="B"; reason="Variance"
+            return pd.Series([grade, reason])
+
+        df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
+        
+        # Latest Flag (for compatibility with v35 logic, though DB implies uniqueness)
+        df['Latest'] = True 
         
     return df
 
-# --- INITIALIZE ---
+# --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR ---
-with st.sidebar.expander("📂 Data Sync", expanded=True):
+# --- SIDEBAR (Merged) ---
+# 1. v61 SYNC & BACKUP TOOLS
+st.sidebar.header("💾 Data Manager (v3)")
+with st.sidebar.expander("🔄 Sync & Backup", expanded=True):
     active_up = st.file_uploader("1. ACTIVE Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("2. HISTORY (Closed)", accept_multiple_files=True, key="hist")
     
@@ -252,160 +302,440 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
             st.success("Synced!")
             st.rerun()
 
-    if st.button("💾 Backup DB"):
-        with open(DB_NAME, "rb") as f:
-            st.download_button("⬇️ Download DB", f, "trade_guardian_v3.db", "application/x-sqlite3")
-            
-    restore = st.file_uploader("📥 Restore DB", type=['db'])
-    if restore:
-        with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
-        st.success("Restored!")
-        st.rerun()
+    st.divider()
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💾 Backup"):
+            with open(DB_NAME, "rb") as f:
+                st.download_button("Download", f, "trade_guardian_v3.db", "application/x-sqlite3")
+    with c2:
+        restore = st.file_uploader("Restore", type=['db'], label_visibility="collapsed")
+        if restore:
+            with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+            st.success("Restored!")
+            st.rerun()
 
 st.sidebar.divider()
-acct_size = st.sidebar.number_input("Account Size", value=150000, step=5000)
-regime = st.sidebar.selectbox("Regime", ["Neutral", "Bullish (+10%)", "Bearish (-10%)"])
-mult = 1.1 if "Bullish" in regime else 0.9 if "Bearish" in regime else 1.0
 
-# --- CONFIG ---
-BASE_CONFIG = {
-    '130/160': {'pnl': 600}, 
-    '160/190': {'pnl': 420}, 
-    'M200':    {'pnl': 910}
-}
+# 2. v35 STRATEGY SETTINGS
+st.sidebar.header("⚙️ Strategy Settings")
+market_regime = st.sidebar.selectbox(
+    "Current Market Regime", 
+    ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"],
+    index=0,
+    help="Bullish: +10% Profit Target | Bearish: -10% Profit Target"
+)
 
-# --- MAIN ---
+# Regime Multiplier
+regime_mult = 1.0
+if "Bullish" in market_regime: regime_mult = 1.10
+if "Bearish" in market_regime: regime_mult = 0.90
+
+# --- SMART EXIT ENGINE (v35 Logic) ---
+def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
+    action = ""
+    signal_type = "NONE" 
+    
+    if status == "Active":
+        # 1. TAKE PROFIT RULE
+        benchmark = benchmarks_dict.get(strat, {})
+        base_target = benchmark.get('pnl', 0)
+        
+        # Fallback
+        if base_target == 0: 
+            base_target = BASE_CONFIG.get(strat, {}).get('pnl', 9999)
+            
+        final_target = base_target * regime_mult
+            
+        if pnl >= final_target:
+            return f"TAKE PROFIT (Hit ${final_target:,.0f})", "SUCCESS"
+
+        # 2. STRATEGY SPECIFIC RULES
+        if strat == '130/160':
+            if 25 <= days_held <= 35 and pnl < 100:
+                return "KILL (Stale >25d)", "ERROR"
+            
+        elif strat == '160/190':
+            if days_held < 30:
+                return "COOKING (Do Not Touch)", "INFO"
+            elif 30 <= days_held <= 40:
+                return "WATCH (Profit Zone)", "WARNING"
+
+        elif strat == 'M200':
+            if 12 <= days_held <= 16:
+                if pnl > 200: return "DAY 14 CHECK (Green)", "SUCCESS"
+                else: return "DAY 14 CHECK (Red)", "WARNING"
+                
+    return action, signal_type
+
+# --- MAIN APP ---
 df = load_data()
 
-if df.empty:
-    st.info("👋 System Ready. Please upload files to begin.")
-else:
-    # BENCHMARKS (Recalculate from DB)
-    expired = df[df['status'] == 'Expired']
-    benchmarks = BASE_CONFIG.copy()
-    if not expired.empty:
-        for strat, grp in expired.groupby('strategy'):
-            wins = grp[grp['pnl'] > 0]
-            if not wins.empty:
-                avg_win = wins['pnl'].mean()
-                avg_debit = grp['debit'].mean() # Use total average
-                avg_days = grp['days_held'].mean()
-                
-                # True Yield = (Avg Win / Avg Debit) / Avg Days
-                y = (avg_win / avg_debit * 100) / avg_days if avg_days > 0 else 0
-                benchmarks[strat] = {'pnl': avg_win, 'yield': y, 'dit': avg_days}
+# --- CALCULATE BENCHMARKS (From DB Data) ---
+benchmarks = BASE_CONFIG.copy()
+if not df.empty:
+    expired_df = df[df['Status'] == 'Expired']
+    if not expired_df.empty:
+        hist_grp = expired_df.groupby('Strategy')
+        for strat, grp in hist_grp:
+            winners = grp[grp['P&L'] > 0]
+            if not winners.empty:
+                benchmarks[strat] = {
+                    'yield': grp['Daily Yield %'].mean(),
+                    'pnl': winners['P&L'].mean(),
+                    'roi': winners['ROI'].mean(),
+                    'dit': winners['Days Held'].mean()
+                }
 
-    # TABS
-    t1, t2, t3, t4, t5 = st.tabs(["Dashboard", "Analysis", "Allocation", "Journal", "Rules"])
+# TABS
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics", "📖 Rule Book"])
 
-    # 1. DASHBOARD
-    with t1:
-        active = df[df['status'] == 'Active'].copy()
+# 1. ACTIVE DASHBOARD (v35 Visuals)
+with tab1:
+    if not df.empty:
+        active_df = df[df['Status'] == 'Active'].copy()
         
-        if not active.empty:
-            # Action Logic
-            def get_action(row):
-                bench = benchmarks.get(row['strategy'], {'pnl':9999})
-                target = bench['pnl'] * mult
-                if row['pnl'] >= target: return "TAKE PROFIT"
-                if row['strategy'] == '130/160' and row['days_held'] > 25 and row['pnl'] < 100: return "KILL (Stale)"
-                if row['strategy'] == 'M200' and 12 <= row['days_held'] <= 16: return "DAY 14 CHECK"
-                return ""
-            active['Action'] = active.apply(get_action, axis=1)
-            
-            # Alerts
-            urgent = active[active['Action'] != ""]
-            if not urgent.empty:
-                st.markdown("### 🚨 Action Center")
-                for _, r in urgent.iterrows():
-                    color = "green" if "TAKE" in r['Action'] else "red"
-                    st.markdown(f"<span style='color:{color}'>**{r['name']}**: {r['Action']}</span>", unsafe_allow_html=True)
-                st.divider()
-                
-            # Overview Tab
-            st_tabs = st.tabs(["Overview", "130/160", "160/190", "M200"])
-            
-            # Helper
-            def style_df(d):
-                return (d.style.format({'pnl':'${:,.0f}', 'debit':'${:,.0f}', 'theta':'{:.1f}', 'daily_yield':'{:.2f}%', 'days_held':'{:.0f}'})
-                        .map(lambda v: 'background-color:#d1e7dd' if 'TAKE' in str(v) else 'background-color:#f8d7da' if 'KILL' in str(v) else '', subset=['Action']))
-
-            with st_tabs[0]:
-                agg = active.groupby('strategy').agg({'pnl':'sum','debit':'sum','name':'count'}).reset_index()
-                st.markdown("#### Portfolio Risk")
-                c1,c2,c3 = st.columns(3)
-                c1.metric("Net Delta", f"{active['delta'].sum():.1f}")
-                c2.metric("Daily Theta", f"${active['theta'].sum():.0f}")
-                c3.metric("Capital at Risk", f"${active['debit'].sum():,.0f}")
-                st.dataframe(style_df(active[['name','strategy','pnl','debit','days_held','Action']]), use_container_width=True)
-
-            for i, s in enumerate(['130/160', '160/190', 'M200'], 1):
-                with st_tabs[i]:
-                    sub = active[active['strategy'] == s]
-                    b = benchmarks.get(s, {})
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Target Profit", f"${b.get('pnl',0)*mult:,.0f}")
-                    c2.metric("Target Yield", f"{b.get('yield',0)*100:.2f}%")
-                    c3.metric("Avg Duration", f"{b.get('dit',0):.0f}d")
-                    
-                    if not sub.empty: st.dataframe(style_df(sub[['name','Action','pnl','days_held','daily_yield','theta']]), use_container_width=True)
-                    else: st.info("No trades.")
+        if active_df.empty:
+            st.info("📭 No active trades in database. Sync an Active File.")
         else:
-            st.info("No active trades.")
+            # --- PORTFOLIO HEALTH ---
+            port_yield = active_df['Daily Yield %'].mean()
+            if port_yield < 0.10:
+                st.sidebar.error(f"🚨 Yield Critical: {port_yield:.2f}%")
+            elif port_yield < 0.15:
+                st.sidebar.warning(f"⚠️ Yield Low: {port_yield:.2f}%")
+            else:
+                st.sidebar.success(f"✅ Yield Healthy: {port_yield:.2f}%")
 
-    # 2. ANALYSIS
-    with t2:
-        if not expired.empty:
-            st.markdown("### 🏆 Performance")
-            c1, c2 = st.columns(2)
-            c1.metric("Realized P&L", f"${expired['pnl'].sum():,.0f}")
-            c2.metric("Win Rate", f"{(len(expired[expired['pnl']>0])/len(expired)*100):.1f}%")
+            # --- ACTION LOGIC ---
+            act_list = []
+            sig_list = []
+            for _, row in active_df.iterrows():
+                act, sig = get_action_signal(
+                    row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks
+                )
+                act_list.append(act)
+                sig_list.append(sig)
+                
+            active_df['Action'] = act_list
+            active_df['Signal_Type'] = sig_list
             
-            an_tabs = st.tabs(["Efficiency", "Head-to-Head", "Timeline"])
-            with an_tabs[0]:
-                fig = px.scatter(expired, x='days_held', y='pnl', color='strategy', title="P&L vs Duration")
-                st.plotly_chart(fig, use_container_width=True)
-            with an_tabs[1]:
-                perf = expired.groupby('strategy').agg({'pnl':['count','mean','sum'], 'days_held':'mean'}).reset_index()
-                st.dataframe(perf, use_container_width=True)
-            with an_tabs[2]:
-                # Timeline requires snapshots, showing static view for now
-                fig = px.bar(expired, x='exit_date', y='pnl', color='strategy', title="Realized P&L Over Time")
-                st.plotly_chart(fig, use_container_width=True)
-
-    # 3. ALLOCATION
-    with t3:
-        st.markdown(f"### 💰 Target Allocation (${acct_size:,.0f})")
-        deploy = acct_size * 0.8
-        c1, c2, c3 = st.columns(3)
-        c1.metric("M200 (40%)", f"${deploy*0.4:,.0f}")
-        c2.metric("160/190 (30%)", f"${deploy*0.3:,.0f}")
-        c3.metric("130/160 (30%)", f"${deploy*0.3:,.0f}")
-
-    # 4. JOURNAL
-    with t4:
-        st.markdown("### 📓 Journal")
-        edited = st.data_editor(df[['id', 'name', 'strategy', 'pnl', 'days_held', 'notes']], key="journal", hide_index=True)
-        if st.button("💾 Save Changes"):
-            conn = get_db_connection()
-            for i, r in edited.iterrows():
-                conn.execute("UPDATE trades SET notes = ?, days_held = ? WHERE id = ?", (r['notes'], r['days_held'], r['id']))
-            conn.commit()
-            conn.close()
-            st.success("Saved!")
-            st.rerun()
+            # --- STRATEGY TABS ---
+            st.markdown("### 🏛️ Active Trades by Strategy")
             
-    # 5. RULES
-    with t5:
+            strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
+            
+            # COLUMNS
+            cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+
+            def render_tab(tab, strategy_name):
+                with tab:
+                    subset = active_df[active_df['Strategy'] == strategy_name].copy()
+                    bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
+                    
+                    target_disp = bench['pnl'] * regime_mult
+                    
+                    # LOCAL ALERTS
+                    urgent = subset[subset['Action'] != ""]
+                    if not urgent.empty:
+                        st.markdown(f"**🚨 Action Center ({len(urgent)})**")
+                        for _, row in urgent.iterrows():
+                            sig = row['Signal_Type']
+                            msg = f"**{row['Name']}**: {row['Action']}"
+                            if sig == "SUCCESS": st.success(msg)
+                            elif sig == "ERROR": st.error(msg)
+                            elif sig == "WARNING": st.warning(msg)
+                            else: st.info(msg)
+                        st.divider()
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
+                    c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
+                    c3.metric("Target Profit", f"${target_disp:,.0f}")
+                    c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
+                    
+                    if not subset.empty:
+                        # CREATE TOTAL ROW
+                        sum_row = pd.DataFrame({
+                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
+                            'Daily Yield %': [subset['Daily Yield %'].mean()],
+                            'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
+                            'Days Held': [subset['Days Held'].mean()],
+                            'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
+                            'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()],
+                            'Notes': ['']
+                        })
+                        
+                        display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                        
+                        st.dataframe(
+                            display_df.style
+                            .format({
+                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%",
+                                'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
+                                'Days Held': "{:.0f}"
+                            })
+                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
+                                                   else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
+                                                   else '', subset=['Action'])
+                            .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
+                                                   else 'color: #842029; font-weight: bold' if 'F' in str(v) 
+                                                   else '', subset=['Grade'])
+                            .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No active trades.")
+
+            # TAB 1: OVERVIEW
+            with strat_tabs[0]:
+                with st.expander("📊 Portfolio Risk Metrics", expanded=True):
+                    total_delta = active_df['Delta'].sum()
+                    total_theta = active_df['Theta'].sum()
+                    total_cap = active_df['Debit'].sum()
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Net Delta", f"{total_delta:,.1f}", delta="Bullish" if total_delta > 0 else "Bearish")
+                    r2.metric("Daily Theta", f"${total_theta:,.0f}")
+                    r3.metric("Capital at Risk", f"${total_cap:,.0f}")
+
+                strat_agg = active_df.groupby('Strategy').agg({
+                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                    'Name': 'count', 'Daily Yield %': 'mean' 
+                }).reset_index()
+                
+                strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
+                strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
+                
+                total_row = pd.DataFrame({
+                    'Strategy': ['TOTAL'], 
+                    'P&L': [strat_agg['P&L'].sum()],
+                    'Debit': [strat_agg['Debit'].sum()],
+                    'Theta': [strat_agg['Theta'].sum()], 
+                    'Delta': [strat_agg['Delta'].sum()],
+                    'Name': [strat_agg['Name'].sum()], 
+                    'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                    'Trend': ['-'], 'Target %': ['-']
+                })
+                
+                final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
+                
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Active Trades']
+                
+                def highlight_trend(val):
+                    if '🟢' in str(val): return 'color: green; font-weight: bold'
+                    if '🔴' in str(val): return 'color: red; font-weight: bold'
+                    return ''
+
+                def style_total(row):
+                    if row['Strategy'] == 'TOTAL':
+                        return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row)
+                    return [''] * len(row)
+
+                st.dataframe(
+                    display_agg.style
+                    .format({
+                        'Total P&L': "${:,.0f}", 'Total Debit': "${:,.0f}",
+                        'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
+                        'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                    })
+                    .map(highlight_trend, subset=['Trend'])
+                    .apply(style_total, axis=1), 
+                    use_container_width=True
+                )
+                
+                csv = active_df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download Active Trades CSV", csv, "active_snapshot.csv", "text/csv")
+
+            render_tab(strat_tabs[1], '130/160')
+            render_tab(strat_tabs[2], '160/190')
+            render_tab(strat_tabs[3], 'M200')
+    else:
+        st.info("👋 Database is empty. Use the sidebar to Sync your first Active/History file.")
+
+# 2. VALIDATOR (v35 Logic with DB check)
+with tab2:
+    st.markdown("### 🧪 Pre-Flight Audit")
+    
+    with st.expander("ℹ️ Grading System Legend", expanded=True):
         st.markdown("""
-        ### 1. 130/160
-        * Mon Entry. $3.5k-$4.5k Debit. Kill >25d & Flat.
-        ### 2. 160/190
-        * Fri Entry. ~$5.2k Debit. Hold 40-50d.
-        ### 3. M200
-        * Wed Entry. $7.5k-$8.5k Debit. Day 14 Check.
+        | Strategy | Grade | Debit Range (Per Lot) | Verdict |
+        | :--- | :--- | :--- | :--- |
+        | **130/160** | **A+** | `$3,500 - $4,500` | ✅ **Sweet Spot** (Highest statistical win rate) |
+        | **130/160** | **B** | `< $3,500` or `$4,500-$4,800` | ⚠️ **Acceptable** (Watch volatility) |
+        | **130/160** | **F** | `> $4,800` | ⛔ **Overpriced** (Historical failure rate 100%) |
+        | **160/190** | **A** | `$4,800 - $5,500` | ✅ **Ideal** Pricing |
+        | **160/190** | **C** | `> $5,500` | ⚠️ **Expensive** (Reduces ROI efficiency) |
+        | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** "Whale" sizing |
+        | **M200** | **B** | Any other price | ⚠️ **Variance** from mean |
         """)
+        
+    model_file = st.file_uploader("Upload Model File (Check potential trade)", key="mod")
+    if model_file:
+        # Use v35's quick process logic (in-memory only, no DB save) just for checking
+        m_df = pd.DataFrame()
+        try:
+            m_raw = read_file_safely(model_file)
+            if m_raw is not None:
+                # Minimal processing for validation
+                row = m_raw.iloc[0]
+                name = row.get('Name', 'Unknown')
+                group = str(row.get('Group', ''))
+                strat = get_strategy(group, name)
+                debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                
+                # Grading Re-calc
+                lot_size = 1
+                if strat == '130/160' and debit > 6000: lot_size = 2
+                elif strat == '130/160' and debit > 10000: lot_size = 3
+                elif strat == '160/190' and debit > 8000: lot_size = 2
+                elif strat == 'M200' and debit > 12000: lot_size = 2
+                
+                debit_lot = debit / max(1, lot_size)
+                
+                grade = "C"; reason = "Standard"
+                if strat == '130/160':
+                    if debit_lot > 4800: grade = "F"; reason = "Overpriced (> $4.8k)"
+                    elif 3500 <= debit_lot <= 4500: grade = "A+"; reason = "Sweet Spot"
+                    else: grade = "B"; reason = "Acceptable"
+                elif strat == '160/190':
+                    if 4800 <= debit_lot <= 5500: grade = "A"; reason = "Ideal Pricing"
+                    else: grade = "C"; reason = "Check Pricing"
+                elif strat == 'M200':
+                    if 7500 <= debit_lot <= 8500: grade = "A"; reason = "Perfect Entry"
+                    else: grade = "B"; reason = "Variance"
 
-    # DEBUGGER
-    with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
+                st.divider()
+                st.subheader(f"Audit: {name}")
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Strategy", strat)
+                c2.metric("Debit Total", f"${debit:,.0f}")
+                c3.metric("Debit Per Lot", f"${debit_lot:,.0f}")
+                
+                # Historical Context (Using DB now)
+                if not df.empty:
+                    expired_df = df[df['Status'] == 'Expired']
+                    similar = expired_df[
+                        (expired_df['Strategy'] == strat) & 
+                        (expired_df['Debit/Lot'].between(debit_lot*0.9, debit_lot*1.1))
+                    ]
+                    if not similar.empty:
+                        avg_win = similar[similar['P&L']>0]['P&L'].mean()
+                        st.info(f"📊 **Historical Context:** Found {len(similar)} similar trades in DB. Average Win: **${avg_win:,.0f}**")
+                
+                if "A" in grade:
+                    st.success(f"✅ **APPROVED:** {reason}")
+                elif "F" in grade:
+                    st.error(f"⛔ **REJECT:** {reason}")
+                else:
+                    st.warning(f"⚠️ **CHECK:** {reason}")
+                    
+        except Exception as e:
+            st.error(f"Error reading model file: {e}")
+
+# 3. ANALYTICS (v35 Visuals powered by DB)
+with tab3:
+    if not df.empty:
+        st.subheader("📈 Analytics & Trends")
+        
+        if 'Entry Date' in df.columns:
+            min_date = df['Entry Date'].min()
+            max_date = df['Entry Date'].max()
+            date_range = st.date_input("Filter by Entry Date", [min_date, max_date])
+            
+            if len(date_range) == 2:
+                start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+                end_d = end_d + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                filtered_df = df[(df['Entry Date'] >= start_d) & (df['Entry Date'] <= end_d)]
+            else:
+                filtered_df = df
+        else:
+            filtered_df = df
+        
+        an_tabs = st.tabs(["🚀 Efficiency", "⏳ Time vs Money", "⚔️ Head-to-Head", "🔥 Heatmap"])
+        
+        # 1. YIELD SCATTER
+        with an_tabs[0]:
+            active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
+            if not active_sub.empty:
+                st.markdown("#### 🚀 Yield Efficiency (Active)")
+                fig = px.scatter(
+                    active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
+                    hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
+                )
+                y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
+                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
+                st.plotly_chart(fig, use_container_width=True)
+
+        # 2. PNL VS DIT
+        with an_tabs[1]:
+            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+            if not expired_sub.empty:
+                st.markdown("#### ⏳ Time vs Money (Do longer trades make more?)")
+                fig = px.scatter(
+                    expired_sub, x='Days Held', y='P&L', color='Strategy',
+                    size='Debit', hover_data=['Name'],
+                    title="P&L vs Days Held"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No expired trades to analyze.")
+
+        # 3. HEAD TO HEAD
+        with an_tabs[2]:
+            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+            if not expired_sub.empty:
+                perf = expired_sub.groupby('Strategy').agg({
+                    'P&L': ['count', 'sum', 'mean'],
+                    'Days Held': 'mean',
+                    'Daily Yield %': 'mean'
+                }).reset_index()
+                perf.columns = ['Strategy', 'Count', 'Total P&L', 'Avg P&L', 'Avg Days', 'Avg Daily Yield']
+                st.dataframe(perf.style.format({'Total P&L': "${:,.0f}", 'Avg P&L': "${:,.0f}", 'Avg Days': "{:.0f}", 'Avg Daily Yield': "{:.2f}%"}), use_container_width=True)
+
+        # 4. HEATMAP
+        with an_tabs[3]:
+            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+            if not expired_sub.empty:
+                fig = px.density_heatmap(
+                    expired_sub, x="Days Held", y="Strategy", z="P&L", 
+                    histfunc="avg", title="Profit Heatmap: Where is the Sweet Spot?",
+                    color_continuous_scale="RdBu"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+# 4. RULE BOOK (v35 Text)
+with tab4:
+    st.markdown("""
+    # 📖 Trading Constitution
+    
+    ### 1. 130/160 Strategy (Income Engine)
+    * **Target Entry:** Monday.
+    * **Debit Target:** `$3,500 - $4,500` per lot.
+    * **Stop Rule:** Never pay > `$4,800` per lot.
+    * **Management:** Kill if trade is **25 days old** and profit is flat/negative.
+    
+    ### 2. 160/190 Strategy (Compounder)
+    * **Target Entry:** Friday.
+    * **Debit Target:** `~$5,200` per lot.
+    * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI).
+    * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days.
+    
+    ### 3. M200 Strategy (Whale)
+    * **Target Entry:** Wednesday.
+    * **Debit Target:** `$7,500 - $8,500` per lot.
+    * **Management:** Check P&L at **Day 14**.
+        * If Green > $200: Exit or Roll.
+        * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
+    """)
+    st.divider()
+    st.caption("Allantis Trade Guardian v61.0 Hybrid | Certified Stable")
+
+# DEBUGGER (v61 Extra)
+with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
+    if not df.empty:
         st.write(df)
+    else:
+        st.write("Database Empty")
