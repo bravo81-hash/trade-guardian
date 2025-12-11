@@ -428,10 +428,10 @@ with tab1:
                                     background-color: {bg};
                                     color: {txt};
                                     border: 1px solid {brd};
-                                    padding: 8px 12px;
+                                    padding: 2px 6px;
                                     border-radius: 4px;
-                                    margin-bottom: 8px;
-                                    font-size: 14px;
+                                    margin-bottom: 2px;
+                                    font-size: 11px;
                                 ">
                                     {msg}
                                 </div>
