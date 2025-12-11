@@ -484,27 +484,36 @@ with tab2:
 with tab3:
     st.subheader("📈 Analytics & Trends")
 
-    # DATE FILTER
-    if "entry_date" in df.columns:
-        try:
-            df["entry_date"] = pd.to_datetime(df["entry_date"])
-        except:
-            pass
+        # DATE FILTER — SAFE VERSION
+    # Ensure entry_date is parsed cleanly
+    try:
+        df["entry_date"] = pd.to_datetime(df["entry_date"], errors="coerce")
+    except:
+        df["entry_date"] = pd.NaT
 
+    # Determine safe minimum/maximum dates
+    if df["entry_date"].notna().any():
         min_date = df["entry_date"].min()
         max_date = df["entry_date"].max()
+    else:
+        # Fallback if DB is empty
+        min_date = datetime.now() - pd.Timedelta(days=90)
+        max_date = datetime.now()
 
-        date_range = st.date_input("Filter by Entry Date Range", [min_date, max_date])
+    # Streamlit requires pure date objects for date_input
+    date_range = st.date_input(
+        "Filter by Entry Date Range",
+        [min_date.date(), max_date.date()]
+    )
 
-        if len(date_range) == 2:
-            start_d = pd.to_datetime(date_range[0])
-            end_d = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            filtered_df = df[
-                (df["entry_date"] >= start_d) &
-                (df["entry_date"] <= end_d)
-            ]
-        else:
-            filtered_df = df
+    # Build filtered view
+    if len(date_range) == 2:
+        start_d = pd.to_datetime(date_range[0])
+        end_d = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        filtered_df = df[
+            (df["entry_date"] >= start_d) &
+            (df["entry_date"] <= end_d)
+        ]
     else:
         filtered_df = df
 
