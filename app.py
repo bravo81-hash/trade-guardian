@@ -130,7 +130,23 @@ if df is None or df.empty:
 # ---------------------------------------------------------
 # BENCHMARK CALCULATION (same as v35)
 # ---------------------------------------------------------
-expired_df = df[df["status"] == "Expired"].copy()
+if df is None or df.empty:
+    st.info("👋 Upload today's ACTIVE file to begin.")
+    st.stop()
+
+# ADD THIS:
+df.columns = df.columns.str.lower()
+
+required_cols = [
+    "trade_id", "name", "strategy", "status", "pnl", "debit",
+    "debit_per_lot", "grade", "reason", "alerts", "days_held",
+    "daily_yield", "roi", "entry_date", "expiration_date",
+    "lot_size", "latest_flag", "theta", "delta", "gamma", "vega"
+]
+
+for col in required_cols:
+    if col not in df.columns:
+        df[col] = None
 
 # fall back to base config
 benchmarks = {
