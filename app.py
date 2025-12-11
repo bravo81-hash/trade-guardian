@@ -11,8 +11,9 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- DATABASE ENGINE (v61) ---
-DB_NAME = "trade_guardian_v3.db"
+# --- DATABASE ENGINE (v62) ---
+# UPDATED DB NAME TO FORCE FRESH SCHEMA CREATION
+DB_NAME = "trade_guardian_v4.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -248,6 +249,11 @@ def load_data():
             'entry_date': 'Entry Date', 'notes': 'Notes'
         })
         
+        # SAFETY FIX: Ensure columns exist even if DB is old
+        for col in ['Gamma', 'Vega', 'Theta', 'Delta']:
+            if col not in df.columns:
+                df[col] = 0.0
+        
         # Types
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Debit'] = df['Debit'].fillna(0)
@@ -308,7 +314,7 @@ with st.sidebar.expander("🔄 Sync & Backup", expanded=True):
     with c1:
         if st.button("💾 Backup"):
             with open(DB_NAME, "rb") as f:
-                st.download_button("Download", f, "trade_guardian_v3.db", "application/x-sqlite3")
+                st.download_button("Download", f, "trade_guardian_v4.db", "application/x-sqlite3")
     with c2:
         restore = st.file_uploader("Restore", type=['db'], label_visibility="collapsed")
         if restore:
@@ -731,7 +737,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v61.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v62.0 Hybrid | Certified Stable")
 
 # DEBUGGER (v61 Extra)
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
