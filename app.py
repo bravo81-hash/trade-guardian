@@ -130,13 +130,10 @@ if df is None or df.empty:
 # ---------------------------------------------------------
 # BENCHMARK CALCULATION (same as v35)
 # ---------------------------------------------------------
-if df is None or df.empty:
-    st.info("👋 Upload today's ACTIVE file to begin.")
-    st.stop()
+# Normalize column names safely (convert everything to lowercase strings)
+df.columns = [str(col).strip().lower() for col in df.columns]
 
-# ADD THIS:
-df.columns = df.columns.str.lower()
-
+# Ensure required columns exist
 required_cols = [
     "trade_id", "name", "strategy", "status", "pnl", "debit",
     "debit_per_lot", "grade", "reason", "alerts", "days_held",
@@ -147,7 +144,6 @@ required_cols = [
 for col in required_cols:
     if col not in df.columns:
         df[col] = None
-
 # fall back to base config
 benchmarks = {
     "130/160": {"yield": 0.13, "pnl": 500, "roi": 6.8, "dit": 36},
