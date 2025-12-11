@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import io
 import plotly.express as px
+import plotly.graph_objects as go
 import sqlite3
 import os
 from datetime import datetime
@@ -83,6 +84,19 @@ def safe_fmt(val, fmt_str):
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
+
+def extract_ticker(name):
+    # Simple logic: Take first word, remove dots/numbers if obvious
+    try:
+        parts = str(name).split(' ')
+        if parts:
+            ticker = parts[0].replace('.', '').upper()
+            # Filter out generic strategy names if they appear first
+            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL']:
+                return "UNKNOWN"
+            return ticker
+        return "UNKNOWN"
+    except: return "UNKNOWN"
 
 # --- SMART FILE READER ---
 def read_file_safely(file):
@@ -226,7 +240,7 @@ def load_data():
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
             'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
-            'entry_date': 'Entry Date', 'notes': 'Notes'
+            'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes'
         })
         
         for col in ['Gamma', 'Vega', 'Theta', 'Delta']:
@@ -234,12 +248,15 @@ def load_data():
                 df[col] = 0.0
         
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
+        df['Exit Date'] = pd.to_datetime(df['Exit Date'])
         df['Debit'] = df['Debit'].fillna(0)
         df['P&L'] = df['P&L'].fillna(0)
         
+        # Derived
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = df['ROI'] / df['Days Held'].replace(0, 1)
+        df['Ticker'] = df['Name'].apply(extract_ticker)
         
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
@@ -261,6 +278,22 @@ def load_data():
         df['Latest'] = True 
         
     return df
+
+def load_snapshots():
+    if not os.path.exists(DB_NAME): return pd.DataFrame()
+    conn = get_db_connection()
+    try:
+        # Join snapshots with trades to get Strategy Name
+        q = """
+        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
+        FROM snapshots s
+        JOIN trades t ON s.trade_id = t.id
+        """
+        df = pd.read_sql(q, conn)
+        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        return df
+    except: return pd.DataFrame()
+    finally: conn.close()
 
 # --- INITIALIZE DB ---
 init_db()
@@ -417,24 +450,13 @@ with tab1:
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
-                        
                         action_lines = []
                         for _, row in urgent.iterrows():
                             sig = row['Signal_Type']
-                            # Text Colors optimized for dark/light contrast
-                            color_map = {
-                                "SUCCESS": "#4caf50", # Green
-                                "ERROR":   "#f44336", # Red
-                                "WARNING": "#ff9800", # Orange
-                                "INFO":    "#2196f3", # Blue
-                                "NONE":    "#9e9e9e"  # Grey
-                            }
+                            color_map = {"SUCCESS":"#4caf50", "ERROR":"#f44336", "WARNING":"#ff9800", "INFO":"#2196f3", "NONE":"#9e9e9e"}
                             color = color_map.get(sig, "#9e9e9e")
-                            # Bullet point construction
                             line = f"* <span style='color: {color}'>**{row['Name']}**: {row['Action']}</span>"
                             action_lines.append(line)
-                            
-                        # Render all lines at once
                         st.markdown("\n".join(action_lines), unsafe_allow_html=True)
                         st.divider()
 
@@ -539,7 +561,7 @@ with tab1:
             render_tab(strat_tabs[2], '160/190')
             render_tab(strat_tabs[3], 'M200')
     else:
-        st.info("👋 Database is empty. Go to Step 2 (Work) in the sidebar.")
+        st.info("👋 Database is empty. Use the sidebar to Sync your first Active/History file.")
 
 # 2. VALIDATOR
 with tab2:
@@ -618,15 +640,16 @@ with tab2:
         except Exception as e:
             st.error(f"Error reading model file: {e}")
 
-# 3. ANALYTICS
+# 3. ANALYTICS (NEW & IMPROVED)
 with tab3:
     if not df.empty:
-        st.subheader("📈 Analytics & Trends")
+        st.subheader("📈 Analytics Suite")
         
+        # Date Filter
         if 'Entry Date' in df.columns:
             min_date = df['Entry Date'].min()
             max_date = df['Entry Date'].max()
-            date_range = st.date_input("Filter by Entry Date", [min_date, max_date])
+            date_range = st.date_input("Filter Data Range", [min_date, max_date])
             
             if len(date_range) == 2:
                 start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
@@ -636,54 +659,107 @@ with tab3:
                 filtered_df = df
         else:
             filtered_df = df
-        
-        an_tabs = st.tabs(["🚀 Efficiency", "⏳ Time vs Money", "⚔️ Head-to-Head", "🔥 Heatmap"])
-        
-        with an_tabs[0]:
-            active_sub = filtered_df[filtered_df['Status'] == 'Active'].copy()
-            if not active_sub.empty:
-                st.markdown("#### 🚀 Yield Efficiency (Active)")
-                fig = px.scatter(
-                    active_sub, x='Days Held', y='Daily Yield %', color='Strategy', size='Debit',
-                    hover_data=['Name', 'P&L'], title="Real-Time Efficiency: Yield vs Age"
-                )
-                y_130 = benchmarks.get('130/160', {}).get('yield', 0.13)
-                fig.add_hline(y=y_130, line_dash="dash", line_color="blue", annotation_text=f"130/160 Target ({y_130:.2f}%)")
-                st.plotly_chart(fig, use_container_width=True)
 
-        with an_tabs[1]:
-            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+        expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+        
+        # Sub-Tabs for clean layout
+        an1, an2, an3, an4, an5 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "📅 Heatmap", "🏷️ Tickers", "🧬 Lifecycle"])
+
+        # 1. EQUITY CURVE
+        with an1:
             if not expired_sub.empty:
-                st.markdown("#### ⏳ Time vs Money (Do longer trades make more?)")
-                fig = px.scatter(
-                    expired_sub, x='Days Held', y='P&L', color='Strategy',
-                    size='Debit', hover_data=['Name'],
-                    title="P&L vs Days Held"
-                )
+                # Sort by Exit Date for timeline
+                ec_df = expired_sub.sort_values("Exit Date").copy()
+                ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
+                
+                # Drawdown Calc
+                ec_df['Peak'] = ec_df['Cumulative P&L'].cummax()
+                ec_df['Drawdown'] = ec_df['Cumulative P&L'] - ec_df['Peak']
+                max_dd = ec_df['Drawdown'].min()
+                
+                c1, c2 = st.columns(2)
+                c1.metric("Total Realized P&L", f"${ec_df['Cumulative P&L'].iloc[-1]:,.0f}")
+                c2.metric("Max Drawdown", f"${max_dd:,.0f}", delta_color="inverse")
+                
+                fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Account Growth (Realized)", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("No expired trades to analyze.")
+                st.info("No closed trades to chart.")
 
-        with an_tabs[2]:
-            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+        # 2. EXPECTANCY
+        with an2:
             if not expired_sub.empty:
-                perf = expired_sub.groupby('Strategy').agg({
-                    'P&L': ['count', 'sum', 'mean'],
-                    'Days Held': 'mean',
-                    'Daily Yield %': 'mean'
-                }).reset_index()
-                perf.columns = ['Strategy', 'Count', 'Total P&L', 'Avg P&L', 'Avg Days', 'Avg Daily Yield']
-                st.dataframe(perf.style.format({'Total P&L': "${:,.0f}", 'Avg P&L': "${:,.0f}", 'Avg Days': "{:.0f}", 'Avg Daily Yield': "{:.2f}%"}), use_container_width=True)
+                # Metrics
+                wins = expired_sub[expired_sub['P&L'] > 0]
+                losses = expired_sub[expired_sub['P&L'] <= 0]
+                
+                avg_win = wins['P&L'].mean() if not wins.empty else 0
+                avg_loss = abs(losses['P&L'].mean()) if not losses.empty else 0
+                win_rate = (len(wins) / len(expired_sub)) * 100
+                profit_factor = (wins['P&L'].sum() / abs(losses['P&L'].sum())) if abs(losses['P&L'].sum()) > 0 else 0
+                
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Win Rate", f"{win_rate:.1f}%")
+                c2.metric("Profit Factor", f"{profit_factor:.2f}")
+                c3.metric("Avg Win", f"${avg_win:,.0f}")
+                c4.metric("Avg Loss", f"${avg_loss:,.0f}")
+                
+                # Chart
+                st.markdown("##### Win/Loss Distribution")
+                fig = px.histogram(expired_sub, x="P&L", color="Strategy", nbins=20, title="Distribution of Trade Outcomes")
+                st.plotly_chart(fig, use_container_width=True)
 
-        with an_tabs[3]:
-            expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
+        # 3. HEATMAP
+        with an3:
             if not expired_sub.empty:
+                hm_df = expired_sub.copy()
+                hm_df['Year'] = hm_df['Exit Date'].dt.year
+                hm_df['Month'] = hm_df['Exit Date'].dt.month_name()
+                
+                # Group
+                hm_grp = hm_df.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
+                
+                # Sort months correctly
+                month_order = ['January', 'February', 'March', 'April', 'May', 'June', 
+                               'July', 'August', 'September', 'October', 'November', 'December']
+                
                 fig = px.density_heatmap(
-                    expired_sub, x="Days Held", y="Strategy", z="P&L", 
-                    histfunc="avg", title="Profit Heatmap: Where is the Sweet Spot?",
-                    color_continuous_scale="RdBu"
+                    hm_grp, x="Month", y="Year", z="P&L", 
+                    color_continuous_scale="RdBu", 
+                    category_orders={"Month": month_order},
+                    text_auto=True,
+                    title="Monthly P&L Heatmap"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+        # 4. TICKERS
+        with an4:
+            if not expired_sub.empty:
+                tick_grp = expired_sub.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False)
+                # Filter out UNKNOWN if needed, but keeping for debug
+                fig = px.bar(tick_grp.head(15), x='P&L', y='Ticker', orientation='h', 
+                             color='P&L', color_continuous_scale="RdBu",
+                             title="Top Performing Tickers")
+                st.plotly_chart(fig, use_container_width=True)
+
+        # 5. LIFECYCLE (SNAPSHOTS)
+        with an5:
+            snaps = load_snapshots()
+            if not snaps.empty:
+                # Filter snaps by strategy to avoid mess
+                sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique())
+                strat_snaps = snaps[snaps['strategy'] == sel_strat]
+                
+                fig = px.line(
+                    strat_snaps, x='days_held', y='pnl', color='trade_id',
+                    title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
+                    labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
+                    hover_data=['name']
+                )
+                fig.update_layout(showlegend=False) # Too many legends usually
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No snapshot data collected yet. (This builds up over time as you Sync active trades daily).")
 
 # 4. RULE BOOK
 with tab4:
@@ -710,7 +786,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v66.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v67.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
