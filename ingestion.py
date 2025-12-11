@@ -2,19 +2,10 @@ import pandas as pd
 import numpy as np
 import io
 from datetime import datetime
-import hashlib
-import streamlit as st
-
-from db import (
-    make_trade_id,
-    upsert_trade,
-    replace_greeks,
-    replace_legs,
-    add_note
-)
+import db  # our local database module
 
 # ---------------------------------------------------------
-# CONFIG (same as v35)
+# BASE CONFIG (same as v35.0)
 # ---------------------------------------------------------
 BASE_CONFIG = {
     '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
@@ -23,246 +14,239 @@ BASE_CONFIG = {
 }
 
 
-def get_strategy(group_name: str) -> str:
+# ---------------------------------------------------------
+# UTILITY FUNCTIONS (from v35.0)
+# ---------------------------------------------------------
+def get_strategy(group_name):
     g = str(group_name).upper()
-    if "M200" in g:
-        return "M200"
-    if "160/190" in g:
-        return "160/190"
-    if "130/160" in g:
-        return "130/160"
+    if "M200" in g: return "M200"
+    elif "160/190" in g: return "160/190"
+    elif "130/160" in g: return "130/160"
     return "Other"
 
 
 def clean_num(x):
     try:
-        return float(str(x).replace("$", "").replace(",", "").strip())
+        return float(str(x).replace('$', '').replace(',', ''))
     except:
         return 0.0
 
 
-# ---------------------------------------------------------
-# PARSE OPTIONSTRAT FILES
-# ---------------------------------------------------------
-def _read_file(f):
-    """Reads an uploaded OptionStrat file (CSV/XLSX) into a DataFrame."""
-    name = f.name.lower()
+def detect_header_index(lines_or_df):
+    """
+    Detects where OptionStrat header row begins.
+    Works for both CSV text (list of lines) and XLSX dataframe.
+    """
+    if isinstance(lines_or_df, list):  # CSV
+        for i, line in enumerate(lines_or_df[:20]):
+            if "Name" in line and "Total Return" in line:
+                return i
+        return 0
 
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        df_raw = pd.read_excel(f, header=None, engine='openpyxl')
-
-        header_idx = -1
+    else:  # Excel DataFrame
+        df_raw = lines_or_df
         for i, row in df_raw.head(20).iterrows():
-            if "Name" in " ".join(row.astype(str).values):
-                header_idx = i
-                break
+            row_str = " ".join(row.astype(str).values)
+            if "Name" in row_str and "Total Return" in row_str:
+                return i
+        return -1
 
-        if header_idx != -1:
-            df = df_raw.iloc[header_idx+1:].copy()
-            df.columns = df_raw.iloc[header_idx]
-            return df
 
-    # CSV fallback
-    content = f.getvalue().decode("utf-8")
-    lines = content.split("\n")
+def safe_date(val):
+    """Parse a date safely, return None if invalid."""
+    if isinstance(val, (pd.Timestamp, datetime)):
+        return val
+    try:
+        return pd.to_datetime(val)
+    except:
+        return None
 
-    header_idx = 0
-    for i, line in enumerate(lines[:20]):
-        if "Name" in line:
-            header_idx = i
-            break
 
-    return pd.read_csv(io.StringIO(content), skiprows=header_idx)
+# ---------------------------------------------------------
+# GRADE CALCULATOR (same as v35.0)
+# ---------------------------------------------------------
+def compute_grade(strategy, debit_lot):
+    """Returns grade + reason."""
+    if strategy == '130/160':
+        if debit_lot > 4800: return "F", "Overpriced (> $4.8k)"
+        elif 3500 <= debit_lot <= 4500: return "A+", "Sweet Spot"
+        else: return "B", "Acceptable"
+
+    elif strategy == '160/190':
+        if 4800 <= debit_lot <= 5500: return "A", "Ideal Pricing"
+        else: return "C", "Check Pricing"
+
+    elif strategy == 'M200':
+        if 7500 <= debit_lot <= 8500: return "A", "Perfect Entry"
+        else: return "B", "Variance"
+
+    return "C", "Standard"
 
 
 # ---------------------------------------------------------
 # MAIN INGEST FUNCTION
+# This replicates ALL processing from v35.0 while writing to DB
 # ---------------------------------------------------------
-def ingest_files(uploaded_files):
+def ingest_files(files):
     """
-    Reads OptionStrat files, performs the same calculations
-    as v35.0, writes trades into SQLite, and returns DataFrame
-    for UI display (Active + Expired).
+    Process uploaded OptionStrat files, write results to DB,
+    return a pandas DataFrame exactly like v35.0 for UI consumption.
     """
-
     all_trades = []
 
-    for f in uploaded_files:
-
-        try:
-            df = _read_file(f)
-            if df is None or df.empty:
+    for f in files:
+        fname = f.name.lower()
+        is_active_file = "active" in fname
+        
+        # --------------------------------------------
+        # STEP 1 — Load file
+        # --------------------------------------------
+        if fname.endswith(".xlsx") or fname.endswith(".xls"):
+            df_raw = pd.read_excel(f, header=None, engine="openpyxl")
+            header_idx = detect_header_index(df_raw)
+            if header_idx != -1:
+                df = df_raw.iloc[header_idx+1:].copy()
+                df.columns = df_raw.iloc[header_idx]
+            else:
                 continue
 
-            is_active_file = ("active" in f.name.lower())
+        else:  # CSV
+            content = f.getvalue().decode("utf-8")
+            lines = content.split("\n")
+            header_idx = detect_header_index(lines)
+            df = pd.read_csv(io.StringIO(content), skiprows=header_idx)
 
-            for _, row in df.iterrows():
-                created_val = row.get("Created At", "")
-                entry_date = None
+        if df is None or df.empty:
+            continue
 
-                # Detect date
-                if isinstance(created_val, (pd.Timestamp, datetime)):
-                    entry_date = created_val
-                elif isinstance(created_val, str) and ":" in created_val:
-                    try:
-                        entry_date = pd.to_datetime(created_val)
-                    except:
-                        pass
+        # --------------------------------------------
+        # STEP 2 — Process each trade row
+        # --------------------------------------------
+        for _, row in df.iterrows():
 
-                if entry_date is None:
-                    continue
+            # Validate timestamp
+            created_at = safe_date(row.get("Created At"))
+            if not created_at:
+                continue
 
-                name = str(row.get("Name", "Unknown"))
-                group = str(row.get("Group", ""))
-                strategy = get_strategy(group)
+            name = row.get("Name", "Unknown")
+            group = str(row.get("Group", ""))
+            strategy = get_strategy(group)
 
-                pnl = clean_num(row.get("Total Return $", 0))
-                debit = abs(clean_num(row.get("Net Debit/Credit", 0)))
-                theta = clean_num(row.get("Theta", 0))
-                delta = clean_num(row.get("Delta", 0))
-                gamma = clean_num(row.get("Gamma", 0))
-                vega = clean_num(row.get("Vega", 0))
+            # Basic metrics
+            pnl = clean_num(row.get("Total Return $", 0))
+            debit = abs(clean_num(row.get("Net Debit/Credit", 0)))
 
-                # Expiration
-                expiration_raw = row.get("Expiration", "")
-                expiration_date = None
-                if isinstance(expiration_raw, (pd.Timestamp, datetime)):
-                    expiration_date = expiration_raw
-                else:
-                    try:
-                        if str(expiration_raw).strip():
-                            expiration_date = pd.to_datetime(expiration_raw)
-                    except:
-                        pass
+            theta = clean_num(row.get("Theta", 0))
+            delta = clean_num(row.get("Delta", 0))
+            gamma = clean_num(row.get("Gamma", 0))
+            vega = clean_num(row.get("Vega", 0))
 
-                # Determine status
-                status = "Expired"
-                if is_active_file:
-                    status = "Active"
-                if status == "Active" and pnl == 0 and expiration_date is None:
-                    status = "Active"
+            # Active vs expired
+            status = "Active" if is_active_file else "Expired"
 
-                # If expired but missing expiration, fallback
-                if status == "Expired" and expiration_date is None:
-                    expiration_date = datetime.now()
+            expiration_val = row.get("Expiration")
+            exp_date = safe_date(expiration_val)
 
-                # Days Held
-                dh_end = expiration_date if expiration_date else datetime.now()
-                days_held = (dh_end - entry_date).days
-                if days_held < 1:
-                    days_held = 1
+            # Fix OptionStrat bug: expired but no expiration → treat as active
+            if status == "Expired" and pnl == 0 and exp_date is None:
+                status = "Active"
 
-                # ROI / Daily Yield
-                roi = (pnl / debit * 100) if debit > 0 else 0
-                daily_yield = roi / days_held
+            if exp_date is None:
+                end_date = datetime.now()
+            else:
+                end_date = exp_date
 
-                # Lot size logic (same as v35)
-                lot_size = 1
-                if strategy == "130/160":
-                    if debit > 10000:
-                        lot_size = 3
-                    elif debit > 6000:
-                        lot_size = 2
-                elif strategy == "160/190":
-                    if debit > 8000:
-                        lot_size = 2
-                elif strategy == "M200":
-                    if debit > 12000:
-                        lot_size = 2
+            # Days held
+            days_held = (end_date - created_at).days
+            if days_held < 1:
+                days_held = 1
 
-                debit_per_lot = debit / max(1, lot_size)
+            # ROI + daily yield
+            roi = (pnl / debit * 100) if debit > 0 else 0
+            daily_yield = roi / days_held
 
-                # Grade logic (same as v35)
-                grade = "C"
-                reason = "Standard"
+            # Lot size rules (same as v35)
+            lot_size = 1
+            if strategy == '130/160' and debit > 10000:
+                lot_size = 3
+            elif strategy == '130/160' and debit > 6000:
+                lot_size = 2
+            elif strategy == '160/190' and debit > 8000:
+                lot_size = 2
+            elif strategy == 'M200' and debit > 12000:
+                lot_size = 2
 
-                if strategy == "130/160":
-                    if debit_per_lot > 4800:
-                        grade = "F"; reason = "Overpriced (> $4.8k)"
-                    elif 3500 <= debit_per_lot <= 4500:
-                        grade = "A+"; reason = "Sweet Spot"
-                    else:
-                        grade = "B"; reason = "Acceptable"
+            debit_lot = debit / max(1, lot_size)
 
-                elif strategy == "160/190":
-                    if 4800 <= debit_per_lot <= 5500:
-                        grade = "A"; reason = "Ideal Pricing"
-                    else:
-                        grade = "C"; reason = "Check Pricing"
+            # Grade
+            grade, reason = compute_grade(strategy, debit_lot)
 
-                elif strategy == "M200":
-                    if 7500 <= debit_per_lot <= 8500:
-                        grade = "A"; reason = "Perfect Entry"
-                    else:
-                        grade = "B"; reason = "Variance"
+            # Alerts
+            alerts = []
+            if strategy == '130/160' and status == "Active" and 25 <= days_held <= 35 and pnl < 100:
+                alerts.append("💀 STALE CAPITAL")
 
-                alerts = []
-                if strategy == "130/160" and status == "Active" and 25 <= days_held <= 35 and pnl < 100:
-                    alerts.append("💀 STALE CAPITAL")
+            alerts_str = " ".join(alerts)
 
-                # Generate unique trade ID
-                trade_id = make_trade_id(
-                    name=name,
-                    created_at=str(entry_date),
-                    strategy=strategy
-                )
+            # --------------------------------------------
+            # STEP 3 — Create trade ID
+            # --------------------------------------------
+            trade_id = db.make_trade_id(name, str(created_at), strategy)
 
-                # Store in DB (idempotent)
-                upsert_trade({
-                    "trade_id": trade_id,
-                    "name": name,
-                    "strategy": strategy,
-                    "status": status,
-                    "pnl": pnl,
-                    "debit": debit,
-                    "debit_per_lot": debit_per_lot,
-                    "grade": grade,
-                    "reason": reason,
-                    "alerts": " ".join(alerts),
-                    "days_held": days_held,
-                    "daily_yield": daily_yield,
-                    "roi": roi,
-                    "entry_date": entry_date.isoformat(),
-                    "expiration_date": expiration_date.isoformat() if expiration_date else None,
-                    "lot_size": lot_size,
-                    "latest_flag": 1
-                })
+            # --------------------------------------------
+            # STEP 4 — Save to DB (idempotent)
+            # --------------------------------------------
+            trade_record = {
+                "trade_id": trade_id,
+                "name": name,
+                "strategy": strategy,
+                "status": status,
+                "pnl": pnl,
+                "debit": debit,
+                "debit_per_lot": debit_lot,
+                "grade": grade,
+                "reason": reason,
+                "alerts": alerts_str,
+                "days_held": days_held,
+                "daily_yield": daily_yield,
+                "roi": roi,
+                "entry_date": created_at.isoformat(),
+                "expiration_date": exp_date.isoformat() if exp_date else None,
+                "lot_size": lot_size,
+                "latest_flag": 1
+            }
 
-                # Store greeks
-                replace_greeks(
-                    trade_id,
-                    theta=theta,
-                    delta=delta,
-                    gamma=gamma,
-                    vega=vega
-                )
+            db.upsert_trade(trade_record)
 
-                # Store placeholder legs (OptionStrat legs not included in v35 parsing)
-                replace_legs(trade_id, [])  # Can be filled later
+            # Save greeks
+            db.replace_greeks(trade_id, theta, delta, gamma, vega)
 
-                # Build UI row
-                all_trades.append({
-                    "Trade ID": trade_id,
-                    "Name": name,
-                    "Strategy": strategy,
-                    "Status": status,
-                    "P&L": pnl,
-                    "Debit": debit,
-                    "Debit/Lot": debit_per_lot,
-                    "Grade": grade,
-                    "Reason": reason,
-                    "Alerts": " ".join(alerts),
-                    "Days Held": days_held,
-                    "Daily Yield %": daily_yield,
-                    "ROI": roi,
-                    "Theta": theta,
-                    "Gamma": gamma,
-                    "Vega": vega,
-                    "Delta": delta,
-                    "Entry Date": entry_date,
-                    "Expiration Date": expiration_date,
-                    "Notes": ""
-                })
+            # Legs not stored here — OptionStrat exports sometimes split legs across pages.
+            # We'll leave leg ingestion optional later.
 
-        except Exception as e:
-            st.error(f"Error processing file {f.name}: {e
+        # END for each row
+
+    # END for each file
+
+    # ---------------------------------------------------------
+    # LOAD ALL TRADES BACK FROM DB FOR UI
+    # ---------------------------------------------------------
+    rows = db.load_all_trades()
+    if not rows:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(rows)
+
+    # Merge greeks
+    greeks_rows = [dict(db.fetch_greeks(r["trade_id"]) or {}) for r in rows]
+    greeks_df = pd.DataFrame(greeks_rows)
+
+    if not greeks_df.empty:
+        df_out = pd.concat([df_out.reset_index(drop=True),
+                            greeks_df.reset_index(drop=True)], axis=1)
+
+    # Add notes indicator
+    df_out["Notes"] = ""
+
+    return df_out
