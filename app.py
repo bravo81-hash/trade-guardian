@@ -11,7 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- DATABASE ENGINE (v64/65) ---
+# --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v4.db"
 
 def init_db():
@@ -265,33 +265,43 @@ def load_data():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR ---
-st.sidebar.header("Data Sync (v3)")
-with st.sidebar.expander("🔄 Sync New Files", expanded=True):
-    active_up = st.file_uploader("1. ACTIVE Trades", accept_multiple_files=True, key="act")
-    history_up = st.file_uploader("2. HISTORY (Closed)", accept_multiple_files=True, key="hist")
+# --- SIDEBAR: THE WORKFLOW WIZARD ---
+st.sidebar.markdown("### 🚦 Daily Workflow")
+
+# STEP 1: RESTORE
+with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
+    st.caption("Doing this first avoids amnesia!")
+    restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
+    if restore:
+        with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+        st.success("Brain Loaded!")
+        st.rerun()
+
+st.sidebar.markdown("⬇️ *then...*")
+
+# STEP 2: SYNC
+with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
+    st.caption("Feed today's broker exports.")
+    active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
+    history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
     
-    if st.button("🔄 Sync New Data"):
+    if st.button("🔄 Process New Data"):
         logs = []
         if active_up: logs.extend(sync_data(active_up, "Active"))
         if history_up: logs.extend(sync_data(history_up, "History"))
         
         if logs:
             for l in logs: st.write(l)
-            st.success("Synced!")
+            st.success("Trades Updated!")
             st.rerun()
 
-st.sidebar.divider()
-st.sidebar.subheader("Database Management")
+st.sidebar.markdown("⬇️ *finally...*")
 
-with open(DB_NAME, "rb") as f:
-    st.sidebar.download_button("💾 Backup Database", f, "trade_guardian_v4.db", "application/x-sqlite3")
-
-restore = st.sidebar.file_uploader("📥 Restore Database", type=['db'])
-if restore:
-    with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
-    st.sidebar.success("Restored!")
-    st.rerun()
+# STEP 3: BACKUP
+with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
+    st.caption("Save state before leaving.")
+    with open(DB_NAME, "rb") as f:
+        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
 st.sidebar.divider()
 
@@ -369,7 +379,7 @@ with tab1:
         active_df = df[df['Status'] == 'Active'].copy()
         
         if active_df.empty:
-            st.info("📭 No active trades in database. Sync an Active File.")
+            st.info("📭 No active trades in database. Go to Step 2 (Work) in the sidebar.")
         else:
             port_yield = active_df['Daily Yield %'].mean()
             if port_yield < 0.10:
@@ -529,7 +539,7 @@ with tab1:
             render_tab(strat_tabs[2], '160/190')
             render_tab(strat_tabs[3], 'M200')
     else:
-        st.info("👋 Database is empty. Use the sidebar to Sync your first Active/History file.")
+        st.info("👋 Database is empty. Go to Step 2 (Work) in the sidebar.")
 
 # 2. VALIDATOR
 with tab2:
@@ -700,7 +710,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v65.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v66.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
