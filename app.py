@@ -9,16 +9,17 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: v35 Logic + DB Power")
+st.title("🛡️ Allantis Trade Guardian: Auto-Fix DB")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian.db"
 
-def init_db():
+def init_and_migrate_db():
+    """Creates DB if missing, and ADDS missing columns if they don't exist."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Simple, Flat Table (Like v35 CSVs)
+    # 1. Create Table (if not exists)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -32,6 +33,33 @@ def init_db():
                     delta REAL,
                     notes TEXT
                 )''')
+    
+    # 2. AUTO-MIGRATE: Check for missing columns (The Crash Fix)
+    # Get current columns
+    c.execute("PRAGMA table_info(trades)")
+    existing_cols = [info[1] for info in c.fetchall()]
+    
+    # Add 'days_held' if missing
+    if 'days_held' not in existing_cols:
+        try:
+            c.execute("ALTER TABLE trades ADD COLUMN days_held INTEGER")
+            print("Migrated: Added days_held")
+        except: pass
+
+    # Add 'theta' if missing
+    if 'theta' not in existing_cols:
+        try:
+            c.execute("ALTER TABLE trades ADD COLUMN theta REAL")
+            print("Migrated: Added theta")
+        except: pass
+
+    # Add 'delta' if missing
+    if 'delta' not in existing_cols:
+        try:
+            c.execute("ALTER TABLE trades ADD COLUMN delta REAL")
+            print("Migrated: Added delta")
+        except: pass
+        
     conn.commit()
     conn.close()
 
@@ -48,11 +76,12 @@ def get_strategy(group_name, trade_name):
     return "Other"
 
 def clean_num(x):
-    try: return float(str(x).replace('$', '').replace(',', ''))
+    try:
+        if pd.isna(x): return 0.0
+        return float(str(x).replace('$', '').replace(',', ''))
     except: return 0.0
 
 def generate_id(name, strategy, entry_date):
-    # Create a unique ID for the database
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
@@ -63,52 +92,49 @@ def sync_file(file, file_type):
     count = 0
     
     try:
-        # 1. Robust Read
         if file.name.endswith('.xlsx'):
             df = pd.read_excel(file)
         else:
-            # Try reading normally, if 'Name' missing, try skipping row 1
             df = pd.read_csv(file)
             if 'Name' not in df.columns:
                 file.seek(0)
                 df = pd.read_csv(file, skiprows=1)
         
-        # 2. Iterate Rows (Forgiving Logic)
         for _, row in df.iterrows():
             name = str(row.get('Name', ''))
-            # Only skip obvious garbage
             if name.startswith('.') or name == 'nan' or name == '' or name == 'Symbol': continue
             
             created = row.get('Created At', '')
             try: start_dt = pd.to_datetime(created)
             except: continue
             
-            # Metrics
             strat = get_strategy(str(row.get('Group', '')), name)
             pnl = clean_num(row.get('Total Return $', 0))
             debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
             theta = clean_num(row.get('Theta', 0))
             delta = clean_num(row.get('Delta', 0))
             
-            # ID & Status
             tid = generate_id(name, strat, start_dt)
             status = "Active" if file_type == "Active" else "Expired"
             
-            # Date Math (v35 Simple Style)
+            # Simple Date Math
             if status == "Expired":
-                # If history file, try to parse Expiration as Exit Date
                 try: 
+                    # Try to use Expiration column as Exit Date proxy for history files
                     end_dt = pd.to_datetime(row.get('Expiration'))
-                    days = (end_dt - start_dt).days
+                    # Safety check: If Expiration is way in future (e.g. >30 days from now), 
+                    # it implies trade is NOT held till expiration.
+                    # v35 logic accepted this, but let's cap it at Today to avoid "130 days held" bugs
+                    if end_dt > datetime.now():
+                        days = (datetime.now() - start_dt).days
+                    else:
+                        days = (end_dt - start_dt).days
                 except: days = 1
             else:
-                # If Active, simple today diff
                 days = (datetime.now() - start_dt).days
             
             if days < 1: days = 1
             
-            # DB Upsert
-            # We check if it exists. If it does, we update PnL/Status. If not, Insert.
             c.execute("SELECT id FROM trades WHERE id = ?", (tid,))
             exists = c.fetchone()
             
@@ -133,16 +159,15 @@ def sync_file(file, file_type):
     finally:
         conn.close()
 
-# --- v35 LOGIC: HARDCODED BENCHMARKS (No Auto-Calc) ---
-# We use the updated "True" averages from your files, but we HARDCODE them so they don't break.
-STATIC_BENCHMARKS = {
-    '130/160': {'yield': 0.33, 'pnl': 600, 'dit': 30}, # Updated Accuracy
-    '160/190': {'yield': 0.16, 'pnl': 420, 'dit': 45}, # Updated Accuracy
-    'M200':    {'yield': 0.37, 'pnl': 910, 'dit': 30}  # Updated Accuracy
-}
-
 # --- INITIALIZE ---
-init_db()
+init_and_migrate_db() # Run Auto-Healer
+
+# --- STATIC BENCHMARKS (Hardcoded Safety) ---
+STATIC_BENCHMARKS = {
+    '130/160': {'yield': 0.33, 'pnl': 600, 'dit': 30},
+    '160/190': {'yield': 0.16, 'pnl': 420, 'dit': 45},
+    'M200':    {'yield': 0.37, 'pnl': 910, 'dit': 30}
+}
 
 # --- SIDEBAR ---
 with st.sidebar.expander("📂 Data Sync", expanded=True):
@@ -157,16 +182,14 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
         st.success("Done!")
         st.rerun()
 
-    # DB STATUS DEBUGGER
     conn = get_db_connection()
     count = pd.read_sql("SELECT count(*) as c FROM trades", conn).iloc[0]['c']
     st.caption(f"Trades in DB: {count}")
+    conn.close()
     
-    # DOWNLOAD BUTTON
     with open(DB_NAME, "rb") as f:
         st.download_button("⬇️ Download DB", f, "trade_guardian.db", "application/x-sqlite3")
     
-    # RESTORE BUTTON
     restore = st.file_uploader("📥 Restore DB", type=['db'])
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
@@ -186,14 +209,19 @@ conn.close()
 if df.empty:
     st.info("👋 System Ready. Please upload files to begin.")
 else:
-    # --- CALCULATIONS (v35 Style) ---
-    df['Daily Yield %'] = (df['pnl'] / df['debit'] * 100) / df['days_held']
+    # Normalize columns to prevent KeyErrors
+    df.columns = df.columns.str.lower()
     
-    # Grading (v35 Logic)
+    # Fill NaN values for calculation safety
+    df['debit'] = df['debit'].fillna(0)
+    df['pnl'] = df['pnl'].fillna(0)
+    df['days_held'] = df['days_held'].fillna(1).replace(0, 1)
+    
+    # Calculations
+    df['Daily Yield %'] = (df['pnl'] / df['debit'].replace(0, 1) * 100) / df['days_held']
+    
     def get_grade(row):
         strat, debit = row['strategy'], row['debit']
-        # Note: Simplified lot logic for stability. Using raw debit for grading buckets as per v35 logic
-        # You can refine this later if you want strict per-lot grading.
         if strat == '130/160': return "A+" if 3500 <= debit <= 4500 else "B"
         if strat == '160/190': return "A" if 4800 <= debit <= 5500 else "C"
         if strat == 'M200': return "A" if 7500 <= debit <= 8500 else "B"
@@ -201,15 +229,14 @@ else:
     
     df['Grade'] = df.apply(get_grade, axis=1)
 
-    # --- TABS ---
     t1, t2, t3, t4, t5 = st.tabs(["Dashboard", "Analysis", "Allocation", "Journal", "Rules"])
 
     # 1. DASHBOARD
     with t1:
-        active = df[df['status'] == 'Active'].copy()
+        # Filter Case-Insensitively
+        active = df[df['status'].str.lower() == 'active'].copy()
         
         if not active.empty:
-            # Action Logic (v35)
             def get_action(row):
                 bench = STATIC_BENCHMARKS.get(row['strategy'], {'pnl':9999})
                 target = bench['pnl'] * mult
@@ -220,7 +247,6 @@ else:
             
             active['Action'] = active.apply(get_action, axis=1)
             
-            # Action Center
             urgent = active[active['Action'] != ""]
             if not urgent.empty:
                 st.markdown("### 🚨 Action Center")
@@ -229,10 +255,15 @@ else:
                     st.markdown(f"<span style='color:{color}'>**{r['name']}**: {r['Action']}</span>", unsafe_allow_html=True)
                 st.divider()
 
-            # Overview Table
             st.markdown("### 📋 Active Overview")
+            
+            # Helper for displaying columns safely
+            disp_cols = ['name', 'strategy', 'Action', 'Grade', 'pnl', 'debit', 'days_held']
+            # Add theta/delta if they exist
+            if 'theta' in active.columns: disp_cols.append('theta')
+            
             st.dataframe(
-                active[['name', 'strategy', 'Action', 'Grade', 'pnl', 'debit', 'days_held', 'theta']].style
+                active[disp_cols].style
                 .format({'pnl': '${:.0f}', 'debit': '${:.0f}', 'theta': '{:.1f}'})
                 .map(lambda x: 'background-color: #d1e7dd' if 'TAKE' in str(x) else 'background-color: #f8d7da' if 'KILL' in str(x) else '', subset=['Action']),
                 use_container_width=True
@@ -242,7 +273,7 @@ else:
 
     # 2. ANALYSIS
     with t2:
-        expired = df[df['status'] == 'Expired']
+        expired = df[df['status'].str.lower() == 'expired']
         if not expired.empty:
             st.markdown("### 🏆 Performance")
             c1, c2 = st.columns(2)
@@ -266,7 +297,7 @@ else:
         c3.metric("130/160 (30%)", f"${deploy*0.3:,.0f}")
         st.caption("Cash Reserve: 20%")
 
-    # 4. JOURNAL (Editable)
+    # 4. JOURNAL
     with t4:
         st.markdown("### 📓 Journal")
         edited = st.data_editor(df[['id', 'name', 'strategy', 'pnl', 'notes']], key="journal", hide_index=True)
