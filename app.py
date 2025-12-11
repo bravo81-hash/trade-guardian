@@ -9,17 +9,14 @@ from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
-st.title("🛡️ Allantis Trade Guardian: Auto-Fix DB")
+st.title("🛡️ Allantis Trade Guardian: Stable UI Edition")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian.db"
 
 def init_and_migrate_db():
-    """Creates DB if missing, and ADDS missing columns if they don't exist."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
-    # 1. Create Table (if not exists)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -34,31 +31,12 @@ def init_and_migrate_db():
                     notes TEXT
                 )''')
     
-    # 2. AUTO-MIGRATE: Check for missing columns (The Crash Fix)
-    # Get current columns
+    # Auto-Healer: Add columns if missing from old versions
     c.execute("PRAGMA table_info(trades)")
-    existing_cols = [info[1] for info in c.fetchall()]
-    
-    # Add 'days_held' if missing
-    if 'days_held' not in existing_cols:
-        try:
-            c.execute("ALTER TABLE trades ADD COLUMN days_held INTEGER")
-            print("Migrated: Added days_held")
-        except: pass
-
-    # Add 'theta' if missing
-    if 'theta' not in existing_cols:
-        try:
-            c.execute("ALTER TABLE trades ADD COLUMN theta REAL")
-            print("Migrated: Added theta")
-        except: pass
-
-    # Add 'delta' if missing
-    if 'delta' not in existing_cols:
-        try:
-            c.execute("ALTER TABLE trades ADD COLUMN delta REAL")
-            print("Migrated: Added delta")
-        except: pass
+    cols = [info[1] for info in c.fetchall()]
+    if 'days_held' not in cols: c.execute("ALTER TABLE trades ADD COLUMN days_held INTEGER")
+    if 'theta' not in cols: c.execute("ALTER TABLE trades ADD COLUMN theta REAL")
+    if 'delta' not in cols: c.execute("ALTER TABLE trades ADD COLUMN delta REAL")
         
     conn.commit()
     conn.close()
@@ -66,7 +44,7 @@ def init_and_migrate_db():
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
 
-# --- v35 LOGIC: STRATEGY & CLEANING ---
+# --- LOGIC ---
 def get_strategy(group_name, trade_name):
     g = str(group_name).upper()
     n = str(trade_name).upper()
@@ -85,15 +63,13 @@ def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
-# --- v35 LOGIC: SYNC ENGINE ---
+# --- SYNC ENGINE ---
 def sync_file(file, file_type):
     conn = get_db_connection()
     c = conn.cursor()
     count = 0
-    
     try:
-        if file.name.endswith('.xlsx'):
-            df = pd.read_excel(file)
+        if file.name.endswith('.xlsx'): df = pd.read_excel(file)
         else:
             df = pd.read_csv(file)
             if 'Name' not in df.columns:
@@ -117,18 +93,11 @@ def sync_file(file, file_type):
             tid = generate_id(name, strat, start_dt)
             status = "Active" if file_type == "Active" else "Expired"
             
-            # Simple Date Math
             if status == "Expired":
                 try: 
-                    # Try to use Expiration column as Exit Date proxy for history files
                     end_dt = pd.to_datetime(row.get('Expiration'))
-                    # Safety check: If Expiration is way in future (e.g. >30 days from now), 
-                    # it implies trade is NOT held till expiration.
-                    # v35 logic accepted this, but let's cap it at Today to avoid "130 days held" bugs
-                    if end_dt > datetime.now():
-                        days = (datetime.now() - start_dt).days
-                    else:
-                        days = (end_dt - start_dt).days
+                    if end_dt > datetime.now(): days = (datetime.now() - start_dt).days
+                    else: days = (end_dt - start_dt).days
                 except: days = 1
             else:
                 days = (datetime.now() - start_dt).days
@@ -136,50 +105,37 @@ def sync_file(file, file_type):
             if days < 1: days = 1
             
             c.execute("SELECT id FROM trades WHERE id = ?", (tid,))
-            exists = c.fetchone()
-            
-            if exists:
+            if c.fetchone():
                 if status == "Active" or file_type == "History":
-                    c.execute("""UPDATE trades SET 
-                                 pnl=?, status=?, days_held=?, theta=?, delta=? 
-                                 WHERE id=?""", 
-                              (pnl, status, days, theta, delta, tid))
+                    c.execute("UPDATE trades SET pnl=?, status=?, days_held=?, theta=?, delta=? WHERE id=?", (pnl, status, days, theta, delta, tid))
             else:
-                c.execute("""INSERT INTO trades 
-                             (id, name, strategy, status, entry_date, days_held, debit, pnl, theta, delta, notes)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                c.execute("INSERT INTO trades (id, name, strategy, status, entry_date, days_held, debit, pnl, theta, delta, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                           (tid, name, strat, status, start_dt.date(), days, debit, pnl, theta, delta, ""))
             count += 1
-            
         conn.commit()
-        return f"✅ Parsed {count} trades from {file.name}"
-        
-    except Exception as e:
-        return f"❌ Error {file.name}: {str(e)}"
-    finally:
-        conn.close()
+        return f"✅ Parsed {count} trades"
+    except Exception as e: return f"❌ Error: {str(e)}"
+    finally: conn.close()
 
-# --- INITIALIZE ---
-init_and_migrate_db() # Run Auto-Healer
-
-# --- STATIC BENCHMARKS (Hardcoded Safety) ---
+# --- BENCHMARKS ---
 STATIC_BENCHMARKS = {
     '130/160': {'yield': 0.33, 'pnl': 600, 'dit': 30},
     '160/190': {'yield': 0.16, 'pnl': 420, 'dit': 45},
     'M200':    {'yield': 0.37, 'pnl': 910, 'dit': 30}
 }
 
+init_and_migrate_db()
+
 # --- SIDEBAR ---
 with st.sidebar.expander("📂 Data Sync", expanded=True):
     active_up = st.file_uploader("1. Active Files", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("2. History Files", accept_multiple_files=True, key="hist")
-    
-    if st.button("🔄 Sync Data"):
+    if st.button("🔄 Sync"):
         if active_up:
             for f in active_up: st.write(sync_file(f, "Active"))
         if history_up:
             for f in history_up: st.write(sync_file(f, "History"))
-        st.success("Done!")
+        st.success("Synced!")
         st.rerun()
 
     conn = get_db_connection()
@@ -188,7 +144,7 @@ with st.sidebar.expander("📂 Data Sync", expanded=True):
     conn.close()
     
     with open(DB_NAME, "rb") as f:
-        st.download_button("⬇️ Download DB", f, "trade_guardian.db", "application/x-sqlite3")
+        st.download_button("⬇️ Backup DB", f, "trade_guardian.db", "application/x-sqlite3")
     
     restore = st.file_uploader("📥 Restore DB", type=['db'])
     if restore:
@@ -207,17 +163,12 @@ df = pd.read_sql("SELECT * FROM trades", conn)
 conn.close()
 
 if df.empty:
-    st.info("👋 System Ready. Please upload files to begin.")
+    st.info("👋 System Ready. Upload files.")
 else:
-    # Normalize columns to prevent KeyErrors
     df.columns = df.columns.str.lower()
-    
-    # Fill NaN values for calculation safety
     df['debit'] = df['debit'].fillna(0)
     df['pnl'] = df['pnl'].fillna(0)
     df['days_held'] = df['days_held'].fillna(1).replace(0, 1)
-    
-    # Calculations
     df['Daily Yield %'] = (df['pnl'] / df['debit'].replace(0, 1) * 100) / df['days_held']
     
     def get_grade(row):
@@ -226,17 +177,16 @@ else:
         if strat == '160/190': return "A" if 4800 <= debit <= 5500 else "C"
         if strat == 'M200': return "A" if 7500 <= debit <= 8500 else "B"
         return "C"
-    
     df['Grade'] = df.apply(get_grade, axis=1)
 
     t1, t2, t3, t4, t5 = st.tabs(["Dashboard", "Analysis", "Allocation", "Journal", "Rules"])
 
     # 1. DASHBOARD
     with t1:
-        # Filter Case-Insensitively
         active = df[df['status'].str.lower() == 'active'].copy()
         
         if not active.empty:
+            # Action Logic
             def get_action(row):
                 bench = STATIC_BENCHMARKS.get(row['strategy'], {'pnl':9999})
                 target = bench['pnl'] * mult
@@ -247,6 +197,7 @@ else:
             
             active['Action'] = active.apply(get_action, axis=1)
             
+            # Action Center (Global)
             urgent = active[active['Action'] != ""]
             if not urgent.empty:
                 st.markdown("### 🚨 Action Center")
@@ -255,19 +206,47 @@ else:
                     st.markdown(f"<span style='color:{color}'>**{r['name']}**: {r['Action']}</span>", unsafe_allow_html=True)
                 st.divider()
 
-            st.markdown("### 📋 Active Overview")
+            # --- SUB TABS ---
+            strat_tabs = st.tabs(["Overview", "130/160", "160/190", "M200"])
             
-            # Helper for displaying columns safely
-            disp_cols = ['name', 'strategy', 'Action', 'Grade', 'pnl', 'debit', 'days_held']
-            # Add theta/delta if they exist
-            if 'theta' in active.columns: disp_cols.append('theta')
-            
-            st.dataframe(
-                active[disp_cols].style
-                .format({'pnl': '${:.0f}', 'debit': '${:.0f}', 'theta': '{:.1f}'})
-                .map(lambda x: 'background-color: #d1e7dd' if 'TAKE' in str(x) else 'background-color: #f8d7da' if 'KILL' in str(x) else '', subset=['Action']),
-                use_container_width=True
-            )
+            # Helper for Styling
+            def style_table(sub_df):
+                disp_cols = ['name', 'strategy', 'Action', 'Grade', 'pnl', 'debit', 'days_held']
+                if 'theta' in sub_df.columns: disp_cols.append('theta')
+                return (sub_df[disp_cols].style
+                    .format({'pnl': '${:.0f}', 'debit': '${:.0f}', 'theta': '{:.1f}'})
+                    .map(lambda x: 'background-color: #d1e7dd' if 'TAKE' in str(x) else 'background-color: #f8d7da' if 'KILL' in str(x) else '', subset=['Action']))
+
+            # Tab 1: Overview
+            with strat_tabs[0]:
+                agg = active.groupby('strategy').agg({'pnl':'sum', 'debit':'sum', 'name':'count'}).reset_index()
+                total_pnl = agg['pnl'].sum()
+                total_deb = agg['debit'].sum()
+                
+                st.markdown("#### 📊 Portfolio Aggregate")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total P&L", f"${total_pnl:,.0f}")
+                c2.metric("Total Risk", f"${total_deb:,.0f}")
+                c3.metric("Active Trades", active.shape[0])
+                
+                st.dataframe(active[['name','strategy','pnl','debit','days_held','Action']].style.format({'pnl':'${:.0f}', 'debit':'${:.0f}'}), use_container_width=True)
+
+            # Tab 2,3,4: Strategies
+            for i, s_name in enumerate(['130/160', '160/190', 'M200'], 1):
+                with strat_tabs[i]:
+                    sub = active[active['strategy'] == s_name]
+                    bench = STATIC_BENCHMARKS.get(s_name, {})
+                    target = bench.get('pnl', 0) * mult
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Target Profit", f"${target:,.0f}")
+                    c2.metric("Target Yield", f"{bench.get('yield',0)*100:.1f}%")
+                    c3.metric("Avg Hold", f"{bench.get('dit',0)}d")
+                    
+                    if not sub.empty:
+                        st.dataframe(style_table(sub), use_container_width=True)
+                    else:
+                        st.info(f"No active {s_name} trades.")
         else:
             st.info("No active trades.")
 
