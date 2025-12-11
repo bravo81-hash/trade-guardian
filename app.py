@@ -291,10 +291,9 @@ def load_data():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR (Merged) ---
-# 1. v61 SYNC & BACKUP TOOLS
-st.sidebar.header("💾 Data Manager (v3)")
-with st.sidebar.expander("🔄 Sync & Backup", expanded=True):
+# --- SIDEBAR (Merged & Fixed Layout) ---
+st.sidebar.header("Data Sync (v3)")
+with st.sidebar.expander("🔄 Sync New Files", expanded=True):
     active_up = st.file_uploader("1. ACTIVE Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("2. HISTORY (Closed)", accept_multiple_files=True, key="hist")
     
@@ -308,19 +307,18 @@ with st.sidebar.expander("🔄 Sync & Backup", expanded=True):
             st.success("Synced!")
             st.rerun()
 
-    st.divider()
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("💾 Backup"):
-            with open(DB_NAME, "rb") as f:
-                st.download_button("Download", f, "trade_guardian_v4.db", "application/x-sqlite3")
-    with c2:
-        restore = st.file_uploader("Restore", type=['db'], label_visibility="collapsed")
-        if restore:
-            with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
-            st.success("Restored!")
-            st.rerun()
+st.sidebar.divider()
+st.sidebar.subheader("Database Management")
+
+# FIXED LAYOUT: Stacked vertically so buttons fit properly
+with open(DB_NAME, "rb") as f:
+    st.sidebar.download_button("💾 Backup Database", f, "trade_guardian_v4.db", "application/x-sqlite3")
+
+restore = st.sidebar.file_uploader("📥 Restore Database", type=['db'])
+if restore:
+    with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+    st.sidebar.success("Restored!")
+    st.rerun()
 
 st.sidebar.divider()
 
@@ -737,7 +735,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v62.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v63.0 Hybrid | Certified Stable")
 
 # DEBUGGER (v61 Extra)
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
