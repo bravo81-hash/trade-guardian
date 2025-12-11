@@ -130,8 +130,12 @@ if df is None or df.empty:
 # ---------------------------------------------------------
 # BENCHMARK CALCULATION (same as v35)
 # ---------------------------------------------------------
-# Normalize column names safely (convert everything to lowercase strings)
+# Normalize columns to lowercase strings
 df.columns = [str(col).strip().lower() for col in df.columns]
+
+# Normalize status values consistently
+if "status" in df.columns:
+    df["status"] = df["status"].astype(str).str.lower()
 
 # Ensure required columns exist
 required_cols = [
@@ -144,6 +148,9 @@ required_cols = [
 for col in required_cols:
     if col not in df.columns:
         df[col] = None
+
+# ALWAYS define expired_df
+expired_df = df[df["status"] == "expired"].copy()
 # fall back to base config
 benchmarks = {
     "130/160": {"yield": 0.13, "pnl": 500, "roi": 6.8, "dit": 36},
