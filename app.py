@@ -11,8 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- DATABASE ENGINE (v64) ---
-# Keeping v4 name to ensure data continuity
+# --- DATABASE ENGINE (v64/65) ---
 DB_NAME = "trade_guardian_v4.db"
 
 def init_db():
@@ -404,40 +403,29 @@ with tab1:
                     bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                     target_disp = bench['pnl'] * regime_mult
                     
-                    # --- ACTION CENTER (SLIMMER VERSION) ---
+                    # --- ACTION CENTER (MINIMALIST DOT POINTS) ---
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
+                        
+                        action_lines = []
                         for _, row in urgent.iterrows():
                             sig = row['Signal_Type']
-                            msg = f"**{row['Name']}**: {row['Action']}"
-                            
-                            # Custom Color Map (Background, Text, Border)
-                            colors = {
-                                "SUCCESS": ("#d1e7dd", "#0f5132", "#badbcc"),
-                                "ERROR":   ("#f8d7da", "#842029", "#f5c2c7"),
-                                "WARNING": ("#fff3cd", "#664d03", "#ffecb5"),
-                                "INFO":    ("#cff4fc", "#055160", "#b6effb"),
-                                "NONE":    ("#f8f9fa", "#212529", "#e9ecef")
+                            # Text Colors optimized for dark/light contrast
+                            color_map = {
+                                "SUCCESS": "#4caf50", # Green
+                                "ERROR":   "#f44336", # Red
+                                "WARNING": "#ff9800", # Orange
+                                "INFO":    "#2196f3", # Blue
+                                "NONE":    "#9e9e9e"  # Grey
                             }
-                            bg, txt, brd = colors.get(sig, colors["INFO"])
+                            color = color_map.get(sig, "#9e9e9e")
+                            # Bullet point construction
+                            line = f"* <span style='color: {color}'>**{row['Name']}**: {row['Action']}</span>"
+                            action_lines.append(line)
                             
-                            st.markdown(
-                                f"""
-                                <div style="
-                                    background-color: {bg};
-                                    color: {txt};
-                                    border: 1px solid {brd};
-                                    padding: 2px 6px;
-                                    border-radius: 4px;
-                                    margin-bottom: 2px;
-                                    font-size: 11px;
-                                ">
-                                    {msg}
-                                </div>
-                                """,
-                                unsafe_allow_html=True
-                            )
+                        # Render all lines at once
+                        st.markdown("\n".join(action_lines), unsafe_allow_html=True)
                         st.divider()
 
                     c1, c2, c3, c4 = st.columns(4)
@@ -712,7 +700,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v64.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v65.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
