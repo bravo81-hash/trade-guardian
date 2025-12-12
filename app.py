@@ -583,7 +583,14 @@ with tab1:
 
                 st.dataframe(
                     display_agg.style
-                    .format({'Total P&L': "${:,.0f}", 'Total Debit': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Yield/Day': "{:.2f}%", 'Target': "{:.2f}%"})
+                    .format({
+                        'Total P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
+                        'Total Debit': lambda x: safe_fmt(x, "${:,.0f}"), 
+                        'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
+                        'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
+                        'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
+                        'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                    })
                     .map(highlight_trend, subset=['Trend'])
                     .apply(style_total, axis=1), 
                     use_container_width=True
