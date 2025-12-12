@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v78.1 (Restored Dashboard + Journaling)")
+st.info("✅ RUNNING VERSION: v79.0 (Full Feature Restoration)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -540,7 +540,7 @@ with tab1:
 
             st.divider()
 
-            # --- 3. DETAILED STRATEGY BREAKDOWN (Restored) ---
+            # --- 3. DETAILED STRATEGY BREAKDOWN ---
             st.markdown("### 🏛️ Strategy Performance")
             strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
 
@@ -641,6 +641,20 @@ with tab1:
 # 2. VALIDATOR
 with tab2:
     st.markdown("### 🧪 Pre-Flight Audit")
+    # RESTORED: Grading System Legend
+    with st.expander("ℹ️ Grading System Legend", expanded=True):
+        st.markdown("""
+        | Strategy | Grade | Debit Range (Per Lot) | Verdict |
+        | :--- | :--- | :--- | :--- |
+        | **130/160** | **A+** | `$3,500 - $4,500` | ✅ **Sweet Spot** (Highest statistical win rate) |
+        | **130/160** | **B** | `< $3,500` or `$4,500-$4,800` | ⚠️ **Acceptable** (Watch volatility) |
+        | **130/160** | **F** | `> $4,800` | ⛔ **Overpriced** (Historical failure rate 100%) |
+        | **160/190** | **A** | `$4,800 - $5,500` | ✅ **Ideal** Pricing |
+        | **160/190** | **C** | `> $5,500` | ⚠️ **Expensive** (Reduces ROI efficiency) |
+        | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** "Whale" sizing |
+        | **M200** | **B** | Any other price | ⚠️ **Variance** from mean |
+        """)
+        
     model_file = st.file_uploader("Upload Model File", key="mod")
     if model_file:
         try:
@@ -701,7 +715,8 @@ with tab3:
 
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
-        an1, an2, an3, an4, an5 = st.tabs(["🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "⚠️ Risk", "🧬 Lifecycle"])
+        # RESTORED: Tickers & Greeks
+        an1, an2, an3, an4, an5, an6, an7 = st.tabs(["🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab"])
 
         with an1:
             if not expired_sub.empty:
@@ -729,7 +744,15 @@ with tab3:
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality", text_auto=True, color_continuous_scale="RdBu")
                 st.plotly_chart(fig, use_container_width=True)
 
+        # RESTORED: Ticker Analysis
         with an4:
+            if not expired_sub.empty:
+                tick_grp = expired_sub.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False)
+                fig = px.bar(tick_grp.head(15), x='P&L', y='Ticker', orientation='h', color='P&L', color_continuous_scale="RdBu", title="Top Performing Tickers")
+                st.plotly_chart(fig, use_container_width=True)
+            else: st.info("No closed trades.")
+
+        with an5:
             active_only = df[df['Status'] == 'Active']
             if not active_only.empty:
                 st.subheader("Capital Concentration")
@@ -742,21 +765,50 @@ with tab3:
                     st.plotly_chart(fig_tick, use_container_width=True)
             else: st.info("No active trades.")
 
-        with an5:
+        with an6:
             snaps = load_snapshots()
             if not snaps.empty:
                 sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique())
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', title=f"Trade Lifecycle: {sel_strat}")
                 st.plotly_chart(fig, use_container_width=True)
+            else: st.info("No snapshots yet.")
 
-# 4. RULE BOOK
+        # RESTORED: Greeks Lab
+        with an7:
+            if not df.empty:
+                st.markdown("##### 🔬 Greek Exposure Analysis")
+                g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'])
+                valid_greeks = df[df[g_col] != 0]
+                if not valid_greeks.empty:
+                    fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', title=f"Correlation: {g_col} vs P&L", hover_data=['Name'])
+                    st.plotly_chart(fig, use_container_width=True)
+                else: st.warning(f"No non-zero data for {g_col}.")
+            else: st.info("Upload data.")
+
+# 4. RULE BOOK (RESTORED DETAILED VERSION)
 with tab4:
-    st.markdown("### 📖 Trading Rules")
     st.markdown("""
-    * **130/160:** Enter Mon. Target $3.5k-$4.5k debit. Kill >25 days if flat.
-    * **160/190:** Enter Fri. Target ~$5.2k debit. Hold 40-50 days.
-    * **M200:** Enter Wed. Target $7.5k-$8.5k debit. Check Day 14.
+    # 📖 Trading Constitution
+    
+    ### 1. 130/160 Strategy (Income Engine)
+    * **Target Entry:** Monday.
+    * **Debit Target:** `$3,500 - $4,500` per lot.
+    * **Stop Rule:** Never pay > `$4,800` per lot.
+    * **Management:** Kill if trade is **25 days old** and profit is flat/negative.
+    
+    ### 2. 160/190 Strategy (Compounder)
+    * **Target Entry:** Friday.
+    * **Debit Target:** `~$5,200` per lot.
+    * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI).
+    * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days.
+    
+    ### 3. M200 Strategy (Whale)
+    * **Target Entry:** Wednesday.
+    * **Debit Target:** `$7,500 - $8,500` per lot.
+    * **Management:** Check P&L at **Day 14**.
+        * If Green > $200: Exit or Roll.
+        * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v78.1")
+    st.caption("Allantis Trade Guardian v79.0")
