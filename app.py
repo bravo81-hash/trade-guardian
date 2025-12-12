@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v73.0 (Full Restore - All Systems Go)")
+st.info("✅ RUNNING VERSION: v75.0 (Robust Core + Full Analytics Suite)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -228,7 +228,7 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# --- DATA LOADER (CRITICAL FIXES HERE) ---
+# --- DATA LOADER (ROBUST VERSION) ---
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
@@ -249,7 +249,7 @@ def load_data():
         })
         
         # 2. ENSURE MISSING COLUMNS EXIST (Safety)
-        for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit']:
+        for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size']:
             if col not in df.columns:
                 df[col] = 0.0
         
@@ -260,7 +260,8 @@ def load_data():
         df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
         df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
-        # 4. CALCULATE DERIVED METRICS (Fixes 'KeyError: Daily Yield %')
+        # 4. CALCULATE DERIVED METRICS
+        # Note: lot_size is still lowercase from DB because we didn't rename it above
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         
@@ -295,7 +296,6 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # PULLING BOTH NAME AND ID TO ENSURE CHART WORKS
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
         FROM snapshots s
@@ -427,7 +427,7 @@ if not df.empty:
             if not winners.empty:
                 # SAFE BENCHMARK CALCULATION
                 benchmarks[strat] = {
-                    'yield': grp['Daily Yield %'].mean(), # Using Title Case
+                    'yield': grp['Daily Yield %'].mean(),
                     'pnl': winners['P&L'].mean(),
                     'roi': winners['ROI'].mean(),
                     'dit': winners['Days Held'].mean()
@@ -476,7 +476,7 @@ with tab1:
                     bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                     target_disp = bench['pnl'] * regime_mult
                     
-                    # --- ACTION CENTER (MINIMALIST DOT POINTS) ---
+                    # ACTION CENTER
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -670,7 +670,7 @@ with tab2:
         except Exception as e:
             st.error(f"Error reading model file: {e}")
 
-# 3. ANALYTICS (FULL SUITE WITH GREEKS & HEATMAP)
+# 3. ANALYTICS (FULL SUITE WITH GREEKS & HEATMAPS)
 with tab3:
     if not df.empty:
         st.subheader("📈 Analytics Suite")
@@ -692,7 +692,7 @@ with tab3:
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
         # Tabs for analytics
-        an1, an2, an3, an4, an5, an6 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "🔥 DIT Heatmap", "🏷️ Tickers", "🧬 Lifecycle", "🧮 Greeks Lab"])
+        an1, an2, an3, an4, an5, an6 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "🔥 Heatmaps (3)", "🏷️ Tickers", "🧬 Lifecycle", "🧮 Greeks Lab"])
 
         # 1. EQUITY CURVE
         with an1:
@@ -733,15 +733,36 @@ with tab3:
                 fig = px.histogram(expired_sub, x="P&L", color="Strategy", nbins=20, title="Distribution of Trade Outcomes")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # 3. HEATMAP (RESTORED)
+        # 3. HEATMAPS (ALL 3 TYPES)
         with an3:
             if not expired_sub.empty:
-                fig = px.density_heatmap(
-                    expired_sub, x="Days Held", y="Strategy", z="P&L", 
-                    histfunc="avg", title="Profit Heatmap: Strategy vs Duration (Sweet Spot Analysis)",
-                    color_continuous_scale="RdBu"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                # Type A: Monthly Seasonality
+                exp_hm = expired_sub.copy()
+                exp_hm['Year'] = exp_hm['Exit Date'].dt.year
+                exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
+                hm_date = exp_hm.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
+                months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                          'July', 'August', 'September', 'October', 'November', 'December']
+                
+                fig1 = px.density_heatmap(hm_date, x="Month", y="Year", z="P&L", color_continuous_scale="RdBu", 
+                                          title="1. Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True)
+                st.plotly_chart(fig1, use_container_width=True)
+                
+                st.divider()
+                
+                # Type B: DIT Sweet Spot
+                fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
+                                          title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                st.divider()
+                
+                # Type C: Day of Week
+                exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
+                days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg",
+                                          title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                st.plotly_chart(fig3, use_container_width=True)
 
         # 4. TICKERS
         with an4:
@@ -752,7 +773,7 @@ with tab3:
                              title="Top Performing Tickers")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # 5. LIFECYCLE (SNAPSHOTS) - FIXED!
+        # 5. LIFECYCLE (SNAPSHOTS)
         with an5:
             snaps = load_snapshots()
             if not snaps.empty:
@@ -772,14 +793,22 @@ with tab3:
             else:
                 st.info("No snapshot data collected yet. (This builds up over time as you Sync active trades daily).")
 
-        # 6. GREEKS LAB (RESTORED)
+        # 6. GREEKS LAB (FIXED - Uses ALL trades)
         with an6:
-            if not expired_sub.empty:
-                st.markdown("##### 🔬 Does Greek Exposure correlate with Profit?")
+            # Use 'df' (all trades) instead of 'expired_sub' so it works immediately
+            if not df.empty:
+                st.markdown("##### 🔬 Greek Exposure Analysis (All Trades)")
                 g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'])
-                fig = px.scatter(expired_sub, x=g_col, y='P&L', color='Strategy', trendline='ols', 
-                                 title=f"Correlation: {g_col} vs P&L")
-                st.plotly_chart(fig, use_container_width=True)
+                # Filter out zero values to avoid clutter
+                valid_greeks = df[df[g_col] != 0]
+                if not valid_greeks.empty:
+                    fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', trendline='ols', 
+                                     title=f"Correlation: {g_col} vs P&L", hover_data=['Name'])
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning(f"No non-zero data found for {g_col}.")
+            else:
+                st.info("Upload data to see Greek analysis.")
 
 # 4. RULE BOOK
 with tab4:
@@ -806,7 +835,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v73.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v75.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
