@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v75.0 (Robust Core + Full Analytics Suite)")
+st.info("✅ RUNNING VERSION: v76.0 (Fixed Greeks & Lifecycle)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -476,7 +476,7 @@ with tab1:
                     bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                     target_disp = bench['pnl'] * regime_mult
                     
-                    # ACTION CENTER
+                    # --- ACTION CENTER (MINIMALIST DOT POINTS) ---
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -773,36 +773,51 @@ with tab3:
                              title="Top Performing Tickers")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # 5. LIFECYCLE (SNAPSHOTS)
+        # 5. LIFECYCLE (SNAPSHOTS) - FIXED!
         with an5:
             snaps = load_snapshots()
             if not snaps.empty:
+                # Check if we have enough data points to plot
+                max_days = snaps['days_held'].max()
+                
                 sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique())
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
-                fig = px.line(
-                    strat_snaps, x='days_held', y='pnl', 
-                    color='name', # Color by Name
-                    line_group='id', # Separate lines by ID
-                    title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
-                    labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
-                    hover_data=['name']
-                )
+                if max_days < 2:
+                    st.warning("⚠️ Not enough history to draw lines yet. Showing dots instead.")
+                    # Fallback to scatter if only 1 day of data
+                    fig = px.scatter(
+                        strat_snaps, x='days_held', y='pnl', 
+                        color='name', 
+                        title=f"Trade Lifecycle: {sel_strat} (Single Day Snapshot)",
+                        hover_data=['name']
+                    )
+                else:
+                    # Full Line Chart
+                    fig = px.line(
+                        strat_snaps, x='days_held', y='pnl', 
+                        color='name', 
+                        line_group='id',
+                        title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
+                        labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
+                        hover_data=['name']
+                    )
+                
                 fig.update_layout(showlegend=True)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No snapshot data collected yet. (This builds up over time as you Sync active trades daily).")
 
-        # 6. GREEKS LAB (FIXED - Uses ALL trades)
+        # 6. GREEKS LAB (FIXED - NO DEPENDENCIES)
         with an6:
-            # Use 'df' (all trades) instead of 'expired_sub' so it works immediately
             if not df.empty:
                 st.markdown("##### 🔬 Greek Exposure Analysis (All Trades)")
                 g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'])
-                # Filter out zero values to avoid clutter
+                # Filter out zero values
                 valid_greeks = df[df[g_col] != 0]
                 if not valid_greeks.empty:
-                    fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', trendline='ols', 
+                    # REMOVED trendline='ols' to fix ModuleNotFoundError
+                    fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', 
                                      title=f"Correlation: {g_col} vs P&L", hover_data=['Name'])
                     st.plotly_chart(fig, use_container_width=True)
                 else:
@@ -835,7 +850,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v75.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v76.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
