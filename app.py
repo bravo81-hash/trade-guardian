@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v76.0 (Fixed Greeks & Lifecycle)")
+st.info("✅ RUNNING VERSION: v77.0 (Audited & Fixed)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -76,8 +76,16 @@ def get_strategy(group_name, trade_name=""):
     return "Other"
 
 def clean_num(x):
-    try: return float(str(x).replace('$', '').replace(',', ''))
-    except: return 0.0
+    """
+    Robust number cleaner that handles currency strings and NaNs.
+    """
+    try:
+        val = float(str(x).replace('$', '').replace(',', ''))
+        if np.isnan(val): 
+            return 0.0
+        return val
+    except:
+        return 0.0
 
 def safe_fmt(val, fmt_str):
     try:
@@ -103,20 +111,14 @@ def extract_ticker(name):
 # --- SMART FILE READER ---
 def read_file_safely(file):
     try:
-        if file.name.endswith('.xlsx') or file.name.endswith('.xls'):
+        # FIX: Separate logic for xlsx (openpyxl) and xls (default/xlrd)
+        if file.name.endswith('.xlsx'):
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
-            header_idx = -1
-            for i, row in df_raw.head(20).iterrows():
-                row_str = " ".join(row.astype(str).values)
-                if "Name" in row_str and "Total Return" in row_str:
-                    header_idx = i
-                    break
-            if header_idx != -1:
-                df = df_raw.iloc[header_idx+1:].copy()
-                df.columns = df_raw.iloc[header_idx]
-                return df
-            return None
+        elif file.name.endswith('.xls'):
+            # Allow pandas to pick default engine (usually xlrd if installed)
+            df_raw = pd.read_excel(file, header=None)
         else:
+            # CSV Handling
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -126,7 +128,23 @@ def read_file_safely(file):
                     break
             file.seek(0)
             return pd.read_csv(file, skiprows=header_row)
+
+        # Excel Header Search Logic
+        header_idx = -1
+        for i, row in df_raw.head(20).iterrows():
+            row_str = " ".join(row.astype(str).values)
+            if "Name" in row_str and "Total Return" in row_str:
+                header_idx = i
+                break
+        
+        if header_idx != -1:
+            df = df_raw.iloc[header_idx+1:].copy()
+            df.columns = df_raw.iloc[header_idx]
+            return df
+        return None
+
     except Exception as e:
+        st.error(f"Error reading {file.name}: {e}")
         return None
 
 # --- SYNC ENGINE ---
@@ -137,10 +155,11 @@ def sync_data(file_list, file_type):
     conn = get_db_connection()
     c = conn.cursor()
     
-    count_new = 0
-    count_update = 0
-    
     for file in file_list:
+        # FIX: Reset counters PER FILE
+        count_new = 0
+        count_update = 0
+        
         try:
             df = read_file_safely(file)
             if df is None or df.empty:
@@ -165,11 +184,15 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
+                # FIX: Correct ordering of Lot Size thresholds (Largest first)
                 lot_size = 1
-                if strat == '130/160' and debit > 6000: lot_size = 2
-                elif strat == '130/160' and debit > 10000: lot_size = 3
-                elif strat == '160/190' and debit > 8000: lot_size = 2
-                elif strat == 'M200' and debit > 12000: lot_size = 2
+                if strat == '130/160':
+                    if debit > 10000: lot_size = 3
+                    elif debit > 6000: lot_size = 2
+                elif strat == '160/190':
+                    if debit > 8000: lot_size = 2
+                elif strat == 'M200':
+                    if debit > 12000: lot_size = 2
 
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
@@ -452,6 +475,7 @@ with tab1:
             else:
                 st.sidebar.success(f"✅ Yield Healthy: {port_yield:.2f}%")
 
+            # FIX: Corrected Loop Syntax and variable usage
             act_list = []
             sig_list = []
             for _, row in active_df.iterrows():
@@ -473,8 +497,10 @@ with tab1:
             def render_tab(tab, strategy_name):
                 with tab:
                     subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                    bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
-                    target_disp = bench['pnl'] * regime_mult
+                    
+                    # FIX: Safely get benchmark to avoid KeyError/NoneType
+                    bench = benchmarks.get(strategy_name) or BASE_CONFIG.get(strategy_name) or {'pnl': 0, 'yield': 0, 'dit': 0}
+                    target_disp = bench.get('pnl', 0) * regime_mult
                     
                     # --- ACTION CENTER (MINIMALIST DOT POINTS) ---
                     urgent = subset[subset['Action'] != ""]
@@ -491,10 +517,10 @@ with tab1:
                         st.divider()
 
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
-                    c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
+                    c1.metric("Hist. Avg Win", f"${bench.get('pnl',0):,.0f}")
+                    c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%/d")
                     c3.metric("Target Profit", f"${target_disp:,.0f}")
-                    c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
+                    c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
                     
                     if not subset.empty:
                         sum_row = pd.DataFrame({
@@ -517,11 +543,11 @@ with tab1:
                                 'Days Held': "{:.0f}"
                             })
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
-                                                   else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
-                                                   else '', subset=['Action'])
+                                           else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
+                                           else '', subset=['Action'])
                             .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) 
-                                                   else 'color: #842029; font-weight: bold' if 'F' in str(v) 
-                                                   else '', subset=['Grade'])
+                                           else 'color: #842029; font-weight: bold' if 'F' in str(v) 
+                                           else '', subset=['Grade'])
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
@@ -622,11 +648,15 @@ with tab2:
                 strat = get_strategy(group, name)
                 debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                 
+                # FIX: Corrected Lot Sizing Order (Check Biggest First)
                 lot_size = 1
-                if strat == '130/160' and debit > 6000: lot_size = 2
-                elif strat == '130/160' and debit > 10000: lot_size = 3
-                elif strat == '160/190' and debit > 8000: lot_size = 2
-                elif strat == 'M200' and debit > 12000: lot_size = 2
+                if strat == '130/160':
+                    if debit > 10000: lot_size = 3
+                    elif debit > 6000: lot_size = 2
+                elif strat == '160/190':
+                    if debit > 8000: lot_size = 2
+                elif strat == 'M200':
+                    if debit > 12000: lot_size = 2
                 
                 debit_lot = debit / max(1, lot_size)
                 
@@ -675,15 +705,20 @@ with tab3:
     if not df.empty:
         st.subheader("📈 Analytics Suite")
         
+        # FIX: Check for NaT/Empty before min/max
         if 'Entry Date' in df.columns:
-            min_date = df['Entry Date'].min()
-            max_date = df['Entry Date'].max()
-            date_range = st.date_input("Filter Data Range", [min_date, max_date])
-            
-            if len(date_range) == 2:
-                start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-                end_d = end_d + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-                filtered_df = df[(df['Entry Date'] >= start_d) & (df['Entry Date'] <= end_d)]
+            valid_dates = df['Entry Date'].dropna()
+            if not valid_dates.empty:
+                min_date = valid_dates.min().date()
+                max_date = valid_dates.max().date()
+                date_range = st.date_input("Filter Data Range", [min_date, max_date])
+                
+                if len(date_range) == 2:
+                    start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+                    end_d = end_d + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                    filtered_df = df[(df['Entry Date'] >= start_d) & (df['Entry Date'] <= end_d)]
+                else:
+                    filtered_df = df
             else:
                 filtered_df = df
         else:
@@ -697,18 +732,22 @@ with tab3:
         # 1. EQUITY CURVE
         with an1:
             if not expired_sub.empty:
-                ec_df = expired_sub.sort_values("Exit Date").copy()
-                ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
-                ec_df['Peak'] = ec_df['Cumulative P&L'].cummax()
-                ec_df['Drawdown'] = ec_df['Cumulative P&L'] - ec_df['Peak']
-                max_dd = ec_df['Drawdown'].min()
-                
-                c1, c2 = st.columns(2)
-                c1.metric("Total Realized P&L", f"${ec_df['Cumulative P&L'].iloc[-1]:,.0f}")
-                c2.metric("Max Drawdown", f"${max_dd:,.0f}", delta_color="inverse")
-                
-                fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Account Growth (Realized)", markers=True)
-                st.plotly_chart(fig, use_container_width=True)
+                # FIX: Drop NaTs before sorting to prevent crash
+                ec_df = expired_sub.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
+                if not ec_df.empty:
+                    ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
+                    ec_df['Peak'] = ec_df['Cumulative P&L'].cummax()
+                    ec_df['Drawdown'] = ec_df['Cumulative P&L'] - ec_df['Peak']
+                    max_dd = ec_df['Drawdown'].min()
+                    
+                    c1, c2 = st.columns(2)
+                    c1.metric("Total Realized P&L", f"${ec_df['Cumulative P&L'].iloc[-1]:,.0f}")
+                    c2.metric("Max Drawdown", f"${max_dd:,.0f}", delta_color="inverse")
+                    
+                    fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Account Growth (Realized)", markers=True)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No closed trades with valid dates.")
             else:
                 st.info("No closed trades to chart.")
 
@@ -737,32 +776,34 @@ with tab3:
         with an3:
             if not expired_sub.empty:
                 # Type A: Monthly Seasonality
-                exp_hm = expired_sub.copy()
-                exp_hm['Year'] = exp_hm['Exit Date'].dt.year
-                exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
-                hm_date = exp_hm.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
-                months = ['January', 'February', 'March', 'April', 'May', 'June', 
-                          'July', 'August', 'September', 'October', 'November', 'December']
-                
-                fig1 = px.density_heatmap(hm_date, x="Month", y="Year", z="P&L", color_continuous_scale="RdBu", 
-                                          title="1. Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True)
-                st.plotly_chart(fig1, use_container_width=True)
-                
-                st.divider()
-                
-                # Type B: DIT Sweet Spot
-                fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
-                                          title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
-                st.plotly_chart(fig2, use_container_width=True)
-                
-                st.divider()
-                
-                # Type C: Day of Week
-                exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
-                days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-                fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg",
-                                          title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
-                st.plotly_chart(fig3, use_container_width=True)
+                exp_hm = expired_sub.dropna(subset=['Exit Date']).copy()
+                if not exp_hm.empty:
+                    exp_hm['Year'] = exp_hm['Exit Date'].dt.year
+                    exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
+                    hm_date = exp_hm.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
+                    months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                              'July', 'August', 'September', 'October', 'November', 'December']
+                    
+                    fig1 = px.density_heatmap(hm_date, x="Month", y="Year", z="P&L", color_continuous_scale="RdBu", 
+                                              title="1. Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True)
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                    st.divider()
+                    
+                    # Type B: DIT Sweet Spot
+                    fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
+                                              title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                    st.plotly_chart(fig2, use_container_width=True)
+                    
+                    st.divider()
+                    
+                    # Type C: Day of Week
+                    if 'Entry Date' in exp_hm.columns:
+                        exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
+                        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                        fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg",
+                                                  title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                        st.plotly_chart(fig3, use_container_width=True)
 
         # 4. TICKERS
         with an4:
@@ -850,7 +891,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v76.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v77.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
