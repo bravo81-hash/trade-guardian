@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v78.0 (Journaling + Integrity)")
+st.info("✅ RUNNING VERSION: v78.1 (Restored Dashboard + Journaling)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -67,7 +67,7 @@ def migrate_db():
     c = conn.cursor()
     try:
         c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
-    except: pass # Column likely exists
+    except: pass 
     
     try:
         c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
@@ -96,7 +96,6 @@ def get_strategy(group_name, trade_name=""):
     return "Other"
 
 def clean_num(x):
-    """Robust number cleaner that handles currency strings and NaNs."""
     try:
         val = float(str(x).replace('$', '').replace(',', ''))
         if np.isnan(val): return 0.0
@@ -180,7 +179,6 @@ def sync_data(file_list, file_type):
     for file in file_list:
         count_new = 0
         count_update = 0
-        count_missing_cols = 0
         
         try:
             df = read_file_safely(file)
@@ -192,7 +190,7 @@ def sync_data(file_list, file_type):
             required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
             missing = [col for col in required_cols if col not in df.columns]
             if missing:
-                log.append(f"⚠️ {file.name}: Missing columns {missing}. Check broker export format.")
+                log.append(f"⚠️ {file.name}: Missing columns {missing}. Check broker export.")
                 continue
 
             for _, row in df.iterrows():
@@ -261,7 +259,7 @@ def sync_data(file_list, file_type):
                             WHERE id=?''', 
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
-                    elif existing[0] in ["Active", "Missing"]: # Reactivate if it was missing
+                    elif existing[0] in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
                             pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
                             WHERE id=?''', 
@@ -284,10 +282,9 @@ def sync_data(file_list, file_type):
     if file_type == "Active" and file_found_ids:
         missing_ids = db_active_ids - file_found_ids
         if missing_ids:
-            # Mark as Missing instead of auto-deleting
             placeholders = ','.join('?' for _ in missing_ids)
             c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
-            log.append(f"⚠️ Integrity Check: Marked {len(missing_ids)} trades as 'Missing' (in DB but not in file).")
+            log.append(f"⚠️ Integrity Check: Marked {len(missing_ids)} trades as 'Missing'.")
 
     conn.commit()
     conn.close()
@@ -299,25 +296,19 @@ def update_journal(edited_df):
     c = conn.cursor()
     count = 0
     try:
-        # Iterate over edited rows and update DB
         for index, row in edited_df.iterrows():
-            # We assume 'id' is in the index or column. 
-            # Note: st.data_editor returns a df with same index as input.
             t_id = row['id'] 
             notes = str(row['Notes'])
             tags = str(row['Tags'])
-            
             c.execute("UPDATE trades SET notes=?, tags=? WHERE id=?", (notes, tags, t_id))
             count += 1
         conn.commit()
         return count
-    except Exception as e:
-        return 0
-    finally:
-        conn.close()
+    except Exception as e: return 0
+    finally: conn.close()
 
 # --- DATA LOADER (Cached) ---
-@st.cache_data(ttl=60) # Cache for 60 seconds for performance
+@st.cache_data(ttl=60)
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
@@ -337,7 +328,6 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID'
         })
         
-        # Ensure cols
         for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags']:
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags'] else 0.0
@@ -353,7 +343,6 @@ def load_data():
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # Helper for grading
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
             reason = "Standard"
@@ -395,100 +384,76 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: WORKFLOW WIZARD ---
+# --- SIDEBAR: WORKFLOW ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
-
-# STEP 1: RESTORE
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
-        st.cache_data.clear() # Clear cache on new DB load
-        st.success("Database Restored & Cache Cleared.")
+        st.cache_data.clear()
+        st.success("Restored & Cache Cleared.")
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
             st.rerun()
 
 st.sidebar.markdown("⬇️ *then...*")
-
-# STEP 2: SYNC
 with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
-    
     if st.button("🔄 Process & Reconcile"):
         logs = []
         if active_up: logs.extend(sync_data(active_up, "Active"))
         if history_up: logs.extend(sync_data(history_up, "History"))
-        
         if logs:
             for l in logs: st.write(l)
-            st.cache_data.clear() # Refresh data
+            st.cache_data.clear()
             st.success("Sync Complete!")
-            # st.rerun() # Optional: auto-refresh
 
 st.sidebar.markdown("⬇️ *finally...*")
-
-# STEP 3: BACKUP
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-# MAINTENANCE
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
         conn = get_db_connection()
         conn.execute("VACUUM")
         conn.close()
-        st.success("Database optimized.")
-    
+        st.success("Optimized.")
     if st.button("🔥 Purge Old Snapshots (>90d)"):
         conn = get_db_connection()
         cutoff = (datetime.now() - pd.Timedelta(days=90)).date()
         conn.execute("DELETE FROM snapshots WHERE snapshot_date < ?", (cutoff,))
         conn.commit()
         conn.close()
-        st.success("Old snapshots purged.")
+        st.success("Purged.")
 
 st.sidebar.divider()
-
-# STRATEGY SETTINGS
 st.sidebar.header("⚙️ Strategy Settings")
-market_regime = st.sidebar.selectbox(
-    "Current Market Regime", 
-    ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"],
-    index=0
-)
+market_regime = st.sidebar.selectbox("Current Market Regime", ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"], index=0)
 regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in market_regime else 1.0
 
 # --- SMART EXIT ENGINE ---
 def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
-    if status == "Missing":
-        return "MISSING (Review)", "ERROR"
-        
+    if status == "Missing": return "MISSING (Review)", "ERROR"
     if status == "Active":
         benchmark = benchmarks_dict.get(strat, {})
         base_target = benchmark.get('pnl', 0) or BASE_CONFIG.get(strat, {}).get('pnl', 9999)
         final_target = base_target * regime_mult
-            
-        if pnl >= final_target:
-            return f"TAKE PROFIT (Hit ${final_target:,.0f})", "SUCCESS"
-
+        
+        if pnl >= final_target: return f"TAKE PROFIT (Hit ${final_target:,.0f})", "SUCCESS"
         if strat == '130/160':
-            if 25 <= days_held <= 35 and pnl < 100:
-                return "KILL (Stale >25d)", "ERROR"
+            if 25 <= days_held <= 35 and pnl < 100: return "KILL (Stale >25d)", "ERROR"
         elif strat == '160/190':
             if days_held < 30: return "COOKING (Do Not Touch)", "INFO"
             elif 30 <= days_held <= 40: return "WATCH (Profit Zone)", "WARNING"
         elif strat == 'M200':
             if 12 <= days_held <= 16:
                 return ("DAY 14 CHECK (Green)", "SUCCESS") if pnl > 200 else ("DAY 14 CHECK (Red)", "WARNING")
-                
     return "", "NONE"
 
 # --- MAIN APP ---
 df = load_data()
-
 benchmarks = BASE_CONFIG.copy()
 if not df.empty:
     expired_df = df[df['Status'] == 'Expired']
@@ -510,13 +475,17 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator
 # 1. ACTIVE DASHBOARD
 with tab1:
     if not df.empty:
-        # Filter active + missing for review
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
         if active_df.empty:
-            st.info("📭 No active trades in database. Go to Step 2 (Work) in the sidebar.")
+            st.info("📭 No active trades in database.")
         else:
-            # --- ACTION LOGIC ---
+            # --- PREP DATA ---
+            port_yield = active_df['Daily Yield %'].mean()
+            if port_yield < 0.10: st.sidebar.error(f"🚨 Yield Critical: {port_yield:.2f}%")
+            elif port_yield < 0.15: st.sidebar.warning(f"⚠️ Yield Low: {port_yield:.2f}%")
+            else: st.sidebar.success(f"✅ Yield Healthy: {port_yield:.2f}%")
+
             act_list, sig_list = [], []
             for _, row in active_df.iterrows():
                 act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks)
@@ -524,11 +493,11 @@ with tab1:
                 sig_list.append(sig)
             active_df['Action'] = act_list
             active_df['Signal_Type'] = sig_list
-            
-            # --- ACTION QUEUE (TO-DO LIST) ---
+
+            # --- 1. ACTION QUEUE ---
             todo_df = active_df[active_df['Action'] != ""]
             if not todo_df.empty:
-                st.markdown("### ✅ Action Queue (To-Do)")
+                st.markdown("### ✅ Action Queue")
                 t1, t2 = st.columns([3, 1])
                 with t1:
                     for _, row in todo_df.iterrows():
@@ -537,55 +506,127 @@ with tab1:
                         st.markdown(f"**{row['Name']}**: :{color}[{row['Action']}] | *{row['Strategy']}*")
                 with t2:
                     csv_todo = todo_df[['Name', 'Action', 'P&L', 'Days Held']].to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download To-Do List", csv_todo, "todo_list.csv", "text/csv")
+                    st.download_button("📥 Download Queue", csv_todo, "todo_list.csv", "text/csv")
                 st.divider()
 
-            # --- JOURNALING INTERFACE ---
-            st.markdown("### 🏛️ Trade Journal")
-            st.caption("Edit 'Notes' and 'Tags' directly below, then click Save.")
-            
-            # Columns to display/edit
-            display_cols = ['id', 'Name', 'Strategy', 'Status', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
-            
-            # Configure column settings for data editor
-            column_config = {
-                "id": None, # Hide ID
-                "Name": st.column_config.TextColumn("Trade Name", disabled=True),
-                "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
-                "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
-                "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
-                "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
-                "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
-                "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
-                "Action": st.column_config.TextColumn("Signal", disabled=True),
-            }
-            
-            # THE EDITABLE DATAFRAME
-            edited_df = st.data_editor(
-                active_df[display_cols],
-                column_config=column_config,
-                hide_index=True,
-                use_container_width=True,
-                key="journal_editor",
-                num_rows="fixed"
-            )
-            
-            # SAVE BUTTON
-            if st.button("💾 Save Journal Changes"):
-                changes = update_journal(edited_df)
-                if changes > 0:
-                    st.success(f"Saved notes for {changes} trades!")
-                    st.cache_data.clear()
-                    # st.rerun() # Optional refresh
-                else:
-                    st.info("No changes detected or save failed.")
+            # --- 2. MASTER JOURNAL ---
+            with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
+                st.caption("Edit 'Notes' and 'Tags', then click Save.")
+                display_cols = ['id', 'Name', 'Strategy', 'Status', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
+                column_config = {
+                    "id": None, 
+                    "Name": st.column_config.TextColumn("Trade Name", disabled=True),
+                    "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
+                    "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
+                    "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
+                    "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
+                    "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
+                    "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
+                    "Action": st.column_config.TextColumn("Signal", disabled=True),
+                }
+                edited_df = st.data_editor(
+                    active_df[display_cols],
+                    column_config=column_config,
+                    hide_index=True,
+                    use_container_width=True,
+                    key="journal_editor",
+                    num_rows="fixed"
+                )
+                if st.button("💾 Save Journal"):
+                    changes = update_journal(edited_df)
+                    if changes: 
+                        st.success(f"Saved {changes} trades!")
+                        st.cache_data.clear()
 
-            # Summary Metrics
             st.divider()
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Active P&L", f"${active_df['P&L'].sum():,.0f}")
-            col2.metric("Total Capital", f"${active_df['Debit'].sum():,.0f}")
-            col3.metric("Avg Daily Yield", f"{active_df['Daily Yield %'].mean():.2f}%")
+
+            # --- 3. DETAILED STRATEGY BREAKDOWN (Restored) ---
+            st.markdown("### 🏛️ Strategy Performance")
+            strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
+
+            # OVERVIEW TAB
+            with strat_tabs[0]:
+                with st.expander("📊 Portfolio Risk", expanded=True):
+                    total_delta = active_df['Delta'].sum()
+                    total_theta = active_df['Theta'].sum()
+                    total_cap = active_df['Debit'].sum()
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Net Delta", f"{total_delta:,.1f}", delta="Bullish" if total_delta > 0 else "Bearish")
+                    r2.metric("Daily Theta", f"${total_theta:,.0f}")
+                    r3.metric("Capital at Risk", f"${total_cap:,.0f}")
+
+                strat_agg = active_df.groupby('Strategy').agg({
+                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                    'Name': 'count', 'Daily Yield %': 'mean' 
+                }).reset_index()
+                
+                strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
+                strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
+                
+                total_row = pd.DataFrame({
+                    'Strategy': ['TOTAL'], 
+                    'P&L': [strat_agg['P&L'].sum()], 'Debit': [strat_agg['Debit'].sum()],
+                    'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
+                    'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                    'Trend': ['-'], 'Target %': ['-']
+                })
+                final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
+                
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
+                
+                def highlight_trend(val):
+                    return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
+
+                def style_total(row):
+                    return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
+
+                st.dataframe(
+                    display_agg.style
+                    .format({'Total P&L': "${:,.0f}", 'Total Debit': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Yield/Day': "{:.2f}%", 'Target': "{:.2f}%"})
+                    .map(highlight_trend, subset=['Trend'])
+                    .apply(style_total, axis=1), 
+                    use_container_width=True
+                )
+
+            # STRATEGY SPECIFIC TABS
+            cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            
+            def render_tab(tab, strategy_name):
+                with tab:
+                    subset = active_df[active_df['Strategy'] == strategy_name].copy()
+                    bench = benchmarks.get(strategy_name) or BASE_CONFIG.get(strategy_name) or {'pnl': 0, 'yield': 0, 'dit': 0}
+                    target_disp = bench.get('pnl', 0) * regime_mult
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Hist. Avg Win", f"${bench.get('pnl',0):,.0f}")
+                    c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%/d")
+                    c3.metric("Target Profit", f"${target_disp:,.0f}")
+                    c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
+                    
+                    if not subset.empty:
+                        sum_row = pd.DataFrame({
+                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
+                            'Daily Yield %': [subset['Daily Yield %'].mean()],
+                            'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
+                            'Days Held': [subset['Days Held'].mean()],
+                            'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
+                            'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()], 'Notes': ['']
+                        })
+                        display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                        st.dataframe(
+                            display_df.style
+                            .format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
+                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) else '', subset=['Action'])
+                            .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else 'color: #842029; font-weight: bold' if 'F' in str(v) else '', subset=['Grade'])
+                            .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
+                            use_container_width=True
+                        )
+                    else: st.info("No active trades.")
+
+            render_tab(strat_tabs[1], '130/160')
+            render_tab(strat_tabs[2], '160/190')
+            render_tab(strat_tabs[3], 'M200')
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
@@ -604,7 +645,6 @@ with tab2:
                 strat = get_strategy(group, name)
                 debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                 
-                # Lot Sizing (Same logic as Sync)
                 lot_size = 1
                 if strat == '130/160':
                     if debit > 10000: lot_size = 3
@@ -638,8 +678,7 @@ with tab2:
                 if "A" in grade: st.success(f"✅ **APPROVED:** {reason}")
                 elif "F" in grade: st.error(f"⛔ **REJECT:** {reason}")
                 else: st.warning(f"⚠️ **CHECK:** {reason}")
-        except Exception as e:
-            st.error(f"Error: {e}")
+        except Exception as e: st.error(f"Error: {e}")
 
 # 3. ANALYTICS
 with tab3:
@@ -683,7 +722,6 @@ with tab3:
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality", text_auto=True, color_continuous_scale="RdBu")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # NEW: Risk Concentration
         with an4:
             active_only = df[df['Status'] == 'Active']
             if not active_only.empty:
@@ -695,7 +733,7 @@ with tab3:
                 with c2:
                     fig_tick = px.pie(active_only, values='Debit', names='Ticker', title="Risk by Ticker", hole=0.4)
                     st.plotly_chart(fig_tick, use_container_width=True)
-            else: st.info("No active trades to analyze risk.")
+            else: st.info("No active trades.")
 
         with an5:
             snaps = load_snapshots()
@@ -714,4 +752,4 @@ with tab4:
     * **M200:** Enter Wed. Target $7.5k-$8.5k debit. Check Day 14.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v78.0")
+    st.caption("Allantis Trade Guardian v78.1")
