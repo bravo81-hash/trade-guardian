@@ -14,7 +14,7 @@ import io
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- APP CONSTANTS ---
-VER = "v80.2 (Fixed Excel Reader)"
+VER = "v80.3 (Hotfix: Data Sanitization)"
 DB_NAME = "trade_guardian_v80.db"
 
 # --- CUSTOM CSS ---
@@ -107,9 +107,6 @@ def init_db():
             try: c.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
             except: pass
             
-        # Fix ticker column type if it was added as REAL by mistake in loop above (it's TEXT)
-        # SQLite types are dynamic, so it largely doesn't matter, but good to be clean.
-
     try:
         c.execute("SELECT theta FROM snapshots LIMIT 1")
     except sqlite3.OperationalError:
@@ -161,7 +158,7 @@ def generate_id(name, strategy, entry_date):
     clean_name = "".join(e for e in str(name) if e.isalnum())
     return f"{strategy}_{d_str}_{clean_name}"[:50]
 
-# --- FILE PROCESSOR (RESTORED EXCEL SUPPORT) ---
+# --- FILE PROCESSOR ---
 
 def read_file_safely(file):
     """Reads both CSV and Excel files robustly."""
@@ -307,7 +304,7 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# --- DATA LOADING ---
+# --- DATA LOADING (FIXED: SANITIZE TYPES) ---
 def load_data():
     conn = get_db_connection()
     try:
@@ -315,6 +312,12 @@ def load_data():
         df['entry_date'] = pd.to_datetime(df['entry_date'])
         df['exit_date'] = pd.to_datetime(df['exit_date'])
         
+        # FIX: Force numeric columns to be floats and fill NaNs/Nones with 0
+        numeric_cols = ['pnl', 'debit', 'theta', 'delta', 'gamma', 'vega', 'rho', 'iv', 'pop', 'days_held', 'lot_size']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
         df['ROI'] = (df['pnl'] / df['debit'].replace(0, 1)) * 100
         df['Daily Yield'] = df['ROI'] / df['days_held'].replace(0, 1)
         
@@ -333,6 +336,13 @@ def load_snapshots(trade_id=None):
     try:
         df = pd.read_sql(query, conn, params=params)
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        
+        # FIX: Sanitize snapshots too
+        numeric_cols = ['pnl', 'theta', 'delta', 'gamma', 'vega', 'rho', 'iv']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+                
         return df
     except: return pd.DataFrame()
     finally: conn.close()
@@ -420,7 +430,9 @@ with tab_dash:
             
             with st.expander(f"🔹 {strat} ({len(s_df)} Trades) - Total P&L: ${s_df['pnl'].sum():,.0f}", expanded=True):
                 # Custom Display Columns
-                display_cols = ['name', 'entry_date', 'days_held', 'pnl', 'pop', 'iv', 'delta', 'theta', 'debit']
+                base_cols = ['name', 'entry_date', 'days_held', 'pnl', 'pop', 'iv', 'delta', 'theta', 'debit']
+                # Safety: Only use cols that actually exist in the dataframe
+                display_cols = [c for c in base_cols if c in s_df.columns]
                 
                 # Apply Color Formatting
                 def color_pnl(val):
@@ -430,13 +442,16 @@ with tab_dash:
                 def alert_days(val):
                     return 'background-color: #ffcccc' if val > 45 else ''
 
+                # Format dictionary with safe defaults
+                fmt_dict = {
+                    'pnl': "${:,.0f}", 'debit': "${:,.0f}", 
+                    'delta': "{:.1f}", 'theta': "{:.1f}", 
+                    'iv': "{:.1f}%", 'pop': "{:.1f}%"
+                }
+
                 st.dataframe(
                     s_df[display_cols].style
-                    .format({
-                        'pnl': "${:,.0f}", 'debit': "${:,.0f}", 
-                        'delta': "{:.1f}", 'theta': "{:.1f}", 
-                        'iv': "{:.1f}%", 'pop': "{:.1f}%"
-                    })
+                    .format(fmt_dict, na_rep="-")
                     .map(color_pnl, subset=['pnl'])
                     .map(alert_days, subset=['days_held']),
                     use_container_width=True
