@@ -11,7 +11,8 @@ from datetime import datetime
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
-st.info("✅ RUNNING VERSION: v78.0 (Full Analytics & Snapshot Inspector)")
+# --- DEBUG BANNER ---
+st.info("✅ RUNNING VERSION: v79.0 (Integrity Fix - SQL Aliasing & Visuals)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -22,7 +23,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # 1. TRADES TABLE (Master Record)
+    # 1. TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -41,7 +42,7 @@ def init_db():
                     notes TEXT
                 )''')
     
-    # 2. SNAPSHOTS TABLE (Daily History + Greeks)
+    # 2. SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -143,7 +144,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
     count_new = 0
     count_update = 0
     
-    # Use user-selected date OR default to Today
+    # Snapshot Date Logic
     snap_date = snapshot_date_override if snapshot_date_override else datetime.now().date()
     
     for file in file_list:
@@ -193,7 +194,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                         days_held = (exit_dt - start_dt).days
                     except: days_held = 1
                 else:
-                    # Active: Use SNAPSHOT DATE to calculate holding period
+                    # Active: Use Snapshot Date for calc
                     days_held = (pd.to_datetime(snap_date) - start_dt).days
                 
                 if days_held < 1: days_held = 1
@@ -262,7 +263,7 @@ def load_data():
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes'
         })
         
-        # Ensure Columns exist
+        # Ensure Columns
         for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size']:
             if col not in df.columns:
                 df[col] = 0.0
@@ -277,6 +278,8 @@ def load_data():
         # Metrics
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
+        
+        # Prevent zero division
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         
         df['Ticker'] = df['Name'].apply(extract_ticker)
@@ -307,17 +310,19 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # FULL QUERY
+        # v79 FIX: ALIAS 't.id' AS 'trade_id' SO CHART CAN FIND IT
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.gamma, s.vega,
-               t.strategy, t.name, t.id
+               t.strategy, t.name, t.id as trade_id
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
         df = pd.read_sql(q, conn)
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        
         for c in ['pnl', 'days_held', 'theta', 'delta', 'gamma', 'vega']:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
         return df
     except: return pd.DataFrame()
     finally: conn.close()
@@ -351,7 +356,6 @@ st.sidebar.markdown("⬇️ *then...*")
 with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
     st.caption("Feed broker exports here.")
     
-    # DATE PICKER FOR TIME MACHINE
     st.markdown("**📅 Set Data Date**")
     snap_date = st.date_input("File Date", datetime.now(), 
                               help="If uploading yesterday's files, change this date so the history graph is correct.",
@@ -438,6 +442,7 @@ if not df.empty:
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
             if not winners.empty:
+                # SAFE BENCHMARK CALCULATION
                 benchmarks[strat] = {
                     'yield': grp['Daily Yield %'].mean(),
                     'pnl': winners['P&L'].mean(),
@@ -508,9 +513,8 @@ with tab1:
                     c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
                     
                     if not subset.empty:
-                        # CREATE SUMMARY ROW
+                        # SUMMARY ROW
                         cols_to_sum = ['P&L', 'Debit', 'Theta', 'Delta', 'Gamma', 'Vega']
-                        # Ensure columns exist before sum
                         valid_sum_cols = [c for c in cols_to_sum if c in subset.columns]
                         
                         sum_data = {c: [subset[c].sum()] for c in valid_sum_cols}
@@ -520,11 +524,11 @@ with tab1:
                         
                         sum_row = pd.DataFrame(sum_data)
                         
-                        # Add missing columns to sum_row
+                        # Add missing cols to sum_row
                         for c in cols:
                             if c not in sum_row.columns: sum_row[c] = 0.0 if c not in ['Name', 'Action', 'Grade'] else ''
                         
-                        # Add missing columns to subset
+                        # Add missing cols to subset
                         disp_sub = subset.copy()
                         for c in cols:
                             if c not in disp_sub.columns: disp_sub[c] = 0.0 if c not in ['Name', 'Action', 'Grade'] else ''
@@ -799,19 +803,20 @@ with tab3:
         # 5. LIFECYCLE (SNAPSHOTS)
         with an5:
             snaps = load_snapshots()
-            # INSPECTOR
-            with st.expander("🔍 Inspect Snapshot Data"):
+            # INSPECTOR (HIDDEN BY DEFAULT)
+            with st.expander("🔍 Inspect Snapshot Data (Debug)"):
                 st.write(snaps.head(20))
                 
             if not snaps.empty:
                 sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique(), key='lc_strat')
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
-                # USE 'name' FOR COLOR, 'id' FOR LINE GROUPING
+                # v79 Fix: Markers enabled so single points show up!
                 fig = px.line(
                     strat_snaps, x='days_held', y='pnl', 
-                    color='name', 
-                    line_group='id', 
+                    color='name', # Color by Name
+                    line_group='trade_id', # Separate lines by ID
+                    markers=True, # SHOW DOTS IF NO LINE
                     title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
                     labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
                     hover_data=['name']
@@ -835,8 +840,10 @@ with tab3:
                 sub_snaps = sub_snaps[sub_snaps[g_metric] != 0]
                 
                 if not sub_snaps.empty:
-                    fig = px.line(sub_snaps, x='days_held', y=g_metric, color='name', line_group='id',
-                                  title=f"Evolution of {g_metric.title()} over Time", markers=True)
+                    # v79 Fix: Markers enabled here too
+                    fig = px.line(sub_snaps, x='days_held', y=g_metric, color='name', line_group='trade_id',
+                                  markers=True,
+                                  title=f"Evolution of {g_metric.title()} over Time")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("No Greek data found in snapshots yet (Requires v77.0+ Syncs)")
@@ -868,7 +875,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v78.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v79.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
