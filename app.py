@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v79.1 (Full Analytics Restoration)")
+st.info("✅ RUNNING VERSION: v79.2 (Full Metrics Restoration)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -722,6 +722,14 @@ with tab3:
             if not expired_sub.empty:
                 ec_df = expired_sub.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
                 ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
+                ec_df['Peak'] = ec_df['Cumulative P&L'].cummax()
+                ec_df['Drawdown'] = ec_df['Cumulative P&L'] - ec_df['Peak']
+                max_dd = ec_df['Drawdown'].min()
+                
+                c1, c2 = st.columns(2)
+                c1.metric("Total Realized P&L", f"${ec_df['Cumulative P&L'].iloc[-1]:,.0f}")
+                c2.metric("Max Drawdown", f"${max_dd:,.0f}", delta_color="inverse")
+                
                 fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Realized Equity Curve", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No closed trades.")
@@ -730,8 +738,19 @@ with tab3:
             if not expired_sub.empty:
                 wins = expired_sub[expired_sub['P&L'] > 0]
                 losses = expired_sub[expired_sub['P&L'] <= 0]
+                
+                avg_win = wins['P&L'].mean() if not wins.empty else 0
+                avg_loss = abs(losses['P&L'].mean()) if not losses.empty else 0
                 win_rate = len(wins) / len(expired_sub) * 100 if len(expired_sub) > 0 else 0
-                st.metric("Win Rate", f"{win_rate:.1f}%")
+                profit_factor = (wins['P&L'].sum() / abs(losses['P&L'].sum())) if abs(losses['P&L'].sum()) > 0 else 0
+                
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Win Rate", f"{win_rate:.1f}%")
+                c2.metric("Profit Factor", f"{profit_factor:.2f}")
+                c3.metric("Avg Win", f"${avg_win:,.0f}")
+                c4.metric("Avg Loss", f"${avg_loss:,.0f}")
+                
+                st.markdown("##### Win/Loss Distribution")
                 fig = px.histogram(expired_sub, x="P&L", color="Strategy", nbins=20, title="P&L Distribution")
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -837,4 +856,4 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v79.1")
+    st.caption("Allantis Trade Guardian v79.2")
