@@ -11,20 +11,18 @@ from datetime import datetime
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
-# --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v77.0 (Verbose Edition - Time Machine & Greeks)")
+st.info("✅ RUNNING VERSION: v78.0 (Full Analytics & Snapshot Inspector)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE ENGINE ---
-# Switched to v5 to support Greek Snapshots
 DB_NAME = "trade_guardian_v5.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # TRADES TABLE (Master Record)
+    # 1. TRADES TABLE (Master Record)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -43,8 +41,7 @@ def init_db():
                     notes TEXT
                 )''')
     
-    # SNAPSHOTS TABLE (Daily History)
-    # UPDATED in v77: Now stores Greeks for every day!
+    # 2. SNAPSHOTS TABLE (Daily History + Greeks)
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -135,7 +132,7 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (UPDATED FOR v77) ---
+# --- SYNC ENGINE (TIME MACHINE ENABLED) ---
 def sync_data(file_list, file_type, snapshot_date_override=None):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -146,11 +143,8 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
     count_new = 0
     count_update = 0
     
-    # v77: Determine the "Snapshot Date" (Today or User Override)
-    if snapshot_date_override:
-        snap_date = snapshot_date_override
-    else:
-        snap_date = datetime.now().date()
+    # Use user-selected date OR default to Today
+    snap_date = snapshot_date_override if snapshot_date_override else datetime.now().date()
     
     for file in file_list:
         try:
@@ -189,7 +183,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # 3. Date Logic (v77 Fix: Time Machine)
+                # 3. Date Logic
                 exit_dt = None
                 days_held = 1
                 
@@ -199,8 +193,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                         days_held = (exit_dt - start_dt).days
                     except: days_held = 1
                 else:
-                    # Active: Calculate days based on the SNAPSHOT DATE, not today!
-                    # This is what fixes the "Time Compression" bug.
+                    # Active: Use SNAPSHOT DATE to calculate holding period
                     days_held = (pd.to_datetime(snap_date) - start_dt).days
                 
                 if days_held < 1: days_held = 1
@@ -210,7 +203,6 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 existing = c.fetchone()
                 
                 if existing is None:
-                    # Insert New
                     c.execute('''INSERT INTO trades 
                         (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -219,7 +211,6 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, ""))
                     count_new += 1
                 else:
-                    # Update Existing
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
@@ -233,9 +224,8 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                             (pnl, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                         
-                # 5. Snapshot (Active Only) - v77: SAVES GREEKS
+                # 5. Snapshot (Active Only)
                 if file_type == "Active":
-                    # Check if snapshot exists for this specific trade AND date
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, snap_date))
                     if not c.fetchone():
                         c.execute('''INSERT INTO snapshots 
@@ -272,7 +262,7 @@ def load_data():
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes'
         })
         
-        # Ensure Columns
+        # Ensure Columns exist
         for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size']:
             if col not in df.columns:
                 df[col] = 0.0
@@ -317,7 +307,7 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # UPDATED QUERY: Fetch Greeks too!
+        # FULL QUERY
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.gamma, s.vega,
                t.strategy, t.name, t.id
@@ -326,12 +316,8 @@ def load_snapshots():
         """
         df = pd.read_sql(q, conn)
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
-        
-        # Force numeric types
-        cols = ['pnl', 'days_held', 'theta', 'delta', 'gamma', 'vega']
-        for c in cols:
+        for c in ['pnl', 'days_held', 'theta', 'delta', 'gamma', 'vega']:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-            
         return df
     except: return pd.DataFrame()
     finally: conn.close()
@@ -339,7 +325,7 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: TIME MACHINE WORKFLOW ---
+# --- SIDEBAR: WORKFLOW WIZARD ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 
 # 1. RESTORE
@@ -349,32 +335,26 @@ with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         
-        # Validation
         conn = get_db_connection()
-        try:
-            count = pd.read_sql("SELECT count(*) as c FROM trades", conn).iloc[0]['c']
+        try: count = pd.read_sql("SELECT count(*) as c FROM trades", conn).iloc[0]['c']
         except: count = 0
         conn.close()
         
-        if count == 0:
-            st.warning(f"Brain Loaded, but it is EMPTY (0 trades).")
-        else:
-            st.success(f"Brain Loaded! Found {count} trades.")
-        
+        st.success(f"Brain Loaded! Found {count} trades.")
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
             st.rerun()
 
 st.sidebar.markdown("⬇️ *then...*")
 
-# 2. SYNC (TIME MACHINE ENABLED)
+# 2. SYNC (TIME MACHINE)
 with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
     st.caption("Feed broker exports here.")
     
-    # THE TIME MACHINE WIDGET
+    # DATE PICKER FOR TIME MACHINE
     st.markdown("**📅 Set Data Date**")
     snap_date = st.date_input("File Date", datetime.now(), 
-                              help="IMPORTANT: If uploading old files, set this to the date those files were generated. If uploading today's files, leave as Today.",
+                              help="If uploading yesterday's files, change this date so the history graph is correct.",
                               label_visibility="collapsed")
     
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
@@ -458,7 +438,6 @@ if not df.empty:
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
             if not winners.empty:
-                # SAFE BENCHMARK CALCULATION
                 benchmarks[strat] = {
                     'yield': grp['Daily Yield %'].mean(),
                     'pnl': winners['P&L'].mean(),
@@ -509,7 +488,6 @@ with tab1:
                     bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                     target_disp = bench['pnl'] * regime_mult
                     
-                    # --- ACTION CENTER (MINIMALIST DOT POINTS) ---
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -530,17 +508,28 @@ with tab1:
                     c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
                     
                     if not subset.empty:
-                        sum_row = pd.DataFrame({
-                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
-                            'Daily Yield %': [subset['Daily Yield %'].mean()],
-                            'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
-                            'Days Held': [subset['Days Held'].mean()],
-                            'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
-                            'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()],
-                            'Notes': ['']
-                        })
+                        # CREATE SUMMARY ROW
+                        cols_to_sum = ['P&L', 'Debit', 'Theta', 'Delta', 'Gamma', 'Vega']
+                        # Ensure columns exist before sum
+                        valid_sum_cols = [c for c in cols_to_sum if c in subset.columns]
                         
-                        display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                        sum_data = {c: [subset[c].sum()] for c in valid_sum_cols}
+                        sum_data['Name'] = ['TOTAL']
+                        sum_data['Daily Yield %'] = [subset['Daily Yield %'].mean()]
+                        sum_data['Days Held'] = [subset['Days Held'].mean()]
+                        
+                        sum_row = pd.DataFrame(sum_data)
+                        
+                        # Add missing columns to sum_row
+                        for c in cols:
+                            if c not in sum_row.columns: sum_row[c] = 0.0 if c not in ['Name', 'Action', 'Grade'] else ''
+                        
+                        # Add missing columns to subset
+                        disp_sub = subset.copy()
+                        for c in cols:
+                            if c not in disp_sub.columns: disp_sub[c] = 0.0 if c not in ['Name', 'Action', 'Grade'] else ''
+                            
+                        display_df = pd.concat([disp_sub[cols], sum_row[cols]], ignore_index=True)
                         
                         st.dataframe(
                             display_df.style
@@ -708,6 +697,7 @@ with tab3:
     if not df.empty:
         st.subheader("📈 Analytics Suite")
         
+        # Date Filter
         if 'Entry Date' in df.columns:
             min_date = df['Entry Date'].min()
             max_date = df['Entry Date'].max()
@@ -809,14 +799,19 @@ with tab3:
         # 5. LIFECYCLE (SNAPSHOTS)
         with an5:
             snaps = load_snapshots()
+            # INSPECTOR
+            with st.expander("🔍 Inspect Snapshot Data"):
+                st.write(snaps.head(20))
+                
             if not snaps.empty:
                 sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique(), key='lc_strat')
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
+                # USE 'name' FOR COLOR, 'id' FOR LINE GROUPING
                 fig = px.line(
                     strat_snaps, x='days_held', y='pnl', 
-                    color='name', # Color by Name
-                    line_group='id', # Separate lines by ID
+                    color='name', 
+                    line_group='id', 
                     title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
                     labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
                     hover_data=['name']
@@ -873,7 +868,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v77.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v78.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
