@@ -86,12 +86,10 @@ def generate_id(name, strategy, entry_date):
     return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
 def extract_ticker(name):
-    # Simple logic: Take first word, remove dots/numbers if obvious
     try:
         parts = str(name).split(' ')
         if parts:
             ticker = parts[0].replace('.', '').upper()
-            # Filter out generic strategy names if they appear first
             if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL']:
                 return "UNKNOWN"
             return ticker
@@ -226,13 +224,15 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# --- DATA LOADER ---
+# --- DATA LOADER (v68.0: Error Revealer) ---
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
-    except: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"🚨 DATABASE ERROR: {str(e)}")
+        return pd.DataFrame()
     finally: conn.close()
     
     if not df.empty:
@@ -252,7 +252,6 @@ def load_data():
         df['Debit'] = df['Debit'].fillna(0)
         df['P&L'] = df['P&L'].fillna(0)
         
-        # Derived
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = df['ROI'] / df['Days Held'].replace(0, 1)
@@ -283,7 +282,6 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # Join snapshots with trades to get Strategy Name
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
         FROM snapshots s
@@ -298,17 +296,30 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: THE WORKFLOW WIZARD ---
+# --- SIDEBAR: WORKFLOW WIZARD ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 
-# STEP 1: RESTORE
+# STEP 1: RESTORE (v68.0: Smart Feedback)
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     st.caption("Doing this first avoids amnesia!")
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
-        st.success("Brain Loaded!")
-        st.rerun()
+        
+        # Immediate Validation
+        conn = get_db_connection()
+        count = pd.read_sql("SELECT count(*) as c FROM trades", conn).iloc[0]['c']
+        conn.close()
+        
+        if count == 0:
+            st.warning(f"Brain Loaded, but it is EMPTY (0 trades).")
+        else:
+            st.success(f"Brain Loaded! Found {count} trades.")
+        
+        # Session state hack to prevent infinite rerun loop
+        if 'restored' not in st.session_state:
+            st.session_state['restored'] = True
+            st.rerun()
 
 st.sidebar.markdown("⬇️ *then...*")
 
@@ -446,7 +457,6 @@ with tab1:
                     bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                     target_disp = bench['pnl'] * regime_mult
                     
-                    # --- ACTION CENTER (MINIMALIST DOT POINTS) ---
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -786,7 +796,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v67.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v68.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
