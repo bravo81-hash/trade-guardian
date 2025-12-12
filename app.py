@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v79.0 (Full Feature Restoration)")
+st.info("✅ RUNNING VERSION: v79.1 (Full Analytics Restoration)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -738,11 +738,37 @@ with tab3:
         with an3:
             if not expired_sub.empty:
                 exp_hm = expired_sub.dropna(subset=['Exit Date']).copy()
+                
+                # 1. Monthly Seasonality
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
                 hm_data = exp_hm.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
-                fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality", text_auto=True, color_continuous_scale="RdBu")
+                months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                          'July', 'August', 'September', 'October', 'November', 'December']
+                
+                fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", 
+                                       title="1. Monthly Seasonality ($)", 
+                                       text_auto=True, 
+                                       category_orders={"Month": months},
+                                       color_continuous_scale="RdBu")
                 st.plotly_chart(fig, use_container_width=True)
+                
+                st.divider()
+
+                # 2. Duration Sweet Spot
+                fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
+                                          title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                st.divider()
+                
+                # 3. Day of Week
+                if 'Entry Date' in exp_hm.columns:
+                    exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
+                    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                    fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg",
+                                              title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                    st.plotly_chart(fig3, use_container_width=True)
 
         # RESTORED: Ticker Analysis
         with an4:
@@ -811,4 +837,4 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v79.0")
+    st.caption("Allantis Trade Guardian v79.1")
