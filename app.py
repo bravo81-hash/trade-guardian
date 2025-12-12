@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v80.4 (FINAL FULL RELEASE | All Features Restored)")
+st.info("✅ RUNNING VERSION: v80.6 (Crash-Proof: Auto-Detects Streamlit Version)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -131,10 +131,8 @@ def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx') or file.name.endswith('.xls'):
             try:
-                # Try auto-detect engine first
                 df_raw = pd.read_excel(file, header=None)
             except:
-                # Fallback to openpyxl
                 df_raw = pd.read_excel(file, header=None, engine='openpyxl')
             
             header_idx = -1
@@ -161,7 +159,7 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (FULL LOGIC) ---
+# --- SYNC ENGINE ---
 def sync_data(file_list, file_type, snapshot_date_override=None):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -179,7 +177,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
         try:
             df = read_file_safely(file)
             if df is None or df.empty:
-                log.append(f"⚠️ Skipped {file.name} (Empty/Error)")
+                log.append(f"⚠️ Skipped {file.name} (Empty)")
                 continue
 
             current_trade_id = None 
@@ -188,11 +186,10 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 name = str(row.get('Name', ''))
                 if name in ['nan', '', 'Symbol']: continue
                 
-                # --- LEG PARSING (Fixed Position) ---
+                # LEG
                 if name.startswith('.'):
                     if current_trade_id:
                         try:
-                            # Use iloc[1] for quantity as headers might drift on leg rows
                             qty = clean_num(row.iloc[1]) 
                             match = re.search(r'([CP])(\d+\.?\d*)$', name)
                             if match:
@@ -208,10 +205,9 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                         except: pass
                     continue
                 
-                # --- PARENT TRADE ---
+                # TRADE
                 created = row.get('Created At', '')
-                try: 
-                    start_dt = pd.to_datetime(created)
+                try: start_dt = pd.to_datetime(created)
                 except: continue
                 
                 group = str(row.get('Group', ''))
@@ -225,7 +221,6 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 vega = clean_num(row.get('Vega', 0))
                 iv = clean_num(row.get('IV', 0))
                 
-                # Link Cleaning
                 raw_link = str(row.get('Link', ''))
                 link = raw_link if raw_link.startswith('http') else ''
                 
@@ -453,7 +448,7 @@ with tab1:
         if active_df.empty:
             st.info("No active trades.")
         else:
-            # Warnings
+            # Yield Warning
             port_yield = active_df['Daily Yield %'].mean()
             if port_yield < 0.10: st.sidebar.error(f"🚨 Low Yield: {port_yield:.2f}%")
             
@@ -481,30 +476,80 @@ with tab1:
                                 color = {"SUCCESS":"#4caf50", "ERROR":"#f44336", "WARNING":"#ff9800", "INFO":"#2196f3"}.get(sig, "#9e9e9e")
                                 st.markdown(f"* <span style='color: {color}'>**{row['Name']}**: {row['Action']}</span>", unsafe_allow_html=True)
                             st.divider()
+                        
+                        # Metrics
+                        if strategy_name != "Overview":
+                            bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
+                            target_disp = bench['pnl'] * regime_mult
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Hist. Avg Win", f"${bench['pnl']:,.0f}")
+                            c2.metric("Target Yield", f"{bench['yield']:.2f}%/d")
+                            c3.metric("Target Profit", f"${target_disp:,.0f}")
+                            c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
 
-                        # Styled Dataframe
-                        column_config = {}
-                        try:
-                            column_config["Link"] = st.column_config.LinkColumn("Open", display_text="Open")
-                        except AttributeError: pass 
+                        # Summary Logic
+                        cols_to_sum = ['P&L', 'Debit', 'Theta', 'Delta', 'Gamma', 'Vega']
+                        valid_sum_cols = [c for c in cols_to_sum if c in subset.columns]
+                        sum_data = {c: [subset[c].sum()] for c in valid_sum_cols}
+                        sum_data['Name'] = ['TOTAL']
+                        sum_data['Daily Yield %'] = [subset['Daily Yield %'].mean()]
+                        sum_data['Days Held'] = [subset['Days Held'].mean()]
+                        sum_row = pd.DataFrame(sum_data)
+                        
+                        for c in cols:
+                            if c not in sum_row.columns: sum_row[c] = 0.0 if c not in ['Name', 'Action', 'Grade', 'Link'] else ''
+                        disp_sub = subset.copy()
+                        for c in cols:
+                            if c not in disp_sub.columns: disp_sub[c] = 0.0 if c not in ['Name', 'Action', 'Grade', 'Link'] else ''
+                        display_df = pd.concat([disp_sub[cols], sum_row[cols]], ignore_index=True)
 
-                        st.dataframe(
-                            subset[cols].style
-                            .format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}"})
-                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
-                            .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else 'color: #842029; font-weight: bold' if 'F' in str(v) else '', subset=['Grade']),
-                            column_config=column_config,
-                            use_container_width=True
-                        )
-                    else: st.info("No trades.")
+                        # Styled Dataframe with VERSION CHECK for LinkColumn
+                        st_style = display_df.style.format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'IV': "{:.1f}%"})
+                        st_style = st_style.map(lambda v: 'background-color: #d1e7dd; color: #0f5132' if 'TAKE' in str(v) else 'background-color: #f8d7da; color: #842029' if 'KILL' in str(v) else '', subset=['Action'])
+                        st_style = st_style.map(lambda v: 'color: #0f5132' if 'A' in str(v) else 'color: #842029' if 'F' in str(v) else '', subset=['Grade'])
+                        st_style = st_style.apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1)
 
-            render_tab(strat_tabs[0], "Overview")
+                        # Check for st.column_config support (Streamlit >= 1.23)
+                        if hasattr(st, "column_config"):
+                            st.dataframe(
+                                st_style,
+                                column_config={
+                                    "Link": st.column_config.LinkColumn("Open", display_text="Open")
+                                },
+                                use_container_width=True
+                            )
+                        else:
+                            st.dataframe(st_style, use_container_width=True)
+
+                    else: st.info("No active trades.")
+
+            with strat_tabs[0]:
+                with st.expander("📊 Portfolio Risk Metrics", expanded=True):
+                    total_delta = active_df['Delta'].sum()
+                    total_theta = active_df['Theta'].sum()
+                    total_cap = active_df['Debit'].sum()
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Net Delta", f"{total_delta:,.1f}")
+                    r2.metric("Daily Theta", f"${total_theta:,.0f}")
+                    r3.metric("Capital at Risk", f"${total_cap:,.0f}")
+                
+                # Summary Aggregation
+                strat_agg = active_df.groupby('Strategy').agg({
+                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                    'Name': 'count', 'Daily Yield %': 'mean' 
+                }).reset_index()
+                
+                if hasattr(st, "dataframe"):
+                     st.dataframe(strat_agg.style.format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%"}), use_container_width=True)
+
+                render_tab(strat_tabs[0], "Overview")
+
             render_tab(strat_tabs[1], "130/160")
             render_tab(strat_tabs[2], "160/190")
             render_tab(strat_tabs[3], "M200")
             
             csv = active_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download CSV", csv, "active.csv", "text/csv")
+            st.download_button("📥 Download Active CSV", csv, "active.csv", "text/csv")
     else: st.info("Database Empty.")
 
 # 2. TENTS
@@ -534,6 +579,7 @@ with tab2:
                         st.plotly_chart(fig, use_container_width=True)
                 else: st.warning("No legs found. Re-sync your Active file.")
         else: st.info("No active trades.")
+    else: st.info("Database Empty.")
 
 # 3. VALIDATOR
 with tab3:
@@ -591,7 +637,6 @@ with tab3:
                     avg_win = similar[similar['P&L']>0]['P&L'].mean()
                     st.info(f"📊 Historical Match: Found {len(similar)} similar trades. Avg Win: ${avg_win:,.0f}")
 
-
 # 4. ANALYTICS
 with tab4:
     if not df.empty:
@@ -620,7 +665,6 @@ with tab4:
         with an3:
             expired = df[df['Status'] == 'Expired'].sort_values('Exit Date')
             if not expired.empty:
-                # Expectancy
                 wins = expired[expired['P&L'] > 0]
                 win_rate = (len(wins) / len(expired)) * 100
                 st.metric("Win Rate", f"{win_rate:.1f}%")
@@ -648,9 +692,23 @@ with tab4:
                 tick = expired.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False).head(10)
                 st.plotly_chart(px.bar(tick, x='P&L', y='Ticker', orientation='h'), use_container_width=True)
 
-
 with tab5:
     st.markdown("## 📜 Rules")
-    st.markdown("1. **130/160**: Target $4k. Kill @ 25d.")
-    st.markdown("2. **160/190**: Target $5k. Hold 40d+.")
-    st.markdown("3. **M200**: Check Day 14.")
+    st.markdown("### 1. 130/160 Strategy (Income Engine)")
+    st.markdown("* **Target Entry:** Monday.")
+    st.markdown("* **Debit Target:** `$3,500 - $4,500` per lot.")
+    st.markdown("* **Stop Rule:** Never pay > `$4,800` per lot.")
+    st.markdown("* **Management:** Kill if trade is **25 days old** and profit is flat/negative.")
+    
+    st.markdown("### 2. 160/190 Strategy (Compounder)")
+    st.markdown("* **Target Entry:** Friday.")
+    st.markdown("* **Debit Target:** `~$5,200` per lot.")
+    st.markdown("* **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI).")
+    st.markdown("* **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days.")
+    
+    st.markdown("### 3. M200 Strategy (Whale)")
+    st.markdown("* **Target Entry:** Wednesday.")
+    st.markdown("* **Debit Target:** `$7,500 - $8,500` per lot.")
+    st.markdown("* **Management:** Check P&L at **Day 14**.")
+    st.markdown("    * If Green > $200: Exit or Roll.")
+    st.markdown("    * If Red/Flat: HOLD. Do not exit in the 'Dip Valley' (Day 15-50).")
