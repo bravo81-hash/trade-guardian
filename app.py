@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v79.2 (Full Metrics Restoration)")
+st.info("✅ RUNNING VERSION: v80.0 (Lot Size Accuracy Fix)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -211,10 +211,10 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
-                # Lot Sizing
+                # Lot Sizing (ADJUSTED FOR ACCURACY)
                 lot_size = 1
                 if strat == '130/160':
-                    if debit > 11000: lot_size = 3
+                    if debit > 11000: lot_size = 3 # Raised from 10k to 11k to catch expensive 2-lots
                     elif debit > 6000: lot_size = 2
                 elif strat == '160/190':
                     if debit > 8000: lot_size = 2
@@ -666,9 +666,10 @@ with tab2:
                 strat = get_strategy(group, name)
                 debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                 
+                # Lot Sizing (ADJUSTED FOR ACCURACY)
                 lot_size = 1
                 if strat == '130/160':
-                    if debit > 10000: lot_size = 3
+                    if debit > 11000: lot_size = 3
                     elif debit > 6000: lot_size = 2
                 elif strat == '160/190':
                     if debit > 8000: lot_size = 2
@@ -856,4 +857,4 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v79.2")
+    st.caption("Allantis Trade Guardian v80.0")
