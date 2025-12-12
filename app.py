@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v80.0 (Complete: v79 Dashboard + v80 Fixes & Tents)")
+st.info("✅ RUNNING VERSION: v80.2 (Production Release | Full Feature Set)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -24,7 +24,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # 1. TRADES TABLE (Added 'link')
+    # 1. TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -44,7 +44,7 @@ def init_db():
                     notes TEXT
                 )''')
     
-    # 2. SNAPSHOTS TABLE (Added 'iv')
+    # 2. SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -59,7 +59,7 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
 
-    # 3. LEGS TABLE (New for Structure Viz)
+    # 3. LEGS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS legs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -72,7 +72,7 @@ def init_db():
                 
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     
-    # Migration: Add columns if missing in existing DB
+    # MIGRATIONS (Auto-Add Columns if missing)
     try: c.execute("ALTER TABLE trades ADD COLUMN link TEXT")
     except: pass
     try: c.execute("ALTER TABLE snapshots ADD COLUMN iv REAL")
@@ -112,6 +112,7 @@ def safe_fmt(val, fmt_str):
 
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
+    # Create stable ID by removing special chars from name
     safe_name = re.sub(r'[^a-zA-Z0-9]', '', str(name))[:15]
     return f"{safe_name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
@@ -155,7 +156,7 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (UPDATED) ---
+# --- SYNC ENGINE (Logic: Parents -> Context -> Legs) ---
 def sync_data(file_list, file_type, snapshot_date_override=None):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -165,6 +166,8 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
     
     count_new = 0
     count_update = 0
+    count_legs = 0
+    
     snap_date = snapshot_date_override if snapshot_date_override else datetime.now().date()
     
     for file in file_list:
@@ -174,34 +177,42 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 log.append(f"⚠️ Skipped {file.name} (Empty)")
                 continue
 
-            current_trade_id = None # Context for legs
+            # Context for legs (CSV usually lists Parent then Legs)
+            current_trade_id = None 
 
             for _, row in df.iterrows():
                 name = str(row.get('Name', ''))
+                if name in ['nan', '', 'Symbol']: continue
                 
-                # --- LEG PARSING ---
+                # --- CASE 1: LEG (Row starts with .) ---
                 if name.startswith('.'):
                     if current_trade_id:
                         try:
+                            # Try to parse leg details
                             qty = clean_num(row.get('Quantity', 0))
-                            match = re.search(r'([CP])(\d+)$', name)
+                            # Regex for OptionStrat format: .SPX[Date][Type][Strike] e.g., .SPX260417P6780
+                            # We just look for the last P or C followed by numbers
+                            match = re.search(r'([CP])(\d+\.?\d*)$', name)
                             if match:
                                 l_type = "Call" if match.group(1) == 'C' else "Put"
                                 strike = float(match.group(2))
+                                
+                                # Check duplicate
                                 c.execute("SELECT id FROM legs WHERE trade_id=? AND strike=? AND type=?", 
                                          (current_trade_id, strike, l_type))
                                 if not c.fetchone():
                                     c.execute("INSERT INTO legs (trade_id, symbol, quantity, strike, type) VALUES (?,?,?,?,?)",
                                              (current_trade_id, "SPX", qty, strike, l_type))
+                                    count_legs += 1
                         except: pass
-                    continue
-
-                if name in ['nan', '', 'Symbol']: continue
+                    continue # Done with leg row
                 
-                # --- TRADE PARSING ---
+                # --- CASE 2: PARENT TRADE ---
                 created = row.get('Created At', '')
-                try: start_dt = pd.to_datetime(created)
-                except: continue
+                try: 
+                    start_dt = pd.to_datetime(created)
+                except: 
+                    continue # Not a valid parent row if no date
                 
                 group = str(row.get('Group', ''))
                 strat = get_strategy(group, name)
@@ -212,8 +223,11 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
-                iv = clean_num(row.get('IV', 0))     # NEW
-                link = str(row.get('Link', ''))      # NEW
+                iv = clean_num(row.get('IV', 0))
+                
+                # Link Cleaning
+                raw_link = str(row.get('Link', ''))
+                link = raw_link if raw_link.startswith('http') else ''
                 
                 # Lot Logic
                 lot_size = 1
@@ -224,10 +238,11 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                 elif strat == 'M200' and debit > 12000: lot_size = 2
 
                 trade_id = generate_id(name, strat, start_dt)
-                current_trade_id = trade_id 
+                current_trade_id = trade_id # Set context for subsequent leg rows
+                
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # Date Logic
+                # Days Held Logic
                 exit_dt = None
                 if file_type == "History":
                     try: exit_dt = pd.to_datetime(row.get('Expiration'))
@@ -264,7 +279,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                             (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
                         count_update += 1
                         
-                # Snapshot
+                # Snapshot Logic (Active Only)
                 if file_type == "Active":
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, snap_date))
                     if not c.fetchone():
@@ -273,7 +288,7 @@ def sync_data(file_list, file_type, snapshot_date_override=None):
                             VALUES (?,?,?,?,?,?,?,?,?)''',
                             (trade_id, snap_date, pnl, days_held, theta, delta, gamma, vega, iv))
 
-            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
+            log.append(f"✅ {file.name}: {count_new} Trades, {count_legs} Legs")
             
         except Exception as e:
             log.append(f"❌ Error {file.name}: {str(e)}")
@@ -299,20 +314,24 @@ def load_data():
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes', 'link': 'Link'
         })
         
+        # Ensure Standard Columns
         for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Link']:
             if col not in df.columns: df[col] = 0.0 if col != 'Link' else ''
         
+        # Type Conversion
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
         df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
         df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
         df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
+        # Derived Metrics
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
+        # Grading Logic
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
             reason = "Standard"
@@ -330,7 +349,6 @@ def load_data():
             return pd.Series([grade, reason])
 
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
-        df['Latest'] = True
     return df
 
 def load_snapshots():
@@ -346,7 +364,7 @@ def load_snapshots():
         df = pd.read_sql(q, conn)
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
         
-        # CRITICAL FIX: Sort by date to prevent zigzag lines
+        # FIX: Sort by ID then Date to prevent line zig-zags
         df = df.sort_values(['trade_id', 'snapshot_date'])
         
         for c in ['pnl', 'days_held', 'theta', 'delta', 'gamma', 'vega', 'iv']:
@@ -387,7 +405,7 @@ st.sidebar.markdown("⬇️ *then...*")
 with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
     st.caption("Feed broker exports here.")
     st.markdown("**📅 Set Data Date**")
-    snap_date = st.date_input("File Date", datetime.now(), help="Change this if uploading yesterday's files.", label_visibility="collapsed")
+    snap_date = st.date_input("File Date", datetime.now(), label_visibility="collapsed")
     
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
@@ -464,7 +482,7 @@ with tab1:
         if active_df.empty:
             st.info("📭 No active trades in database. Go to Step 2 (Work) in the sidebar.")
         else:
-            # Yield Check
+            # Yield Warning
             port_yield = active_df['Daily Yield %'].mean()
             if port_yield < 0.10: st.sidebar.error(f"🚨 Yield Critical: {port_yield:.2f}%")
             elif port_yield < 0.15: st.sidebar.warning(f"⚠️ Yield Low: {port_yield:.2f}%")
@@ -478,29 +496,29 @@ with tab1:
             active_df['Action'] = act_list
             active_df['Signal_Type'] = sig_list
 
-            st.markdown("### 🏛️ Active Trades by Strategy")
-            strat_tabs = st.tabs(["📋 Strategy Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
+            st.markdown("### 🏛️ Active Trades")
+            strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
             
-            cols = ['Name', 'Link', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            # Columns to display
+            cols = ['Name', 'Link', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'IV']
 
             def render_tab(tab, strategy_name):
                 with tab:
                     subset = active_df if strategy_name == "Overview" else active_df[active_df['Strategy'] == strategy_name].copy()
                     if not subset.empty:
-                        # Action Center (Restored)
+                        # Action Center
                         urgent = subset[subset['Action'] != ""]
                         if not urgent.empty:
                             st.markdown(f"**🚨 Action Center ({len(urgent)})**")
                             action_lines = []
                             for _, row in urgent.iterrows():
                                 sig = row['Signal_Type']
-                                color_map = {"SUCCESS":"#4caf50", "ERROR":"#f44336", "WARNING":"#ff9800", "INFO":"#2196f3", "NONE":"#9e9e9e"}
-                                color = color_map.get(sig, "#9e9e9e")
+                                color = {"SUCCESS":"#4caf50", "ERROR":"#f44336", "WARNING":"#ff9800", "INFO":"#2196f3", "NONE":"#9e9e9e"}.get(sig, "#9e9e9e")
                                 action_lines.append(f"* <span style='color: {color}'>**{row['Name']}**: {row['Action']}</span>")
                             st.markdown("\n".join(action_lines), unsafe_allow_html=True)
                             st.divider()
 
-                        # Metrics (Restored)
+                        # Metrics
                         if strategy_name != "Overview":
                             bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                             target_disp = bench['pnl'] * regime_mult
@@ -510,7 +528,7 @@ with tab1:
                             c3.metric("Target Profit", f"${target_disp:,.0f}")
                             c4.metric("Avg Hold", f"{bench['dit']:.0f}d")
 
-                        # Summary Row Calculation (Restored)
+                        # Aggregations for dataframe
                         cols_to_sum = ['P&L', 'Debit', 'Theta', 'Delta', 'Gamma', 'Vega']
                         valid_sum_cols = [c for c in cols_to_sum if c in subset.columns]
                         sum_data = {c: [subset[c].sum()] for c in valid_sum_cols}
@@ -519,23 +537,21 @@ with tab1:
                         sum_data['Days Held'] = [subset['Days Held'].mean()]
                         sum_row = pd.DataFrame(sum_data)
                         
+                        # Fill missing cols for alignment
                         for c in cols:
                             if c not in sum_row.columns: sum_row[c] = 0.0 if c not in ['Name', 'Action', 'Grade', 'Link'] else ''
-                        
-                        # Add missing cols to subset
                         disp_sub = subset.copy()
                         for c in cols:
                             if c not in disp_sub.columns: disp_sub[c] = 0.0 if c not in ['Name', 'Action', 'Grade', 'Link'] else ''
                         
                         display_df = pd.concat([disp_sub[cols], sum_row[cols]], ignore_index=True)
 
-                        # DATAFRAME RENDER (with v79 Styling + v80 Link)
+                        # Styled Dataframe with Links
                         st.dataframe(
                             display_df.style
                             .format({
                                 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%",
-                                'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}",
-                                'Days Held': "{:.0f}"
+                                'Theta': "{:.1f}", 'Delta': "{:.1f}", 'IV': "{:.1f}%", 'Days Held': "{:.0f}"
                             })
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) 
                                            else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) 
@@ -551,10 +567,10 @@ with tab1:
                             },
                             use_container_width=True
                         )
-                    else: st.info("No active trades.")
+                    else: st.info("No active trades in this category.")
 
             with strat_tabs[0]:
-                # Portfolio Risk Metrics (Restored)
+                # Portfolio Metrics
                 with st.expander("📊 Portfolio Risk Metrics", expanded=True):
                     total_delta = active_df['Delta'].sum()
                     total_theta = active_df['Theta'].sum()
@@ -564,7 +580,7 @@ with tab1:
                     r2.metric("Daily Theta", f"${total_theta:,.0f}")
                     r3.metric("Capital at Risk", f"${total_cap:,.0f}")
                 
-                # Aggregation Table (Restored)
+                # Summary Table
                 strat_agg = active_df.groupby('Strategy').agg({
                     'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
                     'Name': 'count', 'Daily Yield %': 'mean' 
@@ -579,28 +595,19 @@ with tab1:
                     'Trend': ['-'], 'Target %': ['-']
                 })
                 final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
-                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
-                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Active Trades']
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']]
                 
-                def highlight_trend(val):
-                    if '🟢' in str(val): return 'color: green; font-weight: bold'
-                    if '🔴' in str(val): return 'color: red; font-weight: bold'
-                    return ''
-                def style_total(row):
-                    if row['Strategy'] == 'TOTAL': return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row)
-                    return [''] * len(row)
-
                 st.dataframe(
                     display_agg.style.format({
-                        'Total P&L': "${:,.0f}", 'Total Debit': "${:,.0f}",
-                        'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}",
-                        'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 'Target': lambda x: safe_fmt(x, "{:.2f}%")
-                    }).map(highlight_trend, subset=['Trend']).apply(style_total, axis=1),
+                        'P&L': "${:,.0f}", 'Debit': "${:,.0f}",
+                        'Theta': "{:,.0f}", 'Delta': "{:,.1f}",
+                        'Daily Yield %': "{:.2f}%", 'Target %': "{:.2f}%"
+                    }).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x['Strategy'] == 'TOTAL' else '' for _ in x], axis=1),
                     use_container_width=True
                 )
                 
-                render_tab(strat_tabs[0], "Overview") # Dummy call to init logic if needed, but mainly render others
-            
+                render_tab(strat_tabs[0], "Overview")
+
             render_tab(strat_tabs[1], "130/160")
             render_tab(strat_tabs[2], "160/190")
             render_tab(strat_tabs[3], "M200")
@@ -609,44 +616,49 @@ with tab1:
             st.download_button("📥 Download Active Trades CSV", csv, "active_snapshot.csv", "text/csv")
     else: st.info("Database Empty.")
 
-# 2. PROFIT TENTS (NEW FEATURE)
+# 2. PROFIT TENTS (New Feature)
 with tab2:
-    st.subheader("⛺ Trade Structure Visualization")
+    st.subheader("⛺ Structure Visualization")
     if not df.empty:
         active_df = df[df['Status'] == 'Active']
-        sel_trade = st.selectbox("Select Active Trade", active_df['Name'].unique())
-        
-        if sel_trade:
-            trade_row = active_df[active_df['Name'] == sel_trade].iloc[0]
-            legs = load_legs(trade_row['id'])
+        if not active_df.empty:
+            sel_trade = st.selectbox("Select Active Trade", active_df['Name'].unique())
             
-            if not legs.empty:
-                c1, c2 = st.columns([1, 3])
-                with c1:
-                    st.write("**Legs Identified:**")
-                    st.table(legs[['quantity', 'strike', 'type']])
-                with c2:
-                    # Estimate Tent
-                    strikes = sorted(legs['strike'].unique())
-                    min_s, max_s = min(strikes) * 0.95, max(strikes) * 1.05
-                    x = np.linspace(min_s, max_s, 200)
-                    y = np.zeros_like(x)
-                    
-                    for _, l in legs.iterrows():
-                        if l['type'] == 'Call': val = np.maximum(x - l['strike'], 0)
-                        else: val = np.maximum(l['strike'] - x, 0)
-                        y += (val * l['quantity'] * 100)
-                    
-                    # Offset by debit to show break-even roughly
-                    y -= trade_row['Debit']
-                    
-                    fig = px.line(x=x, y=y, title=f"Expiry Profit Tent (Est.): {sel_trade}")
-                    fig.add_hline(y=0, line_dash="dash", line_color="red")
-                    st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("No leg data found. Ensure your CSV has rows starting with .SPX")
+            if sel_trade:
+                trade_row = active_df[active_df['Name'] == sel_trade].iloc[0]
+                legs = load_legs(trade_row['id'])
+                
+                if not legs.empty:
+                    c1, c2 = st.columns([1, 3])
+                    with c1:
+                        st.write("**Legs Identified:**")
+                        st.table(legs[['quantity', 'strike', 'type']])
+                    with c2:
+                        # Estimate Tent
+                        strikes = sorted(legs['strike'].unique())
+                        min_s, max_s = min(strikes) * 0.95, max(strikes) * 1.05
+                        x = np.linspace(min_s, max_s, 200)
+                        y = np.zeros_like(x)
+                        
+                        for _, l in legs.iterrows():
+                            # Call: max(S - K, 0) | Put: max(K - S, 0)
+                            if l['type'] == 'Call': val = np.maximum(x - l['strike'], 0)
+                            else: val = np.maximum(l['strike'] - x, 0)
+                            y += (val * l['quantity'] * 100)
+                        
+                        # Offset by debit to show estimated PnL line at expiry relative to cost
+                        y -= trade_row['Debit']
+                        
+                        fig = px.line(x=x, y=y, title=f"Profit Tent (Estimate): {sel_trade}")
+                        fig.add_hline(y=0, line_dash="dash", line_color="red")
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No legs found for this trade. Ensure your CSV has rows starting with .SPX")
+        else: st.info("No active trades.")
     else: st.info("No active trades.")
 
-# 3. VALIDATOR (Restored Full Logic)
+# 3. VALIDATOR
 with tab3:
     st.markdown("### 🧪 Pre-Flight Audit")
     
@@ -698,7 +710,7 @@ with tab3:
             c2.metric("Total Debit", f"${debit:,.0f}")
             c3.metric("Debit/Lot", f"${debit_lot:,.0f}")
             
-            # Historical Context (Restored)
+            # Historical Search
             if not df.empty:
                 expired_df = df[df['Status'] == 'Expired']
                 similar = expired_df[
@@ -713,7 +725,7 @@ with tab3:
             elif "F" in grade: st.error(f"⛔ REJECT: {reason}")
             else: st.warning(f"⚠️ CHECK: {reason}")
 
-# 4. ANALYTICS (FULL SUITE RESTORED + FIXES)
+# 4. ANALYTICS
 with tab4:
     if not df.empty:
         # Date Filter
@@ -729,7 +741,7 @@ with tab4:
             
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
-        an1, an2, an3, an4, an5, an6 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "🔥 Heatmaps (3)", "🏷️ Tickers", "🧬 Lifecycle", "🧮 Greeks Lab"])
+        an1, an2, an3, an4, an5, an6 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", "🧬 Lifecycle", "🧮 Greeks Lab"])
         
         # 1. Equity
         with an1:
@@ -767,27 +779,27 @@ with tab4:
                 fig = px.histogram(expired_sub, x="P&L", color="Strategy", nbins=20, title="Distribution")
                 st.plotly_chart(fig, use_container_width=True)
                 
-        # 3. Heatmaps (Restored all 3)
+        # 3. Heatmaps
         with an3:
             if not expired_sub.empty:
-                # Type A: Monthly
+                st.markdown("##### 1. Monthly Seasonality")
                 expired_sub['Month'] = expired_sub['Exit Date'].dt.month_name()
                 expired_sub['Year'] = expired_sub['Exit Date'].dt.year
                 hm = expired_sub.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-                fig1 = px.density_heatmap(hm, x="Month", y="Year", z="P&L", text_auto=True, color_continuous_scale="RdBu", category_orders={"Month": months}, title="1. Monthly Seasonality")
+                fig1 = px.density_heatmap(hm, x="Month", y="Year", z="P&L", text_auto=True, color_continuous_scale="RdBu", category_orders={"Month": months})
                 st.plotly_chart(fig1, use_container_width=True)
                 
                 st.divider()
-                # Type B: DIT
-                fig2 = px.density_heatmap(expired_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", title="2. Duration Sweet Spot", color_continuous_scale="RdBu")
+                st.markdown("##### 2. Duration Sweet Spot")
+                fig2 = px.density_heatmap(expired_sub, x="Days Held", y="Strategy", z="P&L", histfunc="avg", color_continuous_scale="RdBu")
                 st.plotly_chart(fig2, use_container_width=True)
                 
                 st.divider()
-                # Type C: Day of Week
+                st.markdown("##### 3. Best Entry Day")
                 expired_sub['Day'] = expired_sub['Entry Date'].dt.day_name()
                 days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-                fig3 = px.density_heatmap(expired_sub, x="Day", y="Strategy", z="P&L", histfunc="avg", title="3. Best Entry Day", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                fig3 = px.density_heatmap(expired_sub, x="Day", y="Strategy", z="P&L", histfunc="avg", category_orders={"Day": days}, color_continuous_scale="RdBu")
                 st.plotly_chart(fig3, use_container_width=True)
                 
         # 4. Tickers
@@ -797,17 +809,18 @@ with tab4:
                 fig = px.bar(tick.head(15), x='P&L', y='Ticker', orientation='h', color='P&L', color_continuous_scale="RdBu", title="Top Performing Tickers")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # 5. Lifecycle (FIXED: Sorted + Markers)
+        # 5. Lifecycle
         with an5:
             snaps = load_snapshots()
             if not snaps.empty:
                 sel = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique(), key='lc_st')
                 sub = snaps[snaps['strategy'] == sel]
+                # FIX: Markers enabled ensures single data points (Day 1) are visible
                 fig = px.line(sub, x='days_held', y='pnl', color='name', line_group='trade_id', markers=True, title=f"Trade P&L Path: {sel}")
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.info("No snapshot data collected yet.")
+            else: st.info("No snapshot data collected yet. Sync active trades daily to build this graph.")
                 
-        # 6. Greeks Lab (FIXED: Zero filter removed + IV Added)
+        # 6. Greeks Lab
         with an6:
             snaps = load_snapshots()
             if not snaps.empty:
@@ -815,7 +828,7 @@ with tab4:
                 g_strat = c1.selectbox("Strategy", snaps['strategy'].unique(), key='gks')
                 g_met = c2.selectbox("Select Metric", ['theta', 'delta', 'gamma', 'vega', 'iv', 'pnl'], key='gkm')
                 
-                # The Fix: Drop NaNs but keep Zeros
+                # FIX: Removed the != 0 check, only dropping NaNs, allowing valid zeros
                 sub = snaps[snaps['strategy'] == g_strat].dropna(subset=[g_met])
                 
                 if not sub.empty:
@@ -849,7 +862,7 @@ with tab5:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v80.0 | Certified Stable")
+    st.caption("Allantis Trade Guardian v80.2 | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty: st.write(df)
