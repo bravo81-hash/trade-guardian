@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 import os
+import time
 from datetime import datetime
 import io
 
@@ -13,7 +14,7 @@ import io
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- APP CONSTANTS ---
-VER = "v80.1 (Greeks Lifecycle)"
+VER = "v80.2 (Fixed Excel Reader)"
 DB_NAME = "trade_guardian_v80.db"
 
 # --- CUSTOM CSS ---
@@ -44,7 +45,14 @@ st.markdown("""
 # --- DATABASE MANAGEMENT ---
 
 def get_db_connection():
-    return sqlite3.connect(DB_NAME)
+    """Robust connection with retry logic for locked DBs."""
+    retries = 5
+    for i in range(retries):
+        try:
+            return sqlite3.connect(DB_NAME, timeout=10)
+        except sqlite3.OperationalError:
+            if i == retries - 1: raise
+            time.sleep(0.1)
 
 def init_db():
     """Initialize DB and perform auto-migration if needed."""
@@ -91,21 +99,17 @@ def init_db():
                 )''')
 
     # 3. SCHEMA MIGRATION (Auto-Healing)
-    # Check if new columns exist in trades, if not, add them
     try:
         c.execute("SELECT rho FROM trades LIMIT 1")
     except sqlite3.OperationalError:
         st.toast("⚙️ Upgrading DB Schema: Adding Greek columns...", icon="🛠️")
-        try: c.execute("ALTER TABLE trades ADD COLUMN rho REAL")
-        except: pass
-        try: c.execute("ALTER TABLE trades ADD COLUMN iv REAL")
-        except: pass
-        try: c.execute("ALTER TABLE trades ADD COLUMN pop REAL")
-        except: pass
-        try: c.execute("ALTER TABLE trades ADD COLUMN ticker TEXT")
-        except: pass
+        for col in ['rho', 'iv', 'pop', 'ticker']:
+            try: c.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
+            except: pass
+            
+        # Fix ticker column type if it was added as REAL by mistake in loop above (it's TEXT)
+        # SQLite types are dynamic, so it largely doesn't matter, but good to be clean.
 
-    # Check snapshots table for greeks
     try:
         c.execute("SELECT theta FROM snapshots LIMIT 1")
     except sqlite3.OperationalError:
@@ -128,7 +132,7 @@ BASE_CONFIG = {
 # --- HELPER FUNCTIONS ---
 
 def clean_num(x):
-    if pd.isna(x) or x == '': return 0.0
+    if pd.isna(x) or str(x).strip() == '': return 0.0
     try:
         s = str(x).replace('$', '').replace(',', '').replace('%', '')
         return float(s)
@@ -146,46 +150,60 @@ def get_strategy_from_row(row):
 
 def estimate_lot_size(strategy, debit):
     """Estimate lots based on debit and strategy baselines."""
-    # Default costs per lot
-    cost_map = {
-        '130/160': 4000,
-        '160/190': 5200,
-        'M200': 8000
-    }
+    cost_map = {'130/160': 4000, '160/190': 5200, 'M200': 8000}
     base_cost = cost_map.get(strategy, 5000)
-    
-    # Logic: Round to nearest whole number
     if debit == 0: return 1
     lots = round(debit / base_cost)
     return int(max(1, lots))
 
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
-    # Create a deterministic hash/ID
     clean_name = "".join(e for e in str(name) if e.isalnum())
     return f"{strategy}_{d_str}_{clean_name}"[:50]
 
-# --- FILE PROCESSOR ---
+# --- FILE PROCESSOR (RESTORED EXCEL SUPPORT) ---
 
 def read_file_safely(file):
+    """Reads both CSV and Excel files robustly."""
     try:
-        # OptionStrat CSVs often have metadata rows. 
-        # We look for the header row starting with "Name" and "Total Return"
-        content = file.getvalue().decode("utf-8")
+        # A. Try Excel First (Best for .xlsx)
+        if file.name.endswith('.xlsx') or file.name.endswith('.xls'):
+            try:
+                # Load headerless first to find the "Name" row
+                df_raw = pd.read_excel(file, header=None, engine='openpyxl')
+                header_idx = -1
+                for i, row in df_raw.head(25).iterrows():
+                    row_str = " ".join(row.astype(str).values)
+                    if "Name" in row_str and "Total Return" in row_str:
+                        header_idx = i
+                        break
+                
+                if header_idx != -1:
+                    file.seek(0)
+                    df = pd.read_excel(file, header=header_idx, engine='openpyxl')
+                    # Filter out leg rows (start with dot)
+                    return df[~df['Name'].astype(str).str.startswith('.')]
+            except Exception as e:
+                # If it wasn't a real Excel file, fall through to CSV
+                pass
+
+        # B. CSV Fallback
+        file.seek(0)
+        content = file.getvalue().decode("utf-8", errors='replace')
         lines = content.split('\n')
         
         header_row_idx = 0
-        for i, line in enumerate(lines[:20]):
+        for i, line in enumerate(lines[:25]):
             if "Name" in line and "Total Return" in line:
                 header_row_idx = i
                 break
         
         file.seek(0)
         df = pd.read_csv(file, skiprows=header_row_idx)
-        # Filter out leg rows (usually start with .)
-        df = df[~df['Name'].astype(str).str.startswith('.')]
-        return df
+        return df[~df['Name'].astype(str).str.startswith('.')]
+
     except Exception as e:
+        st.error(f"Failed to read {file.name}: {e}")
         return None
 
 def sync_data(file_list, file_type):
@@ -208,9 +226,11 @@ def sync_data(file_list, file_type):
                 name = str(row.get('Name', ''))
                 if not name or name.lower() == 'nan': continue
                 
-                # Parse Dates
+                # Parse Dates (Handle NaT/Errors)
                 created = row.get('Created At', datetime.now())
-                try: start_dt = pd.to_datetime(created)
+                try: 
+                    start_dt = pd.to_datetime(created)
+                    if pd.isna(start_dt): start_dt = datetime.now()
                 except: start_dt = datetime.now()
                 
                 strat = get_strategy_from_row(row)
@@ -225,7 +245,7 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 rho = clean_num(row.get('Rho', 0))
-                iv = clean_num(row.get('IV', 0)) * 100 # usually decimal in csv
+                iv = clean_num(row.get('IV', 0)) * 100 
                 pop = clean_num(row.get('Chance', 0)) * 100 
                 
                 lot_size = estimate_lot_size(strat, debit)
@@ -237,7 +257,9 @@ def sync_data(file_list, file_type):
                 # Duration
                 exit_dt = None
                 if file_type == "History":
-                    try: exit_dt = pd.to_datetime(row.get('Expiration'))
+                    try: 
+                        exit_dt = pd.to_datetime(row.get('Expiration'))
+                        if pd.isna(exit_dt): exit_dt = datetime.now()
                     except: exit_dt = datetime.now()
                     days_held = (exit_dt - start_dt).days
                 else:
@@ -266,14 +288,11 @@ def sync_data(file_list, file_type):
                         (pnl, status, days_held, theta, delta, gamma, vega, rho, iv, pop, trade_id))
                     upd_cnt += 1
                 
-                # SNAPSHOT LOGIC (Only for Active trades to build history)
+                # SNAPSHOT LOGIC
                 if file_type == "Active":
                     today = datetime.now().date()
-                    # Check if snapshot exists for today
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
-                    snap_exist = c.fetchone()
-                    
-                    if not snap_exist:
+                    if not c.fetchone():
                         c.execute('''INSERT INTO snapshots 
                             (trade_id, snapshot_date, pnl, days_held, theta, delta, gamma, vega, rho, iv)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -282,7 +301,7 @@ def sync_data(file_list, file_type):
             log.append(f"✅ {file.name}: {new_cnt} New, {upd_cnt} Updated")
 
         except Exception as e:
-            log.append(f"❌ Error processing {file.name}: {e}")
+            log.append(f"❌ Error processing {file.name}: {str(e)}")
             
     conn.commit()
     conn.close()
@@ -296,7 +315,6 @@ def load_data():
         df['entry_date'] = pd.to_datetime(df['entry_date'])
         df['exit_date'] = pd.to_datetime(df['exit_date'])
         
-        # Derived
         df['ROI'] = (df['pnl'] / df['debit'].replace(0, 1)) * 100
         df['Daily Yield'] = df['ROI'] / df['days_held'].replace(0, 1)
         
@@ -337,10 +355,18 @@ with st.sidebar:
         if uploaded_db:
             with open(DB_NAME, "wb") as f: f.write(uploaded_db.getbuffer())
             st.success("Database restored!")
+            time.sleep(1)
             st.rerun()
             
-        with open(DB_NAME, "rb") as f:
-            st.download_button("💾 Download Backup", f, DB_NAME, "application/x-sqlite3")
+        if os.path.exists(DB_NAME):
+            with open(DB_NAME, "rb") as f:
+                st.download_button("💾 Download Backup", f, DB_NAME, "application/x-sqlite3")
+        
+        # Panic Button
+        if st.button("⚠️ Reset Database"):
+            if os.path.exists(DB_NAME): os.remove(DB_NAME)
+            st.warning("Database wiped. Please reload page.")
+            st.rerun()
 
     with st.expander("2. Sync OptionStrat Files", expanded=True):
         active_files = st.file_uploader("Active Trades (CSV/Excel)", accept_multiple_files=True, key="act")
@@ -353,6 +379,7 @@ with st.sidebar:
             for l in logs: st.write(l)
             if logs: 
                 st.success("Sync Complete!")
+                time.sleep(1)
                 st.rerun()
 
     st.divider()
@@ -496,70 +523,71 @@ with tab_lab:
         trades_list = df['name'].unique().tolist()
         sel_trade_name = st.selectbox("Select Trade to Analyze", trades_list)
         
-        # Get ID
-        sel_trade_id = df[df['name'] == sel_trade_name]['id'].iloc[0]
-        
-        # Load Snapshots
-        snaps = load_snapshots(sel_trade_id)
-        
-        if snaps.empty:
-            st.warning("No daily snapshots found for this trade yet. (Sync Active trades daily to build this view).")
-        else:
-            # Layout
-            g1, g2 = st.columns([3, 1])
+        if sel_trade_name:
+            # Get ID
+            sel_trade_id = df[df['name'] == sel_trade_name]['id'].iloc[0]
             
-            with g1:
-                # MAIN CHART: Dual Axis (PnL vs Delta/Theta)
-                fig = make_subplots(specs=[[{"secondary_y": True}]])
-                
-                # PnL Line
-                fig.add_trace(
-                    go.Scatter(x=snaps['days_held'], y=snaps['pnl'], name="P&L ($)", 
-                               line=dict(color='green', width=4), mode='lines+markers'),
-                    secondary_y=False
-                )
-                
-                # Greek Line (User selectable)
-                greek_view = st.radio("Overlay Greek:", ["Delta", "Theta", "IV", "Vega"], horizontal=True)
-                
-                color_map = {'Delta': 'blue', 'Theta': 'purple', 'IV': 'orange', 'Vega': 'red'}
-                col_name = greek_view.lower()
-                
-                if col_name in snaps.columns:
-                    fig.add_trace(
-                        go.Scatter(x=snaps['days_held'], y=snaps[col_name], name=greek_view,
-                                   line=dict(color=color_map[greek_view], dash='dot'), mode='lines'),
-                        secondary_y=True
-                    )
-                
-                fig.update_layout(title=f"PnL vs {greek_view} Evolution", xaxis_title="Days Held", height=500)
-                fig.update_yaxes(title_text="P&L ($)", secondary_y=False)
-                fig.update_yaxes(title_text=greek_view, secondary_y=True)
-                
-                st.plotly_chart(fig, use_container_width=True)
+            # Load Snapshots
+            snaps = load_snapshots(sel_trade_id)
             
-            with g2:
-                # Stats Card
-                curr = snaps.iloc[-1]
-                start = snaps.iloc[0]
+            if snaps.empty:
+                st.warning("No daily snapshots found for this trade yet. (Sync Active trades daily to build this view).")
+            else:
+                # Layout
+                g1, g2 = st.columns([3, 1])
                 
-                st.markdown("#### Evolution")
-                st.metric("Current P&L", f"${curr['pnl']:,.0f}", delta=f"{curr['pnl'] - start['pnl']:,.0f}")
-                
-                if 'iv' in snaps.columns:
-                    st.metric("IV Change", f"{curr['iv']:.1f}%", delta=f"{curr['iv'] - start['iv']:.1f}%", delta_color="inverse")
+                with g1:
+                    # MAIN CHART: Dual Axis (PnL vs Delta/Theta)
+                    fig = make_subplots(specs=[[{"secondary_y": True}]])
                     
-                st.metric("Theta Decay", f"{curr['theta']:.1f}", delta=f"{curr['theta'] - start['theta']:.1f}")
-
-            # Correlation Matrix
-            if len(snaps) > 5:
-                st.markdown("#### 🔗 Correlation Matrix (What drives PnL?)")
-                corr_cols = ['pnl', 'delta', 'theta', 'vega', 'iv']
-                avail_cols = [c for c in corr_cols if c in snaps.columns]
-                corr = snaps[avail_cols].corr()
+                    # PnL Line
+                    fig.add_trace(
+                        go.Scatter(x=snaps['days_held'], y=snaps['pnl'], name="P&L ($)", 
+                                   line=dict(color='green', width=4), mode='lines+markers'),
+                        secondary_y=False
+                    )
+                    
+                    # Greek Line (User selectable)
+                    greek_view = st.radio("Overlay Greek:", ["Delta", "Theta", "IV", "Vega"], horizontal=True)
+                    
+                    color_map = {'Delta': 'blue', 'Theta': 'purple', 'IV': 'orange', 'Vega': 'red'}
+                    col_name = greek_view.lower()
+                    
+                    if col_name in snaps.columns:
+                        fig.add_trace(
+                            go.Scatter(x=snaps['days_held'], y=snaps[col_name], name=greek_view,
+                                       line=dict(color=color_map[greek_view], dash='dot'), mode='lines'),
+                            secondary_y=True
+                        )
+                    
+                    fig.update_layout(title=f"PnL vs {greek_view} Evolution", xaxis_title="Days Held", height=500)
+                    fig.update_yaxes(title_text="P&L ($)", secondary_y=False)
+                    fig.update_yaxes(title_text=greek_view, secondary_y=True)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
                 
-                fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu', aspect="auto")
-                st.plotly_chart(fig_corr, use_container_width=True)
+                with g2:
+                    # Stats Card
+                    curr = snaps.iloc[-1]
+                    start = snaps.iloc[0]
+                    
+                    st.markdown("#### Evolution")
+                    st.metric("Current P&L", f"${curr['pnl']:,.0f}", delta=f"{curr['pnl'] - start['pnl']:,.0f}")
+                    
+                    if 'iv' in snaps.columns:
+                        st.metric("IV Change", f"{curr['iv']:.1f}%", delta=f"{curr['iv'] - start['iv']:.1f}%", delta_color="inverse")
+                        
+                    st.metric("Theta Decay", f"{curr['theta']:.1f}", delta=f"{curr['theta'] - start['theta']:.1f}")
+
+                # Correlation Matrix
+                if len(snaps) > 5:
+                    st.markdown("#### 🔗 Correlation Matrix (What drives PnL?)")
+                    corr_cols = ['pnl', 'delta', 'theta', 'vega', 'iv']
+                    avail_cols = [c for c in corr_cols if c in snaps.columns]
+                    corr = snaps[avail_cols].corr()
+                    
+                    fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu', aspect="auto")
+                    st.plotly_chart(fig_corr, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # TAB 4: ANALYTICS (Performance)
@@ -598,7 +626,7 @@ with tab_analytics:
             
             # 3. Strategy Comparison
             st.subheader("Performance by Strategy")
-            strat_ perf = expired.groupby('strategy').agg({
+            strat_perf = expired.groupby('strategy').agg({
                 'pnl': 'sum',
                 'id': 'count',
                 'ROI': 'mean',
