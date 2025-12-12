@@ -214,7 +214,7 @@ def sync_data(file_list, file_type):
                 # Lot Sizing
                 lot_size = 1
                 if strat == '130/160':
-                    if debit > 10000: lot_size = 3
+                    if debit > 11000: lot_size = 3
                     elif debit > 6000: lot_size = 2
                 elif strat == '160/190':
                     if debit > 8000: lot_size = 2
