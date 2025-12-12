@@ -224,7 +224,7 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# --- DATA LOADER (v68.0: Error Revealer) ---
+# --- DATA LOADER ---
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
@@ -282,8 +282,9 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
+        # THE FIX: Explicitly alias t.id to trade_id so chart matches
         q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
+        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id as trade_id
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
@@ -299,14 +300,14 @@ init_db()
 # --- SIDEBAR: WORKFLOW WIZARD ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 
-# STEP 1: RESTORE (v68.0: Smart Feedback)
+# STEP 1: RESTORE
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     st.caption("Doing this first avoids amnesia!")
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         
-        # Immediate Validation
+        # Validation
         conn = get_db_connection()
         count = pd.read_sql("SELECT count(*) as c FROM trades", conn).iloc[0]['c']
         conn.close()
@@ -316,7 +317,6 @@ with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
         else:
             st.success(f"Brain Loaded! Found {count} trades.")
         
-        # Session state hack to prevent infinite rerun loop
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
             st.rerun()
@@ -457,6 +457,7 @@ with tab1:
                     bench = benchmarks.get(strategy_name, BASE_CONFIG.get(strategy_name))
                     target_disp = bench['pnl'] * regime_mult
                     
+                    # ACTION CENTER
                     urgent = subset[subset['Action'] != ""]
                     if not urgent.empty:
                         st.markdown(f"**🚨 Action Center ({len(urgent)})**")
@@ -650,12 +651,11 @@ with tab2:
         except Exception as e:
             st.error(f"Error reading model file: {e}")
 
-# 3. ANALYTICS (NEW & IMPROVED)
+# 3. ANALYTICS (FIXED)
 with tab3:
     if not df.empty:
         st.subheader("📈 Analytics Suite")
         
-        # Date Filter
         if 'Entry Date' in df.columns:
             min_date = df['Entry Date'].min()
             max_date = df['Entry Date'].max()
@@ -672,17 +672,13 @@ with tab3:
 
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
-        # Sub-Tabs for clean layout
         an1, an2, an3, an4, an5 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "📅 Heatmap", "🏷️ Tickers", "🧬 Lifecycle"])
 
         # 1. EQUITY CURVE
         with an1:
             if not expired_sub.empty:
-                # Sort by Exit Date for timeline
                 ec_df = expired_sub.sort_values("Exit Date").copy()
                 ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
-                
-                # Drawdown Calc
                 ec_df['Peak'] = ec_df['Cumulative P&L'].cummax()
                 ec_df['Drawdown'] = ec_df['Cumulative P&L'] - ec_df['Peak']
                 max_dd = ec_df['Drawdown'].min()
@@ -699,7 +695,6 @@ with tab3:
         # 2. EXPECTANCY
         with an2:
             if not expired_sub.empty:
-                # Metrics
                 wins = expired_sub[expired_sub['P&L'] > 0]
                 losses = expired_sub[expired_sub['P&L'] <= 0]
                 
@@ -714,7 +709,6 @@ with tab3:
                 c3.metric("Avg Win", f"${avg_win:,.0f}")
                 c4.metric("Avg Loss", f"${avg_loss:,.0f}")
                 
-                # Chart
                 st.markdown("##### Win/Loss Distribution")
                 fig = px.histogram(expired_sub, x="P&L", color="Strategy", nbins=20, title="Distribution of Trade Outcomes")
                 st.plotly_chart(fig, use_container_width=True)
@@ -726,10 +720,7 @@ with tab3:
                 hm_df['Year'] = hm_df['Exit Date'].dt.year
                 hm_df['Month'] = hm_df['Exit Date'].dt.month_name()
                 
-                # Group
                 hm_grp = hm_df.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
-                
-                # Sort months correctly
                 month_order = ['January', 'February', 'March', 'April', 'May', 'June', 
                                'July', 'August', 'September', 'October', 'November', 'December']
                 
@@ -746,27 +737,25 @@ with tab3:
         with an4:
             if not expired_sub.empty:
                 tick_grp = expired_sub.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False)
-                # Filter out UNKNOWN if needed, but keeping for debug
                 fig = px.bar(tick_grp.head(15), x='P&L', y='Ticker', orientation='h', 
                              color='P&L', color_continuous_scale="RdBu",
                              title="Top Performing Tickers")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # 5. LIFECYCLE (SNAPSHOTS)
+        # 5. LIFECYCLE (SNAPSHOTS) - FIXED!
         with an5:
             snaps = load_snapshots()
             if not snaps.empty:
-                # Filter snaps by strategy to avoid mess
                 sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique())
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
                 fig = px.line(
-                    strat_snaps, x='days_held', y='pnl', color='trade_id',
+                    strat_snaps, x='days_held', y='pnl', color='name',  # Using Name instead of ID for better legend
                     title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
                     labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
                     hover_data=['name']
                 )
-                fig.update_layout(showlegend=False) # Too many legends usually
+                fig.update_layout(showlegend=True)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No snapshot data collected yet. (This builds up over time as you Sync active trades daily).")
@@ -796,7 +785,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v68.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v69.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
