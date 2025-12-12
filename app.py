@@ -12,18 +12,19 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v76.0 (Fixed Greeks & Lifecycle)")
+st.info("✅ RUNNING VERSION: v77.0 (Verbose Edition - Time Machine & Greeks)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE ENGINE ---
-DB_NAME = "trade_guardian_v4.db"
+# Switched to v5 to support Greek Snapshots
+DB_NAME = "trade_guardian_v5.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # TRADES TABLE
+    # TRADES TABLE (Master Record)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -42,13 +43,18 @@ def init_db():
                     notes TEXT
                 )''')
     
-    # SNAPSHOTS TABLE
+    # SNAPSHOTS TABLE (Daily History)
+    # UPDATED in v77: Now stores Greeks for every day!
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
                     snapshot_date DATE,
                     pnl REAL,
                     days_held INTEGER,
+                    theta REAL,
+                    delta REAL,
+                    gamma REAL,
+                    vega REAL,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
                 
@@ -129,8 +135,8 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE ---
-def sync_data(file_list, file_type):
+# --- SYNC ENGINE (UPDATED FOR v77) ---
+def sync_data(file_list, file_type, snapshot_date_override=None):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
     
@@ -140,6 +146,12 @@ def sync_data(file_list, file_type):
     count_new = 0
     count_update = 0
     
+    # v77: Determine the "Snapshot Date" (Today or User Override)
+    if snapshot_date_override:
+        snap_date = snapshot_date_override
+    else:
+        snap_date = datetime.now().date()
+    
     for file in file_list:
         try:
             df = read_file_safely(file)
@@ -148,6 +160,7 @@ def sync_data(file_list, file_type):
                 continue
 
             for _, row in df.iterrows():
+                # 1. Validation
                 name = str(row.get('Name', ''))
                 if name.startswith('.') or name in ['nan', '', 'Symbol']: continue
                 
@@ -155,6 +168,7 @@ def sync_data(file_list, file_type):
                 try: start_dt = pd.to_datetime(created)
                 except: continue
                 
+                # 2. Extract Data
                 group = str(row.get('Group', ''))
                 strat = get_strategy(group, name)
                 
@@ -165,6 +179,7 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
+                # Lot Size Logic
                 lot_size = 1
                 if strat == '130/160' and debit > 6000: lot_size = 2
                 elif strat == '130/160' and debit > 10000: lot_size = 3
@@ -174,6 +189,7 @@ def sync_data(file_list, file_type):
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
+                # 3. Date Logic (v77 Fix: Time Machine)
                 exit_dt = None
                 days_held = 1
                 
@@ -183,14 +199,18 @@ def sync_data(file_list, file_type):
                         days_held = (exit_dt - start_dt).days
                     except: days_held = 1
                 else:
-                    days_held = (datetime.now() - start_dt).days
+                    # Active: Calculate days based on the SNAPSHOT DATE, not today!
+                    # This is what fixes the "Time Compression" bug.
+                    days_held = (pd.to_datetime(snap_date) - start_dt).days
                 
                 if days_held < 1: days_held = 1
                 
+                # 4. DB Upsert
                 c.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
                 if existing is None:
+                    # Insert New
                     c.execute('''INSERT INTO trades 
                         (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -199,6 +219,7 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, ""))
                     count_new += 1
                 else:
+                    # Update Existing
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
@@ -212,12 +233,15 @@ def sync_data(file_list, file_type):
                             (pnl, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                         
+                # 5. Snapshot (Active Only) - v77: SAVES GREEKS
                 if file_type == "Active":
-                    today = datetime.now().date()
-                    c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
+                    # Check if snapshot exists for this specific trade AND date
+                    c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, snap_date))
                     if not c.fetchone():
-                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (?,?,?,?)",
-                                  (trade_id, today, pnl, days_held))
+                        c.execute('''INSERT INTO snapshots 
+                            (trade_id, snapshot_date, pnl, days_held, theta, delta, gamma, vega) 
+                            VALUES (?,?,?,?,?,?,?,?)''',
+                            (trade_id, snap_date, pnl, days_held, theta, delta, gamma, vega))
 
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
             
@@ -228,7 +252,7 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# --- DATA LOADER (ROBUST VERSION) ---
+# --- DATA LOADER (ROBUST) ---
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
@@ -240,7 +264,7 @@ def load_data():
     finally: conn.close()
     
     if not df.empty:
-        # 1. RENAME COLUMNS TO MATCH VISUALS (Title Case)
+        # Standardize Columns
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -248,29 +272,26 @@ def load_data():
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes'
         })
         
-        # 2. ENSURE MISSING COLUMNS EXIST (Safety)
+        # Ensure Columns
         for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size']:
             if col not in df.columns:
                 df[col] = 0.0
         
-        # 3. FIX TYPES (Crucial for Charts)
+        # Fix Types
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
         df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
         df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
         df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
-        # 4. CALCULATE DERIVED METRICS
-        # Note: lot_size is still lowercase from DB because we didn't rename it above
+        # Metrics
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
-        
-        # Prevent division by zero
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # 5. GRADING
+        # Grading
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
             reason = "Standard"
@@ -296,16 +317,21 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
+        # UPDATED QUERY: Fetch Greeks too!
         q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
+        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.gamma, s.vega,
+               t.strategy, t.name, t.id
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
         df = pd.read_sql(q, conn)
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
-        # Force numeric
-        df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
-        df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
+        
+        # Force numeric types
+        cols = ['pnl', 'days_held', 'theta', 'delta', 'gamma', 'vega']
+        for c in cols:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
         return df
     except: return pd.DataFrame()
     finally: conn.close()
@@ -313,10 +339,10 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: WORKFLOW WIZARD ---
+# --- SIDEBAR: TIME MACHINE WORKFLOW ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 
-# STEP 1: RESTORE
+# 1. RESTORE
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     st.caption("Doing this first avoids amnesia!")
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
@@ -341,16 +367,23 @@ with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
 
 st.sidebar.markdown("⬇️ *then...*")
 
-# STEP 2: SYNC
+# 2. SYNC (TIME MACHINE ENABLED)
 with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
-    st.caption("Feed today's broker exports.")
+    st.caption("Feed broker exports here.")
+    
+    # THE TIME MACHINE WIDGET
+    st.markdown("**📅 Set Data Date**")
+    snap_date = st.date_input("File Date", datetime.now(), 
+                              help="IMPORTANT: If uploading old files, set this to the date those files were generated. If uploading today's files, leave as Today.",
+                              label_visibility="collapsed")
+    
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
     
     if st.button("🔄 Process New Data"):
         logs = []
-        if active_up: logs.extend(sync_data(active_up, "Active"))
-        if history_up: logs.extend(sync_data(history_up, "History"))
+        if active_up: logs.extend(sync_data(active_up, "Active", snap_date))
+        if history_up: logs.extend(sync_data(history_up, "History", snap_date))
         
         if logs:
             for l in logs: st.write(l)
@@ -359,11 +392,11 @@ with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
 
 st.sidebar.markdown("⬇️ *finally...*")
 
-# STEP 3: BACKUP
+# 3. BACKUP
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     st.caption("Save state before leaving.")
     with open(DB_NAME, "rb") as f:
-        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
+        st.download_button("💾 Save Database File", f, "trade_guardian_v5.db", "application/x-sqlite3")
 
 st.sidebar.divider()
 
@@ -670,7 +703,7 @@ with tab2:
         except Exception as e:
             st.error(f"Error reading model file: {e}")
 
-# 3. ANALYTICS (FULL SUITE WITH GREEKS & HEATMAPS)
+# 3. ANALYTICS (FULL SUITE)
 with tab3:
     if not df.empty:
         st.subheader("📈 Analytics Suite")
@@ -692,7 +725,7 @@ with tab3:
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
         # Tabs for analytics
-        an1, an2, an3, an4, an5, an6 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "🔥 Heatmaps (3)", "🏷️ Tickers", "🧬 Lifecycle", "🧮 Greeks Lab"])
+        an1, an2, an3, an4, an5, an6 = st.tabs(["🌊 Equity Curve", "🎯 Expectancy", "🔥 Heatmaps (3)", "🏷️ Tickers", "🧬 Lifecycle (P&L)", "🧮 Greeks Path"])
 
         # 1. EQUITY CURVE
         with an1:
@@ -773,57 +806,47 @@ with tab3:
                              title="Top Performing Tickers")
                 st.plotly_chart(fig, use_container_width=True)
 
-        # 5. LIFECYCLE (SNAPSHOTS) - FIXED!
+        # 5. LIFECYCLE (SNAPSHOTS)
         with an5:
             snaps = load_snapshots()
             if not snaps.empty:
-                # Check if we have enough data points to plot
-                max_days = snaps['days_held'].max()
-                
-                sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique())
+                sel_strat = st.selectbox("Select Strategy to Trace", snaps['strategy'].unique(), key='lc_strat')
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
-                if max_days < 2:
-                    st.warning("⚠️ Not enough history to draw lines yet. Showing dots instead.")
-                    # Fallback to scatter if only 1 day of data
-                    fig = px.scatter(
-                        strat_snaps, x='days_held', y='pnl', 
-                        color='name', 
-                        title=f"Trade Lifecycle: {sel_strat} (Single Day Snapshot)",
-                        hover_data=['name']
-                    )
-                else:
-                    # Full Line Chart
-                    fig = px.line(
-                        strat_snaps, x='days_held', y='pnl', 
-                        color='name', 
-                        line_group='id',
-                        title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
-                        labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
-                        hover_data=['name']
-                    )
-                
+                fig = px.line(
+                    strat_snaps, x='days_held', y='pnl', 
+                    color='name', # Color by Name
+                    line_group='id', # Separate lines by ID
+                    title=f"Trade Lifecycle: {sel_strat} (P&L Path)",
+                    labels={'days_held': 'Days Since Entry', 'pnl': 'P&L ($)'},
+                    hover_data=['name']
+                )
                 fig.update_layout(showlegend=True)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No snapshot data collected yet. (This builds up over time as you Sync active trades daily).")
 
-        # 6. GREEKS LAB (FIXED - NO DEPENDENCIES)
+        # 6. GREEKS PATH (NEW v77)
         with an6:
-            if not df.empty:
-                st.markdown("##### 🔬 Greek Exposure Analysis (All Trades)")
-                g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'])
-                # Filter out zero values
-                valid_greeks = df[df[g_col] != 0]
-                if not valid_greeks.empty:
-                    # REMOVED trendline='ols' to fix ModuleNotFoundError
-                    fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', 
-                                     title=f"Correlation: {g_col} vs P&L", hover_data=['Name'])
+            snaps = load_snapshots()
+            if not snaps.empty:
+                st.markdown("##### 🔬 Track Daily Greek Exposure")
+                c1, c2 = st.columns(2)
+                g_strat = c1.selectbox("Strategy", snaps['strategy'].unique(), key='gp_strat')
+                g_metric = c2.selectbox("Select Metric", ['theta', 'delta', 'gamma', 'vega', 'pnl'], key='gp_met')
+                
+                sub_snaps = snaps[snaps['strategy'] == g_strat]
+                # Filter out zero values which imply missing data
+                sub_snaps = sub_snaps[sub_snaps[g_metric] != 0]
+                
+                if not sub_snaps.empty:
+                    fig = px.line(sub_snaps, x='days_held', y=g_metric, color='name', line_group='id',
+                                  title=f"Evolution of {g_metric.title()} over Time", markers=True)
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning(f"No non-zero data found for {g_col}.")
+                    st.warning("No Greek data found in snapshots yet (Requires v77.0+ Syncs)")
             else:
-                st.info("Upload data to see Greek analysis.")
+                st.info("Sync daily to build Greek history.")
 
 # 4. RULE BOOK
 with tab4:
@@ -850,7 +873,7 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v76.0 Hybrid | Certified Stable")
+    st.caption("Allantis Trade Guardian v77.0 Hybrid | Certified Stable")
 
 with st.expander("🕵️‍♂️ Debugger (Raw DB)"):
     if not df.empty:
