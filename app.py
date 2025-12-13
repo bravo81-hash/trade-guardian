@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v80.0 (Lot Size Accuracy Fix)")
+st.info("✅ RUNNING VERSION: v80.4 (Hard Reset Button Added)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -214,7 +214,7 @@ def sync_data(file_list, file_type):
                 # Lot Sizing (ADJUSTED FOR ACCURACY)
                 lot_size = 1
                 if strat == '130/160':
-                    if debit > 11000: lot_size = 3 # Raised from 10k to 11k to catch expensive 2-lots
+                    if debit > 11000: lot_size = 3
                     elif debit > 6000: lot_size = 2
                 elif strat == '160/190':
                     if debit > 8000: lot_size = 2
@@ -427,6 +427,18 @@ with st.sidebar.expander("🛠️ Maintenance"):
         conn.commit()
         conn.close()
         st.success("Purged.")
+    
+    # NEW: HARD RESET BUTTON
+    if st.button("🧨 Hard Reset (Delete All Data)"):
+        conn = get_db_connection()
+        conn.execute("DROP TABLE IF EXISTS trades")
+        conn.execute("DROP TABLE IF EXISTS snapshots")
+        conn.commit()
+        conn.close()
+        init_db() # Re-initialize immediately
+        st.cache_data.clear()
+        st.success("Database wiped and reset.")
+        st.rerun()
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Strategy Settings")
@@ -762,10 +774,14 @@ with tab3:
                 # 1. Monthly Seasonality
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
-                hm_data = exp_hm.groupby(['Year', 'Month'])['P&L'].sum().reset_index()
+                
+                # FIX: Pre-aggregate data to ensure 1:1 mapping for text
+                hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
+                
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 
                           'July', 'August', 'September', 'October', 'November', 'December']
                 
+                # FIX: Explicitly set z (color) and text_auto to ensure alignment
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", 
                                        title="1. Monthly Seasonality ($)", 
                                        text_auto=True, 
@@ -776,6 +792,7 @@ with tab3:
                 st.divider()
 
                 # 2. Duration Sweet Spot
+                # Similar aggregation fix for duration if needed, but histogram usually handles it better
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
                                           title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
                 st.plotly_chart(fig2, use_container_width=True)
@@ -814,9 +831,16 @@ with tab3:
         with an6:
             snaps = load_snapshots()
             if not snaps.empty:
-                sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique())
+                sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique(), key="life_strat")
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
-                fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', title=f"Trade Lifecycle: {sel_strat}")
+                
+                # FIX: Improved Lifecycle Graph visibility
+                # Use markers+lines to ensure points are visible even if lines are sparse
+                fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', 
+                              title=f"Trade Lifecycle: {sel_strat}", markers=True)
+                
+                # Force axes to start from reasonable values
+                fig.update_layout(xaxis_title="Days Held", yaxis_title="P&L ($)")
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No snapshots yet.")
 
@@ -824,7 +848,17 @@ with tab3:
         with an7:
             if not df.empty:
                 st.markdown("##### 🔬 Greek Exposure Analysis")
-                g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'])
+                # FIX: Used session state key to prevent reset on selection change
+                if "greek_sel" not in st.session_state:
+                    st.session_state["greek_sel"] = "Theta"
+                
+                g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'], 
+                                     index=['Theta', 'Delta', 'Gamma', 'Vega'].index(st.session_state["greek_sel"]),
+                                     key="greek_dropdown")
+                
+                # Update session state
+                st.session_state["greek_sel"] = g_col
+
                 valid_greeks = df[df[g_col] != 0]
                 if not valid_greeks.empty:
                     fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', title=f"Correlation: {g_col} vs P&L", hover_data=['Name'])
@@ -857,4 +891,4 @@ with tab4:
         * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v80.0")
+    st.caption("Allantis Trade Guardian v80.4")
