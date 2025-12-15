@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v80.4 (Hard Reset Button Added)")
+st.info("✅ RUNNING VERSION: v80.6 (Theta/Capital Efficiency Metric)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -341,6 +341,10 @@ def load_data():
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
+        
+        # NEW METRIC: Theta / Capital %
+        df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
+        
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
         def get_grade(row):
@@ -524,12 +528,13 @@ with tab1:
             # --- 2. MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
                 st.caption("Edit 'Notes' and 'Tags', then click Save.")
-                display_cols = ['id', 'Name', 'Strategy', 'Status', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
+                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
                     "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
+                    "Theta/Cap %": st.column_config.NumberColumn("Theta/Cap %", format="%.2f%%", disabled=True),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
@@ -609,7 +614,7 @@ with tab1:
                 )
 
             # STRATEGY SPECIFIC TABS
-            cols = ['Name', 'Action', 'Grade', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -626,6 +631,7 @@ with tab1:
                     if not subset.empty:
                         sum_row = pd.DataFrame({
                             'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
+                            'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Days Held': [subset['Days Held'].mean()],
@@ -635,9 +641,10 @@ with tab1:
                         display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
                         st.dataframe(
                             display_df.style
-                            .format({'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
+                            .format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else 'background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) else '', subset=['Action'])
                             .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else 'color: #842029; font-weight: bold' if 'F' in str(v) else '', subset=['Grade'])
+                            .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else '', subset=['Theta/Cap %'])
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
@@ -729,7 +736,7 @@ with tab3:
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
         # RESTORED: Tickers & Greeks
-        an1, an2, an3, an4, an5, an6, an7 = st.tabs(["🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab"])
+        an1, an2, an3, an4, an5, an6, an7, an8 = st.tabs(["🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab", "⚙️ Efficiency"])
 
         with an1:
             if not expired_sub.empty:
@@ -865,30 +872,58 @@ with tab3:
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.warning(f"No non-zero data for {g_col}.")
             else: st.info("Upload data.")
+            
+        # NEW: Efficiency Analytics
+        with an8:
+            if not df.empty:
+                st.markdown("##### ⚙️ Capital Efficiency (Theta/Cap %)")
+                st.caption("Are your active trades 'working hard' (High Ratio) or 'lazy' (Low Ratio)?")
+                active_only = df[df['Status'] == 'Active']
+                if not active_only.empty:
+                    fig = px.scatter(active_only, x='Days Held', y='Theta/Cap %', color='Strategy', size='Debit',
+                                     title="Efficiency over Time (Bubble Size = Capital at Risk)", hover_data=['Name'])
+                    st.plotly_chart(fig, use_container_width=True)
+                else: st.info("No active trades.")
 
-# 4. RULE BOOK (RESTORED DETAILED VERSION)
+# 4. RULE BOOK (UPDATED WITH AUDIT INSIGHTS)
 with tab4:
     st.markdown("""
-    # 📖 Trading Constitution
-    
-    ### 1. 130/160 Strategy (Income Engine)
-    * **Target Entry:** Monday.
+    # 📖 The Trader's Constitution
+    *Refined by Data Audit & Behavioral Analysis*
+
+    ### 1. 130/160 Strategy (Income Discipline)
+    * **Role:** Income Engine. Extracts time decay (Theta).
+    * **Entry:** Monday/Tuesday (Best liquidity/IV fit).
     * **Debit Target:** `$3,500 - $4,500` per lot.
-    * **Stop Rule:** Never pay > `$4,800` per lot.
-    * **Management:** Kill if trade is **25 days old** and profit is flat/negative.
+        * *Stop Rule:* Never pay > `$4,800` per lot.
+    * **Management:** **Time Limit Rule.**
+        * Kill if trade is **25 days old** and P&L is flat/negative.
+        * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
     
-    ### 2. 160/190 Strategy (Compounder)
-    * **Target Entry:** Friday.
-    * **Debit Target:** `~$5,200` per lot.
-    * **Sizing:** Trade **1 Lot** (Scaling to 2 lots reduces ROI).
-    * **Exit:** Hold for **40-50 Days**. Do not touch in first 30 days.
+    ### 2. 160/190 Strategy (Patience Training)
+    * **Role:** Compounder. Expectancy focused.
+    * **Entry:** Friday (Captures weekend decay start).
+    * **Debit Target:** `~$5,200` per lot (Market may offer ~$4.5k - this is a bargain).
+    * **Sizing:** Trade **1 Lot**.
+        * *Nuance:* Scaling to 2 lots reduces *ROI %* but increases *Total Dollar Expectancy*. Only scale if variance-tolerant.
+    * **Exit:** Hold for **40-50 Days**. 
+    * **Golden Rule:** **Do not touch in first 30 days.** Early interference statistically worsens outcomes.
     
-    ### 3. M200 Strategy (Whale)
-    * **Target Entry:** Wednesday.
+    ### 3. M200 Strategy (Emotional Mastery)
+    * **Role:** Whale. Variance-tolerant capital deployment.
+    * **Entry:** Wednesday.
     * **Debit Target:** `$7,500 - $8,500` per lot.
-    * **Management:** Check P&L at **Day 14**.
-        * If Green > $200: Exit or Roll.
-        * If Red/Flat: HOLD. Do not exit in the "Dip Valley" (Day 15-50).
+    * **The "Dip Valley":**
+        * P&L often looks worst between Day 15–40. This is structural.
+        * **Management:** Check at **Day 14**.
+            * If Green > $200: Option to Exit/Roll.
+            * If Red/Flat: **HOLD.** Do not panic exit in the Valley. Wait for volatility to revert.
+    
+    ---
+    ### 🛡️ Universal Execution Gates
+    1.  **Volatility Gate:** Check VIX before entry. Ideal: 14–22. Skip if VIX exploded >10% in last 48h.
+    2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
+    3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v80.4")
+    st.caption("Allantis Trade Guardian v80.6 | Certified Stable & Audited")
