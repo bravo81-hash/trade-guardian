@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v80.6 (Theta/Capital Efficiency Metric)")
+st.info("✅ RUNNING VERSION: v81.0 (SMSF Strategy + Audited Rules)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -83,14 +83,17 @@ def get_db_connection():
 BASE_CONFIG = {
     '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
     '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
-    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41}
+    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41},
+    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40}  # Placeholder defaults for SMSF
 }
 
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name, trade_name=""):
     g = str(group_name).upper()
     n = str(trade_name).upper()
-    if "M200" in g or "M200" in n: return "M200"
+    # Check for SMSF first to avoid confusion if names overlap
+    if "SMSF" in g or "SMSF" in n: return "SMSF"
+    elif "M200" in g or "M200" in n: return "M200"
     elif "160/190" in g or "160/190" in n: return "160/190"
     elif "130/160" in g or "130/160" in n: return "130/160"
     return "Other"
@@ -117,7 +120,7 @@ def extract_ticker(name):
         parts = str(name).split(' ')
         if parts:
             ticker = parts[0].replace('.', '').upper()
-            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL']:
+            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']:
                 return "UNKNOWN"
             return ticker
         return "UNKNOWN"
@@ -211,7 +214,7 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
-                # Lot Sizing (ADJUSTED FOR ACCURACY)
+                # Lot Sizing (ADJUSTED FOR ACCURACY + SMSF)
                 lot_size = 1
                 if strat == '130/160':
                     if debit > 11000: lot_size = 3
@@ -220,6 +223,9 @@ def sync_data(file_list, file_type):
                     if debit > 8000: lot_size = 2
                 elif strat == 'M200':
                     if debit > 12000: lot_size = 2
+                elif strat == 'SMSF':
+                    # Default logic for SMSF until specific rules are provided
+                    if debit > 12000: lot_size = 2 
 
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
@@ -361,6 +367,10 @@ def load_data():
             elif s == 'M200':
                 if 7500 <= d <= 8500: grade="A"; reason="Perfect Entry"
                 else: grade="B"; reason="Variance"
+            elif s == 'SMSF':
+                # Basic grading for SMSF until rules defined
+                if d > 15000: grade="B"; reason="High Debit" 
+                else: grade="A"; reason="Standard"
             return pd.Series([grade, reason])
 
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
@@ -466,6 +476,10 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
         elif strat == 'M200':
             if 12 <= days_held <= 16:
                 return ("DAY 14 CHECK (Green)", "SUCCESS") if pnl > 200 else ("DAY 14 CHECK (Red)", "WARNING")
+        elif strat == 'SMSF':
+            # Basic SMSF signal until rules provided
+            if pnl > 1000: return "PROFIT CHECK", "SUCCESS"
+            
     return "", "NONE"
 
 # --- MAIN APP ---
@@ -559,7 +573,8 @@ with tab1:
 
             # --- 3. DETAILED STRATEGY BREAKDOWN ---
             st.markdown("### 🏛️ Strategy Performance")
-            strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200"])
+            # ADDED SMSF TAB
+            strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200", "💼 SMSF"])
 
             # OVERVIEW TAB
             with strat_tabs[0]:
@@ -653,6 +668,7 @@ with tab1:
             render_tab(strat_tabs[1], '130/160')
             render_tab(strat_tabs[2], '160/190')
             render_tab(strat_tabs[3], 'M200')
+            render_tab(strat_tabs[4], 'SMSF') # Added
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
@@ -672,6 +688,7 @@ with tab2:
         | **160/190** | **C** | `> $5,500` | ⚠️ **Expensive** (Reduces ROI efficiency) |
         | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** "Whale" sizing |
         | **M200** | **B** | Any other price | ⚠️ **Variance** from mean |
+        | **SMSF** | **A** | `< $15,000` | ✅ **Standard** |
         """)
         
     model_file = st.file_uploader("Upload Model File", key="mod")
@@ -694,6 +711,8 @@ with tab2:
                     if debit > 8000: lot_size = 2
                 elif strat == 'M200':
                     if debit > 12000: lot_size = 2
+                elif strat == 'SMSF':
+                    if debit > 12000: lot_size = 2
                 
                 debit_lot = debit / max(1, lot_size)
                 
@@ -708,6 +727,9 @@ with tab2:
                 elif strat == 'M200':
                     if 7500 <= debit_lot <= 8500: grade, reason = "A", "Perfect Entry"
                     else: grade, reason = "B", "Variance"
+                elif strat == 'SMSF':
+                    if debit_lot > 15000: grade, reason = "B", "High Debit"
+                    else: grade, reason = "A", "Standard"
 
                 st.divider()
                 st.subheader(f"Audit: {name}")
@@ -899,6 +921,7 @@ with tab4:
     * **Management:** **Time Limit Rule.**
         * Kill if trade is **25 days old** and P&L is flat/negative.
         * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
+    * **Efficiency Check:** ROI-focused. Requires high velocity.
     
     ### 2. 160/190 Strategy (Patience Training)
     * **Role:** Compounder. Expectancy focused.
@@ -916,14 +939,19 @@ with tab4:
     * **The "Dip Valley":**
         * P&L often looks worst between Day 15–40. This is structural.
         * **Management:** Check at **Day 14**.
-            * If Green > $200: Option to Exit/Roll.
+            * Check **Greeks & VIX**, not just P&L.
             * If Red/Flat: **HOLD.** Do not panic exit in the Valley. Wait for volatility to revert.
+            
+    ### 4. SMSF Strategy (Wealth Builder)
+    * **Role:** Long-term Growth.
+    * **Structure:** Multi-trade portfolio strategy.
+    * **Rules:** *To be defined based on trade data.*
     
     ---
     ### 🛡️ Universal Execution Gates
     1.  **Volatility Gate:** Check VIX before entry. Ideal: 14–22. Skip if VIX exploded >10% in last 48h.
-    2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
+    2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe* (Zeit Concept).
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v80.6 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v81.0 | Certified Stable & Audited")
