@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v82.1 (Enhanced Color Logic)")
+st.info("✅ RUNNING VERSION: v82.2 (Target-Aware Yield Coloring)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -620,6 +620,7 @@ with tab1:
                 with tab:
                     subset = active_df[active_df['Strategy'] == strategy_name].copy()
                     bench = benchmarks.get(strategy_name) or BASE_CONFIG.get(strategy_name) or {'pnl': 0, 'yield': 0, 'dit': 0}
+                    target_yield = bench.get('yield', 0)
                     target_disp = bench.get('pnl', 0) * regime_mult
                     
                     c1, c2, c3, c4 = st.columns(4)
@@ -639,13 +640,21 @@ with tab1:
                             'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()], 'Notes': ['']
                         })
                         display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                        
+                        def yield_color(val):
+                            if isinstance(val, (int, float)):
+                                if val < 0: return 'color: red; font-weight: bold'
+                                if val >= target_yield * 0.8: return 'color: green; font-weight: bold' # Performing (>=80% of target)
+                                return 'color: orange; font-weight: bold' # Lagging (Positive but <80% target)
+                            return ''
+
                         st.dataframe(
                             display_df.style
                             .format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
                             .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else ('color: #842029; font-weight: bold' if 'F' in str(v) else 'color: #d97706; font-weight: bold'), subset=['Grade'])
                             .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
-                            .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['Daily Yield %'])
+                            .map(yield_color, subset=['Daily Yield %'])
                             .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
                             .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
@@ -924,4 +933,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v82.1 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v82.2 | Certified Stable & Audited")
