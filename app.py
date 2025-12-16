@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v82.2 (Target-Aware Yield Coloring)")
+st.info("✅ RUNNING VERSION: v83.0 (Trade Links Added)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -41,7 +41,8 @@ def init_db():
                     vega REAL,
                     notes TEXT,
                     tags TEXT,
-                    parent_id TEXT
+                    parent_id TEXT,
+                    link TEXT
                 )''')
     
     # SNAPSHOTS TABLE
@@ -65,14 +66,12 @@ def migrate_db():
     """Safely adds new columns to existing databases."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    try:
-        c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
+    try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
     except: pass 
-    
-    try:
-        c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
+    try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
     except: pass
-    
+    try: c.execute("ALTER TABLE trades ADD COLUMN link TEXT")
+    except: pass
     conn.commit()
     conn.close()
 
@@ -211,6 +210,7 @@ def sync_data(file_list, file_type):
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
+                link = str(row.get('Link', '')) # Capture Link
                 
                 # Lot Sizing
                 lot_size = 1
@@ -248,24 +248,24 @@ def sync_data(file_list, file_type):
                 
                 if existing is None:
                     c.execute('''INSERT INTO trades 
-                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, link)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (trade_id, name, strat, status, start_dt.date(), 
                          exit_dt.date() if exit_dt else None, 
-                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", ""))
+                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", link))
                     count_new += 1
                 else:
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, link=? 
                             WHERE id=?''', 
-                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
+                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, link, trade_id))
                         count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
                             WHERE id=?''', 
-                            (pnl, days_held, theta, delta, gamma, vega, trade_id))
+                            (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
                         count_update += 1
                         
                 if file_type == "Active":
@@ -325,12 +325,12 @@ def load_data():
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
             'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes',
-            'tags': 'Tags', 'parent_id': 'Parent ID'
+            'tags': 'Tags', 'parent_id': 'Parent ID', 'link': 'Link'
         })
         
-        for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags']:
+        for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']:
             if col not in df.columns:
-                df[col] = "" if col in ['Notes', 'Tags'] else 0.0
+                df[col] = "" if col in ['Notes', 'Tags', 'Link'] else 0.0
         
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
@@ -529,7 +529,7 @@ with tab1:
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
                 st.caption("Edit 'Notes' and 'Tags', then click Save.")
-                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
+                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Link', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
@@ -540,6 +540,7 @@ with tab1:
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
+                    "Link": st.column_config.LinkColumn("🔗", display_text="Open", width="small"),
                     "Action": st.column_config.TextColumn("Signal", disabled=True),
                 }
                 edited_df = st.data_editor(
@@ -614,7 +615,7 @@ with tab1:
                 )
 
             # STRATEGY TAB RENDERER
-            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            cols = ['Name', 'Action', 'Grade', 'Link', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -631,7 +632,7 @@ with tab1:
                     
                     if not subset.empty:
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
+                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'], 'Link': ['-'],
                             'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
@@ -644,8 +645,8 @@ with tab1:
                         def yield_color(val):
                             if isinstance(val, (int, float)):
                                 if val < 0: return 'color: red; font-weight: bold'
-                                if val >= target_yield * 0.8: return 'color: green; font-weight: bold' # Performing (>=80% of target)
-                                return 'color: orange; font-weight: bold' # Lagging (Positive but <80% target)
+                                if val >= target_yield * 0.8: return 'color: green; font-weight: bold' 
+                                return 'color: orange; font-weight: bold' 
                             return ''
 
                         st.dataframe(
@@ -658,7 +659,8 @@ with tab1:
                             .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
                             .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
-                            use_container_width=True
+                            use_container_width=True,
+                            column_config={"Link": st.column_config.LinkColumn("🔗", display_text="Open")}
                         )
                     else: st.info("No active trades.")
 
@@ -933,4 +935,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v82.2 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v83.0 | Certified Stable & Audited")
