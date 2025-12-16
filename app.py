@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v81.2 (Restored Daily Yield & Days Held)")
+st.info("✅ RUNNING VERSION: v82.0 (Verified Visuals & Columns)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -84,14 +84,13 @@ BASE_CONFIG = {
     '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
     '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
     'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41},
-    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40}  # Placeholder defaults for SMSF
+    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40}
 }
 
 # --- HELPER FUNCTIONS ---
 def get_strategy(group_name, trade_name=""):
     g = str(group_name).upper()
     n = str(trade_name).upper()
-    # Check for SMSF first to avoid confusion if names overlap
     if "SMSF" in g or "SMSF" in n: return "SMSF"
     elif "M200" in g or "M200" in n: return "M200"
     elif "160/190" in g or "160/190" in n: return "160/190"
@@ -161,7 +160,7 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (v2.0 Integrity) ---
+# --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -169,7 +168,6 @@ def sync_data(file_list, file_type):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. Integrity Check Prep: Get all currently active IDs from DB
     db_active_ids = set()
     if file_type == "Active":
         try:
@@ -186,14 +184,14 @@ def sync_data(file_list, file_type):
         try:
             df = read_file_safely(file)
             if df is None or df.empty:
-                log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid Format)")
+                log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
 
             # QA: Check critical columns
             required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
             missing = [col for col in required_cols if col not in df.columns]
             if missing:
-                log.append(f"⚠️ {file.name}: Missing columns {missing}. Check broker export.")
+                log.append(f"⚠️ {file.name}: Missing columns {missing}.")
                 continue
 
             for _, row in df.iterrows():
@@ -214,7 +212,7 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
-                # Lot Sizing (ADJUSTED FOR ACCURACY + SMSF)
+                # Lot Sizing
                 lot_size = 1
                 if strat == '130/160':
                     if debit > 11000: lot_size = 3
@@ -224,8 +222,7 @@ def sync_data(file_list, file_type):
                 elif strat == 'M200':
                     if debit > 12000: lot_size = 2
                 elif strat == 'SMSF':
-                    # Default logic for SMSF until specific rules are provided
-                    if debit > 12000: lot_size = 2 
+                    if debit > 12000: lot_size = 2
 
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
@@ -258,7 +255,6 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", ""))
                     count_new += 1
                 else:
-                    # Don't overwrite notes/tags on update
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
@@ -284,20 +280,18 @@ def sync_data(file_list, file_type):
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
             
-    # 2. Integrity Check: Flag Missing Trades
     if file_type == "Active" and file_found_ids:
         missing_ids = db_active_ids - file_found_ids
         if missing_ids:
             placeholders = ','.join('?' for _ in missing_ids)
             c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
-            log.append(f"⚠️ Integrity Check: Marked {len(missing_ids)} trades as 'Missing'.")
+            log.append(f"⚠️ Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
 
     conn.commit()
     conn.close()
     return log
 
 def update_journal(edited_df):
-    """Writes edited notes/tags back to the database."""
     conn = get_db_connection()
     c = conn.cursor()
     count = 0
@@ -313,7 +307,7 @@ def update_journal(edited_df):
     except Exception as e: return 0
     finally: conn.close()
 
-# --- DATA LOADER (Cached) ---
+# --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
@@ -348,7 +342,6 @@ def load_data():
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         
-        # NEW METRIC: Theta / Capital %
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         
         df['Ticker'] = df['Name'].apply(extract_ticker)
@@ -368,7 +361,6 @@ def load_data():
                 if 7500 <= d <= 8500: grade="A"; reason="Perfect Entry"
                 else: grade="B"; reason="Variance"
             elif s == 'SMSF':
-                # Basic grading for SMSF until rules defined
                 if d > 15000: grade="B"; reason="High Debit" 
                 else: grade="A"; reason="Standard"
             return pd.Series([grade, reason])
@@ -398,14 +390,14 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: WORKFLOW ---
+# --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         st.cache_data.clear()
-        st.success("Restored & Cache Cleared.")
+        st.success("Restored.")
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
             st.rerun()
@@ -441,17 +433,15 @@ with st.sidebar.expander("🛠️ Maintenance"):
         conn.commit()
         conn.close()
         st.success("Purged.")
-    
-    # NEW: HARD RESET BUTTON
     if st.button("🧨 Hard Reset (Delete All Data)"):
         conn = get_db_connection()
         conn.execute("DROP TABLE IF EXISTS trades")
         conn.execute("DROP TABLE IF EXISTS snapshots")
         conn.commit()
         conn.close()
-        init_db() # Re-initialize immediately
+        init_db()
         st.cache_data.clear()
-        st.success("Database wiped and reset.")
+        st.success("Wiped & Reset.")
         st.rerun()
 
 st.sidebar.divider()
@@ -477,9 +467,7 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
             if 12 <= days_held <= 16:
                 return ("DAY 14 CHECK (Green)", "SUCCESS") if pnl > 200 else ("DAY 14 CHECK (Red)", "WARNING")
         elif strat == 'SMSF':
-            # Basic SMSF signal until rules provided
             if pnl > 1000: return "PROFIT CHECK", "SUCCESS"
-            
     return "", "NONE"
 
 # --- MAIN APP ---
@@ -508,9 +496,8 @@ with tab1:
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
         if active_df.empty:
-            st.info("📭 No active trades in database.")
+            st.info("📭 No active trades.")
         else:
-            # --- PREP DATA ---
             port_yield = active_df['Daily Yield %'].mean()
             if port_yield < 0.10: st.sidebar.error(f"🚨 Yield Critical: {port_yield:.2f}%")
             elif port_yield < 0.15: st.sidebar.warning(f"⚠️ Yield Low: {port_yield:.2f}%")
@@ -524,7 +511,7 @@ with tab1:
             active_df['Action'] = act_list
             active_df['Signal_Type'] = sig_list
 
-            # --- 1. ACTION QUEUE ---
+            # --- ACTION QUEUE ---
             todo_df = active_df[active_df['Action'] != ""]
             if not todo_df.empty:
                 st.markdown("### ✅ Action Queue")
@@ -539,7 +526,7 @@ with tab1:
                     st.download_button("📥 Download Queue", csv_todo, "todo_list.csv", "text/csv")
                 st.divider()
 
-            # --- 2. MASTER JOURNAL ---
+            # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
                 st.caption("Edit 'Notes' and 'Tags', then click Save.")
                 display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
@@ -571,12 +558,10 @@ with tab1:
 
             st.divider()
 
-            # --- 3. DETAILED STRATEGY BREAKDOWN ---
+            # --- STRATEGY PERFORMANCE ---
             st.markdown("### 🏛️ Strategy Performance")
-            # ADDED SMSF TAB
             strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200", "💼 SMSF"])
 
-            # OVERVIEW TAB
             with strat_tabs[0]:
                 with st.expander("📊 Portfolio Risk", expanded=True):
                     total_delta = active_df['Delta'].sum()
@@ -628,7 +613,7 @@ with tab1:
                     use_container_width=True
                 )
 
-            # STRATEGY SPECIFIC TABS
+            # STRATEGY TAB RENDERER
             cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
@@ -669,7 +654,7 @@ with tab1:
             render_tab(strat_tabs[1], '130/160')
             render_tab(strat_tabs[2], '160/190')
             render_tab(strat_tabs[3], 'M200')
-            render_tab(strat_tabs[4], 'SMSF') # Added
+            render_tab(strat_tabs[4], 'SMSF')
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
@@ -677,7 +662,6 @@ with tab1:
 # 2. VALIDATOR
 with tab2:
     st.markdown("### 🧪 Pre-Flight Audit")
-    # RESTORED: Grading System Legend
     with st.expander("ℹ️ Grading System Legend", expanded=True):
         st.markdown("""
         | Strategy | Grade | Debit Range (Per Lot) | Verdict |
@@ -703,7 +687,7 @@ with tab2:
                 strat = get_strategy(group, name)
                 debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                 
-                # Lot Sizing (ADJUSTED FOR ACCURACY)
+                # Lot Sizing
                 lot_size = 1
                 if strat == '130/160':
                     if debit > 11000: lot_size = 3
@@ -758,7 +742,6 @@ with tab3:
 
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
-        # RESTORED: Tickers & Greeks
         an1, an2, an3, an4, an5, an6, an7, an8 = st.tabs(["🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab", "⚙️ Efficiency"])
 
         with an1:
@@ -801,17 +784,14 @@ with tab3:
             if not expired_sub.empty:
                 exp_hm = expired_sub.dropna(subset=['Exit Date']).copy()
                 
-                # 1. Monthly Seasonality
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
                 
-                # FIX: Pre-aggregate data to ensure 1:1 mapping for text
                 hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
                 
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 
                           'July', 'August', 'September', 'October', 'November', 'December']
                 
-                # FIX: Explicitly set z (color) and text_auto to ensure alignment
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", 
                                        title="1. Monthly Seasonality ($)", 
                                        text_auto=True, 
@@ -821,15 +801,12 @@ with tab3:
                 
                 st.divider()
 
-                # 2. Duration Sweet Spot
-                # Similar aggregation fix for duration if needed, but histogram usually handles it better
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
                                           title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
                 st.plotly_chart(fig2, use_container_width=True)
                 
                 st.divider()
                 
-                # 3. Day of Week
                 if 'Entry Date' in exp_hm.columns:
                     exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
                     days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
@@ -837,7 +814,6 @@ with tab3:
                                               title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
                     st.plotly_chart(fig3, use_container_width=True)
 
-        # RESTORED: Ticker Analysis
         with an4:
             if not expired_sub.empty:
                 tick_grp = expired_sub.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False)
@@ -864,29 +840,21 @@ with tab3:
                 sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique(), key="life_strat")
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
-                # FIX: Improved Lifecycle Graph visibility
-                # Use markers+lines to ensure points are visible even if lines are sparse
                 fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', 
                               title=f"Trade Lifecycle: {sel_strat}", markers=True)
-                
-                # Force axes to start from reasonable values
                 fig.update_layout(xaxis_title="Days Held", yaxis_title="P&L ($)")
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No snapshots yet.")
 
-        # RESTORED: Greeks Lab
         with an7:
             if not df.empty:
                 st.markdown("##### 🔬 Greek Exposure Analysis")
-                # FIX: Used session state key to prevent reset on selection change
                 if "greek_sel" not in st.session_state:
                     st.session_state["greek_sel"] = "Theta"
                 
                 g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'], 
                                      index=['Theta', 'Delta', 'Gamma', 'Vega'].index(st.session_state["greek_sel"]),
                                      key="greek_dropdown")
-                
-                # Update session state
                 st.session_state["greek_sel"] = g_col
 
                 valid_greeks = df[df[g_col] != 0]
@@ -896,7 +864,6 @@ with tab3:
                 else: st.warning(f"No non-zero data for {g_col}.")
             else: st.info("Upload data.")
             
-        # NEW: Efficiency Analytics
         with an8:
             if not df.empty:
                 st.markdown("##### ⚙️ Capital Efficiency (Theta/Cap %)")
@@ -908,7 +875,7 @@ with tab3:
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.info("No active trades.")
 
-# 4. RULE BOOK (UPDATED WITH AUDIT INSIGHTS)
+# 4. RULE BOOK
 with tab4:
     st.markdown("""
     # 📖 The Trader's Constitution
@@ -955,4 +922,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v81.1 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v82.0 | Certified Stable & Audited")
