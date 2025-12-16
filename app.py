@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v81.1 (Visual Indicators Added)")
+st.info("✅ RUNNING VERSION: v81.2 (Restored Daily Yield & Days Held)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
