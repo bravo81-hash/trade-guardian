@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v85.0 (Advanced Analytics Suite)")
+st.info("✅ RUNNING VERSION: v86.0 (Full Analytics Suite)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -66,7 +66,6 @@ def migrate_db():
     except: pass 
     try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
     except: pass
-    # Link column removed
     conn.commit()
     conn.close()
 
@@ -201,6 +200,8 @@ def sync_data(file_list, file_type):
                 
                 pnl = clean_num(row.get('Total Return $', 0))
                 debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                
+                # Greeks - Handle carefully
                 theta = clean_num(row.get('Theta', 0))
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
@@ -220,7 +221,6 @@ def sync_data(file_list, file_type):
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # CRITICAL: Robust Exit/Expiration Date Extraction
                 exit_dt = None
                 try:
                     raw_exp = row.get('Expiration')
@@ -230,16 +230,16 @@ def sync_data(file_list, file_type):
 
                 days_held = 1
                 if exit_dt and file_type == "History":
-                     days_held = (exit_dt - start_dt).days
+                      days_held = (exit_dt - start_dt).days
                 else:
-                     days_held = (datetime.now() - start_dt).days
+                      days_held = (datetime.now() - start_dt).days
                 
                 if days_held < 1: days_held = 1
                 
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                c.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
+                c.execute("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
                 if existing is None:
@@ -251,17 +251,31 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", ""))
                     count_new += 1
                 else:
+                    # UPDATE LOGIC WITH GREEK PROTECTION
+                    # If existing greeks are non-zero and new greeks are zero (common in history files),
+                    # KEEP the old greeks to preserve "Last Active" data for analytics.
+                    
+                    old_status, old_theta, old_delta, old_gamma, old_vega = existing
+                    
+                    # If new theta is 0 but we have old data, use old data
+                    final_theta = theta if theta != 0 else old_theta
+                    final_delta = delta if delta != 0 else old_delta
+                    final_gamma = gamma if gamma != 0 else old_gamma
+                    final_vega = vega if vega != 0 else old_vega
+
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
                             WHERE id=?''', 
-                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
+                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, 
+                             final_theta, final_delta, final_gamma, final_vega, trade_id))
                         count_update += 1
-                    elif existing[0] in ["Active", "Missing"]: 
+                    elif old_status in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
                             pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', exit_date=?
                             WHERE id=?''', 
-                            (pnl, days_held, theta, delta, gamma, vega, exit_dt.date() if exit_dt else None, trade_id))
+                            (pnl, days_held, final_theta, final_delta, final_gamma, final_vega, 
+                             exit_dt.date() if exit_dt else None, trade_id))
                         count_update += 1
                         
                 if file_type == "Active":
@@ -296,7 +310,8 @@ def update_journal(edited_df):
             t_id = row['id'] 
             notes = str(row['Notes'])
             tags = str(row['Tags'])
-            c.execute("UPDATE trades SET notes=?, tags=? WHERE id=?", (notes, tags, t_id))
+            pid = str(row['Parent ID'])
+            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=? WHERE id=?", (notes, tags, pid, t_id))
             count += 1
         conn.commit()
         return count
@@ -310,6 +325,17 @@ def load_data():
     conn = get_db_connection()
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
+        
+        # --- NEW: Volatility Calculation from Snapshots ---
+        snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
+        if not snaps.empty:
+            vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
+            vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
+            df = df.merge(vol_df, left_on='id', right_on='trade_id', how='left')
+            df['P&L Vol'] = df['P&L Vol'].fillna(0)
+        else:
+            df['P&L Vol'] = 0.0
+
     except Exception as e:
         return pd.DataFrame()
     finally: conn.close()
@@ -323,11 +349,10 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID'
         })
         
-        # Link column removed from required cols
-        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags']
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID']
         for col in required_cols:
             if col not in df.columns:
-                df[col] = "" if col in ['Notes', 'Tags'] else 0.0
+                df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
         
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
@@ -338,6 +363,15 @@ def load_data():
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
+        
+        # --- NEW METRICS ---
+        # 1. Annualized ROI
+        df['Ann. ROI'] = df['Daily Yield %'] * 365
+        
+        # 2. Theta Efficiency (P&L / Potential Decay)
+        # Avoid division by zero
+        df['Theta Pot.'] = df['Theta'] * df['Days Held']
+        df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
         
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         
@@ -525,18 +559,21 @@ with tab1:
 
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
-                st.caption("Edit 'Notes' and 'Tags', then click Save.")
-                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
+                st.caption("Edit 'Notes', 'Tags' or 'Parent ID' (for Linking).")
+                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
                     "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
-                    "Theta/Cap %": st.column_config.NumberColumn("Theta/Cap %", format="%.2f%%", disabled=True),
+                    "Theta/Cap %": st.column_config.NumberColumn("Θ/Cap", format="%.2f%%", disabled=True),
+                    "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True, help="Ratio of P&L to Total Theta Potential. >1.0 is excellent."),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
+                    "P&L Vol": st.column_config.NumberColumn("Sleep Well (Vol)", format="$%d", disabled=True, help="Standard Deviation of Daily P&L. Lower is better."),
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
+                    "Parent ID": st.column_config.TextColumn("🔗 Link ID", help="Paste ID of previous leg to link campaigns."),
                     "Action": st.column_config.TextColumn("Signal", disabled=True),
                 }
                 edited_df = st.data_editor(
@@ -571,7 +608,7 @@ with tab1:
 
                 strat_agg = active_df.groupby('Strategy').agg({
                     'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
-                    'Name': 'count', 'Daily Yield %': 'mean' 
+                    'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean' 
                 }).reset_index()
                 
                 strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
@@ -581,13 +618,15 @@ with tab1:
                     'Strategy': ['TOTAL'], 
                     'P&L': [strat_agg['P&L'].sum()], 'Debit': [strat_agg['Debit'].sum()],
                     'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
-                    'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                    'Name': [strat_agg['Name'].sum()], 
+                    'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                    'Ann. ROI': [active_df['Ann. ROI'].mean()],
                     'Trend': ['-'], 'Target %': ['-']
                 })
                 final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
                 
-                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
-                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
                 
                 def highlight_trend(val):
                     return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
@@ -603,6 +642,7 @@ with tab1:
                         'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
                         'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
                         'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
+                        'Ann. ROI': lambda x: safe_fmt(x, "{:.1f}%"), 
                         'Target': lambda x: safe_fmt(x, "{:.2f}%")
                     })
                     .map(highlight_trend, subset=['Trend'])
@@ -611,7 +651,7 @@ with tab1:
                 )
 
             # STRATEGY TAB RENDERER
-            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -631,6 +671,7 @@ with tab1:
                             'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
                             'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
+                            'Ann. ROI': [subset['Ann. ROI'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Days Held': [subset['Days Held'].mean()],
                             'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
@@ -647,7 +688,7 @@ with tab1:
 
                         st.dataframe(
                             display_df.style
-                            .format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
+                            .format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
                             .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else ('color: #842029; font-weight: bold' if 'F' in str(v) else 'color: #d97706; font-weight: bold'), subset=['Grade'])
                             .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
@@ -721,7 +762,7 @@ with tab2:
                     if 7500 <= debit_lot <= 8500: grade, reason = "A", "Perfect Entry"
                     else: grade, reason = "B", "Variance"
                 elif strat == 'SMSF':
-                    if debit_lot > 15000: grade, reason = "B", "High Debit"
+                    if debit_lot > 15000: grade, reason = "B", "High Debit" 
                     else: grade, reason = "A", "Standard"
 
                 st.divider()
@@ -750,7 +791,7 @@ with tab3:
 
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
-        # 1. METRICS LEDGER (Feature #5)
+        # 1. METRICS LEDGER
         st.markdown("### 📊 Performance Ledger")
         realized_pnl = expired_sub['P&L'].sum()
         floating_pnl = df[df['Status'] == 'Active']['P&L'].sum()
@@ -808,34 +849,26 @@ with tab3:
         with an3:
             if not expired_sub.empty:
                 exp_hm = expired_sub.dropna(subset=['Exit Date']).copy()
-                
-                # 1. Monthly Seasonality
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
                 
-                # FIX: Pre-aggregate data to ensure 1:1 mapping for text
                 hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
-                
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 
                           'July', 'August', 'September', 'October', 'November', 'December']
                 
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", 
-                                       title="1. Monthly Seasonality ($)", 
-                                       text_auto=True, 
-                                       category_orders={"Month": months},
-                                       color_continuous_scale="RdBu")
+                                        title="1. Monthly Seasonality ($)", 
+                                        text_auto=True, 
+                                        category_orders={"Month": months},
+                                        color_continuous_scale="RdBu")
                 st.plotly_chart(fig, use_container_width=True)
-                
                 st.divider()
 
-                # 2. Duration Sweet Spot
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
                                           title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
                 st.plotly_chart(fig2, use_container_width=True)
-                
                 st.divider()
                 
-                # 3. Day of Week
                 if 'Entry Date' in exp_hm.columns:
                     exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
                     days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
@@ -893,26 +926,22 @@ with tab3:
                 else: st.warning(f"No non-zero data for {g_col}.")
             else: st.info("Upload data.")
             
-        # 8. VELOCITY (Drag Coefficient)
         with an8:
             if not df.empty:
                 st.markdown("##### ⚙️ Capital Velocity (The Drag Coefficient)")
                 st.caption("Top-Left = High Velocity (Stars) | Bottom-Right = Lazy Capital (Drags)")
                 
-                # Use active trades for velocity check
                 active_only = df[df['Status'] == 'Active'].copy()
                 if not active_only.empty:
                     fig = px.scatter(active_only, x='Days Held', y='Daily Yield %', 
                                      size='Debit', color='Strategy',
                                      hover_data=['Name', 'Debit', 'P&L'],
                                      title="Velocity Map: Yield vs Time (Bubble Size = Capital)")
-                    # Add reference lines for "Drag Zone"
                     fig.add_shape(type="rect", x0=40, y0=-0.1, x1=100, y1=0.1, 
                                   line=dict(color="Red", width=2, dash="dot"))
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.info("No active trades.")
 
-        # 9. COMPLIANCE SCORECARD
         with an9:
             st.markdown("##### 🎯 Compliance Scorecard")
             st.caption("Are you following your own rules?")
@@ -947,14 +976,12 @@ with tab3:
                 score_df = pd.DataFrame(score_data)
                 st.dataframe(score_df, use_container_width=True)
 
-        # 10. GAMMA WALL (Expiration Cluster)
         with an10:
             st.markdown("##### 🧱 Expiration Gamma Wall")
             st.caption("Capital at risk by Expiration Date. Avoid tall bars!")
             
             active_only = df[df['Status'] == 'Active'].copy()
             if not active_only.empty:
-                # Group by expiration
                 gamma_wall = active_only.groupby('Exit Date')['Debit'].sum().reset_index()
                 fig = px.bar(gamma_wall, x='Exit Date', y='Debit', 
                              title="Capital Concentration by Expiration",
@@ -982,9 +1009,8 @@ with tab4:
     ### 2. 160/190 Strategy (Patience Training)
     * **Role:** Compounder. Expectancy focused.
     * **Entry:** Friday (Captures weekend decay start).
-    * **Debit Target:** `~$5,200` per lot (Market may offer ~$4.5k - this is a bargain).
+    * **Debit Target:** `~$5,200` per lot.
     * **Sizing:** Trade **1 Lot**.
-        * *Nuance:* Scaling to 2 lots reduces *ROI %* but increases *Total Dollar Expectancy*. Only scale if variance-tolerant.
     * **Exit:** Hold for **40-50 Days**. 
     * **Golden Rule:** **Do not touch in first 30 days.** Early interference statistically worsens outcomes.
     
@@ -1001,13 +1027,12 @@ with tab4:
     ### 4. SMSF Strategy (Wealth Builder)
     * **Role:** Long-term Growth.
     * **Structure:** Multi-trade portfolio strategy.
-    * **Rules:** *To be defined based on trade data.*
     
     ---
     ### 🛡️ Universal Execution Gates
     1.  **Volatility Gate:** Check VIX before entry. Ideal: 14–22. Skip if VIX exploded >10% in last 48h.
-    2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe* (Zeit Concept).
-    3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
+    2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
+    3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v85.0 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v86.0 | Full Analytics Suite")
