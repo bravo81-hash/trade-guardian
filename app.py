@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v87.0 (High Visibility Mode)")
+st.info("✅ RUNNING VERSION: v88.0 (Closed Trade Analytics)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -849,6 +849,41 @@ with tab3:
                 c3.metric("Avg Win", f"${avg_win:,.0f}")
                 c4.metric("Avg Loss", f"${avg_loss:,.0f}")
                 
+                # --- NEW: Closed Trade Performance Table ---
+                st.markdown("##### 🏛️ Strategy Performance (Closed)")
+                strat_perf = []
+                for strat, grp in expired_sub.groupby('Strategy'):
+                    w = grp[grp['P&L'] > 0]
+                    l = grp[grp['P&L'] <= 0]
+                    wr = len(w) / len(grp) * 100
+                    pf = (w['P&L'].sum() / abs(l['P&L'].sum())) if abs(l['P&L'].sum()) > 0 else 100.0
+                    
+                    strat_perf.append({
+                        'Strategy': strat,
+                        'Trades': len(grp),
+                        'Win Rate': wr,
+                        'Profit Factor': pf,
+                        'Total P&L': grp['P&L'].sum(),
+                        'Avg Ann. ROI': grp['Ann. ROI'].mean(),
+                        'Avg Days': grp['Days Held'].mean()
+                    })
+                
+                perf_df = pd.DataFrame(strat_perf)
+                st.dataframe(
+                    perf_df.style.format({
+                        'Win Rate': "{:.1f}%",
+                        'Profit Factor': "{:.2f}",
+                        'Total P&L': "${:,.0f}",
+                        'Avg Ann. ROI': "{:.1f}%",
+                        'Avg Days': "{:.0f}"
+                    })
+                    .map(lambda x: 'color: green; font-weight: bold' if x > 0 else 'color: red; font-weight: bold', subset=['Total P&L', 'Avg Ann. ROI']),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.divider()
+
                 st.markdown("##### Win/Loss Distribution")
                 fig = px.histogram(expired_sub, x="P&L", color="Strategy", nbins=20, title="P&L Distribution")
                 st.plotly_chart(fig, use_container_width=True)
@@ -1061,4 +1096,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v87.0 | High Visibility Mode")
+    st.caption("Allantis Trade Guardian v88.0 | Closed Trade Analytics")
