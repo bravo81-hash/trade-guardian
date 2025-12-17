@@ -77,10 +77,10 @@ def get_db_connection():
 
 # --- CONFIGURATION ---
 BASE_CONFIG = {
-    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36},
-    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44},
-    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41},
-    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40}
+    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36, 'target_debit_min': 3500, 'target_debit_max': 4500, 'target_days': [0, 1]}, # Mon=0, Tue=1
+    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44, 'target_debit_min': 4800, 'target_debit_max': 5500, 'target_days': [4]}, # Fri=4
+    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41, 'target_debit_min': 7500, 'target_debit_max': 8500, 'target_days': [2]}, # Wed=2
+    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40, 'target_debit_min': 2000, 'target_debit_max': 15000, 'target_days': [0, 1, 2, 3, 4]} # Any day
 }
 
 # --- HELPER FUNCTIONS ---
@@ -152,6 +152,7 @@ def read_file_safely(file):
             df.columns = df_raw.iloc[header_idx]
             df.reset_index(drop=True, inplace=True)
             
+            # Clean up the "Link" column immediately
             if 'Link' in df.columns:
                 df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else str(x))
             else:
@@ -213,6 +214,8 @@ def sync_data(file_list, file_type):
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
+                
+                # Link is already cleaned in read_file_safely
                 link = str(row.get('Link', ''))
                 
                 lot_size = 1
@@ -229,9 +232,7 @@ def sync_data(file_list, file_type):
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                if file_type == "Active":
-                    file_found_ids.add(trade_id)
-                
+                # For History files, grab Expiration date correctly
                 exit_dt = None
                 days_held = 1
                 
@@ -242,8 +243,15 @@ def sync_data(file_list, file_type):
                     except: days_held = 1
                 else:
                     days_held = (datetime.now() - start_dt).days
+                    # Active files also have Expiration date column, grab it for Gamma Wall
+                    try:
+                        exit_dt = pd.to_datetime(row.get('Expiration'))
+                    except: pass
                 
                 if days_held < 1: days_held = 1
+                
+                if file_type == "Active":
+                    file_found_ids.add(trade_id)
                 
                 c.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
@@ -257,6 +265,8 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", link))
                     count_new += 1
                 else:
+                    # Update Existing
+                    # Always update exit_date if available (important for Gamma Wall)
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
@@ -264,16 +274,17 @@ def sync_data(file_list, file_type):
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
+                        # Update Active - preserve manual link
                         if link:
                              c.execute('''UPDATE trades SET 
-                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
+                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?, exit_date=?
                                 WHERE id=?''', 
-                                (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
+                                (pnl, days_held, theta, delta, gamma, vega, link, exit_date.date() if exit_dt else None, trade_id))
                         else:
                              c.execute('''UPDATE trades SET 
-                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
+                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', exit_date=?
                                 WHERE id=?''', 
-                                (pnl, days_held, theta, delta, gamma, vega, trade_id))
+                                (pnl, days_held, theta, delta, gamma, vega, exit_date.date() if exit_dt else None, trade_id))
                         count_update += 1
                         
                 if file_type == "Active":
@@ -351,11 +362,11 @@ def load_data():
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
-        
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
+        # Grading with new Compliance Logic prep
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
             reason = "Standard"
@@ -765,7 +776,24 @@ with tab3:
 
         expired_sub = filtered_df[filtered_df['Status'] == 'Expired'].copy()
         
-        an1, an2, an3, an4, an5, an6, an7, an8 = st.tabs(["🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab", "⚙️ Efficiency"])
+        # 1. METRICS LEDGER (Feature #5)
+        st.markdown("### 📊 Performance Ledger")
+        realized_pnl = expired_sub['P&L'].sum()
+        floating_pnl = df[df['Status'] == 'Active']['P&L'].sum()
+        total_pnl = realized_pnl + floating_pnl
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("💰 Banked Profit (Realized)", f"${realized_pnl:,.0f}")
+        m2.metric("📄 Floating Profit (Unrealized)", f"${floating_pnl:,.0f}", delta_color="normal")
+        m3.metric("🔮 Projected Total", f"${total_pnl:,.0f}")
+        
+        st.divider()
+        
+        an1, an2, an3, an4, an5, an6, an7, an8, an9, an10 = st.tabs([
+            "🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", 
+            "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab", "⚙️ Velocity", 
+            "🎯 Compliance", "🧱 Gamma Wall"
+        ])
 
         with an1:
             if not expired_sub.empty:
@@ -876,7 +904,6 @@ with tab3:
         with an7:
             if not df.empty:
                 st.markdown("##### 🔬 Greek Exposure Analysis")
-                # FIX: Used session state key to prevent reset on selection change
                 if "greek_sel" not in st.session_state:
                     st.session_state["greek_sel"] = "Theta"
                 
@@ -892,19 +919,77 @@ with tab3:
                 else: st.warning(f"No non-zero data for {g_col}.")
             else: st.info("Upload data.")
             
-        # NEW: Efficiency Analytics
+        # 8. VELOCITY (Drag Coefficient)
         with an8:
             if not df.empty:
-                st.markdown("##### ⚙️ Capital Efficiency (Theta/Cap %)")
-                st.caption("Are your active trades 'working hard' (High Ratio) or 'lazy' (Low Ratio)?")
-                active_only = df[df['Status'] == 'Active']
+                st.markdown("##### ⚙️ Capital Velocity (The Drag Coefficient)")
+                st.caption("Top-Left = High Velocity (Stars) | Bottom-Right = Lazy Capital (Drags)")
+                
+                # Use active trades for velocity check
+                active_only = df[df['Status'] == 'Active'].copy()
                 if not active_only.empty:
-                    fig = px.scatter(active_only, x='Days Held', y='Theta/Cap %', color='Strategy', size='Debit',
-                                     title="Efficiency over Time (Bubble Size = Capital at Risk)", hover_data=['Name'])
+                    fig = px.scatter(active_only, x='Days Held', y='Daily Yield %', 
+                                     size='Debit', color='Strategy',
+                                     hover_data=['Name', 'Debit', 'P&L'],
+                                     title="Velocity Map: Yield vs Time (Bubble Size = Capital)")
+                    # Add reference lines for "Drag Zone"
+                    fig.add_shape(type="rect", x0=40, y0=-0.1, x1=100, y1=0.1, 
+                                  line=dict(color="Red", width=2, dash="dot"))
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.info("No active trades.")
 
-# 4. RULE BOOK (UPDATED WITH AUDIT INSIGHTS)
+        # 9. COMPLIANCE SCORECARD
+        with an9:
+            st.markdown("##### 🎯 Compliance Scorecard")
+            st.caption("Are you following your own rules?")
+            
+            if not df.empty:
+                score_data = []
+                for strat, rules in BASE_CONFIG.items():
+                    strat_trades = df[df['Strategy'] == strat]
+                    if strat_trades.empty: continue
+                    
+                    total = len(strat_trades)
+                    
+                    # 1. Day Check
+                    strat_trades['DayOfWeek'] = strat_trades['Entry Date'].dt.dayofweek
+                    valid_days = rules.get('target_days', [])
+                    on_time = strat_trades[strat_trades['DayOfWeek'].isin(valid_days)]
+                    day_score = (len(on_time) / total) * 100
+                    
+                    # 2. Debit Check
+                    min_d = rules.get('target_debit_min', 0)
+                    max_d = rules.get('target_debit_max', 999999)
+                    in_range = strat_trades[strat_trades['Debit/Lot'].between(min_d, max_d)]
+                    cost_score = (len(in_range) / total) * 100
+                    
+                    score_data.append({
+                        'Strategy': strat,
+                        'Trades': total,
+                        'Entry Day Match %': f"{day_score:.1f}%",
+                        'Cost Target Match %': f"{cost_score:.1f}%"
+                    })
+                
+                score_df = pd.DataFrame(score_data)
+                st.dataframe(score_df, use_container_width=True)
+
+        # 10. GAMMA WALL (Expiration Cluster)
+        with an10:
+            st.markdown("##### 🧱 Expiration Gamma Wall")
+            st.caption("Capital at risk by Expiration Date. Avoid tall bars!")
+            
+            active_only = df[df['Status'] == 'Active'].copy()
+            if not active_only.empty:
+                # Group by expiration
+                gamma_wall = active_only.groupby('Exit Date')['Debit'].sum().reset_index()
+                fig = px.bar(gamma_wall, x='Exit Date', y='Debit', 
+                             title="Capital Concentration by Expiration",
+                             color='Debit', color_continuous_scale='Reds')
+                st.plotly_chart(fig, use_container_width=True)
+            else: st.info("No active trades.")
+
+
+# 4. RULE BOOK
 with tab4:
     st.markdown("""
     # 📖 The Trader's Constitution
