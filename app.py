@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v89.0 (Structure Analytics - Put vs Call)")
+st.info("✅ RUNNING VERSION: v89.1 (Fixed Structure Analytics - Manual Leg Calc)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -99,9 +99,10 @@ def get_strategy(group_name, trade_name=""):
 
 def clean_num(x):
     try:
-        val = float(str(x).replace('$', '').replace(',', ''))
-        if np.isnan(val): return 0.0
-        return val
+        # Remove currency symbols and commas, handle NaN/None
+        s = str(x).replace('$', '').replace(',', '').strip()
+        if s == '' or s.lower() == 'nan' or s.lower() == 'none': return 0.0
+        return float(s)
     except: return 0.0
 
 def safe_fmt(val, fmt_str):
@@ -273,7 +274,31 @@ def sync_data(file_list, file_type):
                 
                 # IS LEG ROW? (Starts with '.')
                 elif name.startswith('.') and current_trade:
-                    leg_pnl = clean_num(row.get('Total Return $', 0))
+                    # FIX: Leg Rows use different columns than Strategy Rows in OptionStrat CSV
+                    # Strategy Row: [Name, Return %, Return $, Created, Expiration ...]
+                    # Leg Row:      [Symbol, Qty, Entry Price, Current Price, Close Price ...]
+                    
+                    # Map columns for Legs:
+                    qty = clean_num(row.get('Total Return %', 0)) # Qty is in 2nd column
+                    entry_price = clean_num(row.get('Total Return $', 0)) # Entry is in 3rd column
+                    
+                    # For Price, check if Active or History to find valid exit price
+                    # Active uses 'Created At' column (4th col) for Current Price
+                    # History uses 'Expiration' column (5th col) for Close Price
+                    current_price = clean_num(row.get('Created At', 0))
+                    close_price = clean_num(row.get('Expiration', 0))
+                    
+                    exit_price = 0.0
+                    if file_type == "Active":
+                        exit_price = current_price
+                    else:
+                        # For history, use Close Price. If 0 (expired worthless?), use 0.
+                        exit_price = close_price
+                        
+                    # Calculate P&L manually for the leg
+                    # Multiplier is 100 for standard options
+                    leg_pnl = (exit_price - entry_price) * qty * 100
+                    
                     leg_type = identify_leg_type(name)
                     if leg_type == 'C':
                         current_trade['call_pnl'] += leg_pnl
@@ -1186,4 +1211,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v89.0 | Structure Analytics")
+    st.caption("Allantis Trade Guardian v89.1 | Fixed Structure Analytics")
