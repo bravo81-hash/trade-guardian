@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v89.1 (Fixed Structure Analytics - Manual Leg Calc)")
+st.info("✅ RUNNING VERSION: v89.2 (Fixed Structure Analytics - Robust Price Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -99,10 +99,9 @@ def get_strategy(group_name, trade_name=""):
 
 def clean_num(x):
     try:
-        # Remove currency symbols and commas, handle NaN/None
-        s = str(x).replace('$', '').replace(',', '').strip()
-        if s == '' or s.lower() == 'nan' or s.lower() == 'none': return 0.0
-        return float(s)
+        val = float(str(x).replace('$', '').replace(',', ''))
+        if np.isnan(val): return 0.0
+        return val
     except: return 0.0
 
 def safe_fmt(val, fmt_str):
@@ -170,7 +169,7 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (Deep Scan Version) ---
+# --- SYNC ENGINE (Deep Scan Version - Fixed) ---
 def sync_data(file_list, file_type):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -274,36 +273,33 @@ def sync_data(file_list, file_type):
                 
                 # IS LEG ROW? (Starts with '.')
                 elif name.startswith('.') and current_trade:
-                    # FIX: Leg Rows use different columns than Strategy Rows in OptionStrat CSV
-                    # Strategy Row: [Name, Return %, Return $, Created, Expiration ...]
-                    # Leg Row:      [Symbol, Qty, Entry Price, Current Price, Close Price ...]
-                    
-                    # Map columns for Legs:
-                    qty = clean_num(row.get('Total Return %', 0)) # Qty is in 2nd column
-                    entry_price = clean_num(row.get('Total Return $', 0)) # Entry is in 3rd column
-                    
-                    # For Price, check if Active or History to find valid exit price
-                    # Active uses 'Created At' column (4th col) for Current Price
-                    # History uses 'Expiration' column (5th col) for Close Price
-                    current_price = clean_num(row.get('Created At', 0))
-                    close_price = clean_num(row.get('Expiration', 0))
-                    
-                    exit_price = 0.0
-                    if file_type == "Active":
-                        exit_price = current_price
-                    else:
-                        # For history, use Close Price. If 0 (expired worthless?), use 0.
-                        exit_price = close_price
+                    try:
+                        # Fix for misaligned columns in leg rows
+                        qty = clean_num(row.get('Total Return %', 0)) 
+                        entry_price = clean_num(row.get('Total Return $', 0))
                         
-                    # Calculate P&L manually for the leg
-                    # Multiplier is 100 for standard options
-                    leg_pnl = (exit_price - entry_price) * qty * 100
-                    
-                    leg_type = identify_leg_type(name)
-                    if leg_type == 'C':
-                        current_trade['call_pnl'] += leg_pnl
-                    elif leg_type == 'P':
-                        current_trade['put_pnl'] += leg_pnl
+                        raw_current = row.get('Created At')
+                        raw_close = row.get('Expiration')
+                        
+                        curr = clean_num(raw_current)
+                        close = clean_num(raw_close)
+                        
+                        # Robust Price Selection
+                        price_to_use = 0.0
+                        if curr != 0: price_to_use = curr
+                        elif close != 0: price_to_use = close
+                        else: price_to_use = 0.0 
+                            
+                        leg_pnl = (price_to_use - entry_price) * qty * 100
+                        
+                        leg_type = identify_leg_type(name)
+                        if leg_type == 'C':
+                            current_trade['call_pnl'] += leg_pnl
+                        elif leg_type == 'P':
+                            current_trade['put_pnl'] += leg_pnl
+                            
+                    except Exception as e:
+                        pass
 
             # Process final block
             if current_trade:
@@ -347,7 +343,6 @@ def process_trade_block(cursor, t, file_type, found_ids):
         t['is_new'] = False
         old_status, old_theta, old_delta, old_gamma, old_vega = existing
         
-        # Preserve Greeks if new file has 0s (common in history files)
         final_theta = t['theta'] if t['theta'] != 0 else old_theta
         final_delta = t['delta'] if t['delta'] != 0 else old_delta
         final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
@@ -1211,4 +1206,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v89.1 | Fixed Structure Analytics")
+    st.caption("Allantis Trade Guardian v89.2 | Robust Structure Analytics")
