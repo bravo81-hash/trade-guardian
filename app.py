@@ -7,12 +7,13 @@ import plotly.graph_objects as go
 import sqlite3
 import os
 from datetime import datetime
+import openpyxl 
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v83.1 (Fix: Data Loading & Links)")
+st.info("✅ RUNNING VERSION: v83.2 (Fix: Extract Excel Hyperlinks)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -59,7 +60,6 @@ def init_db():
     migrate_db()
 
 def migrate_db():
-    """Safely adds new columns to existing databases."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
@@ -120,11 +120,51 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- SMART FILE READER ---
+# --- SMART FILE READER (UPDATED FOR HYPERLINKS) ---
 def read_file_safely(file):
     try:
+        # Load workbook for Hyperlink extraction if XLSX
+        extracted_links = {} # Row Index -> URL
+        
         if file.name.endswith('.xlsx'):
+            try:
+                # Use openpyxl to load workbook and find links
+                wb = openpyxl.load_workbook(file, data_only=True)
+                ws = wb.active
+                
+                # Find "Link" column index
+                link_col_idx = None
+                header_row_idx = None
+                
+                # Scan first 20 rows for header
+                for r_idx, row in enumerate(ws.iter_rows(max_row=20, values_only=True)):
+                    row_vals = [str(c).strip() for c in row if c is not None]
+                    if "Name" in row_vals and "Link" in row_vals:
+                        header_row_idx = r_idx + 1 # 1-based index for openpyxl
+                        try:
+                            # Convert tuple to list to find index
+                            link_col_idx = list(row).index("Link") + 1 # 1-based column index
+                        except: pass
+                        break
+                
+                if link_col_idx and header_row_idx:
+                    # Iterate rows after header to get hyperlinks
+                    # Note: openpyxl rows are 1-based.
+                    # We need to map these to the DataFrame index which will be 0-based relative to data start
+                    df_row_counter = 0 
+                    for r in range(header_row_idx + 1, ws.max_row + 1):
+                        cell = ws.cell(row=r, column=link_col_idx)
+                        if cell.hyperlink:
+                            extracted_links[df_row_counter] = cell.hyperlink.target
+                        df_row_counter += 1
+            except Exception as e:
+                # st.error(f"Hyperlink extraction failed: {e}") 
+                pass
+
+            # Now read data normally
+            file.seek(0)
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
+            
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
@@ -138,6 +178,7 @@ def read_file_safely(file):
             file.seek(0)
             return pd.read_csv(file, skiprows=header_row)
 
+        # Standard Processing
         header_idx = -1
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
@@ -148,6 +189,15 @@ def read_file_safely(file):
         if header_idx != -1:
             df = df_raw.iloc[header_idx+1:].copy()
             df.columns = df_raw.iloc[header_idx]
+            df.reset_index(drop=True, inplace=True)
+            
+            # Inject extracted links if they exist
+            if extracted_links:
+                # Create 'ExtractedLink' column
+                df['ExtractedLink'] = df.index.map(extracted_links)
+                # Fallback to existing 'Link' column if extraction missed or wasn't needed
+                df['Link'] = df['ExtractedLink'].fillna(df.get('Link', ''))
+            
             return df
         return None
 
@@ -198,8 +248,10 @@ def sync_data(file_list, file_type):
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
-                # Robust Link Retrieval
-                link = str(row.get('Link', row.get('link', ''))) 
+                # Grab Link
+                link = str(row.get('Link', ''))
+                # Clean up "Open" text if extraction failed or just in case
+                if link == "Open": link = "" 
                 
                 lot_size = 1
                 if strat == '130/160':
@@ -380,7 +432,7 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR ---
+# --- SIDEBAR: WORKFLOW ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
@@ -925,4 +977,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v83.1 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v83.2 | Certified Stable & Audited")
