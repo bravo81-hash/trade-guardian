@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v85.1 (Fix: Gamma Wall & Link Removal)")
+st.info("✅ RUNNING VERSION: v85.0 (Advanced Analytics Suite)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -23,7 +23,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # TRADES TABLE (Link column removed from schema)
+    # TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -66,6 +66,7 @@ def migrate_db():
     except: pass 
     try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
     except: pass
+    # Link column removed
     conn.commit()
     conn.close()
 
@@ -74,10 +75,10 @@ def get_db_connection():
 
 # --- CONFIGURATION ---
 BASE_CONFIG = {
-    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36, 'target_debit_min': 3500, 'target_debit_max': 4500, 'target_days': [0, 1]},
-    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44, 'target_debit_min': 4800, 'target_debit_max': 5500, 'target_days': [4]},
-    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41, 'target_debit_min': 7500, 'target_debit_max': 8500, 'target_days': [2]},
-    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40, 'target_debit_min': 2000, 'target_debit_max': 15000, 'target_days': [0, 1, 2, 3, 4]}
+    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36, 'target_debit_min': 3500, 'target_debit_max': 4500, 'target_days': [0, 1]}, # Mon=0, Tue=1
+    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44, 'target_debit_min': 4800, 'target_debit_max': 5500, 'target_days': [4]}, # Fri=4
+    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41, 'target_debit_min': 7500, 'target_debit_max': 8500, 'target_days': [2]}, # Wed=2
+    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40, 'target_debit_min': 2000, 'target_debit_max': 15000, 'target_days': [0, 1, 2, 3, 4]} # Any day
 }
 
 # --- HELPER FUNCTIONS ---
@@ -126,6 +127,7 @@ def read_file_safely(file):
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
+            # CSV Handling
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -218,10 +220,9 @@ def sync_data(file_list, file_type):
                 trade_id = generate_id(name, strat, start_dt)
                 status = "Active" if file_type == "Active" else "Expired"
                 
-                # CRITICAL FIX: Robust Exit/Expiration Date Extraction
+                # CRITICAL: Robust Exit/Expiration Date Extraction
                 exit_dt = None
                 try:
-                    # Attempt to get expiration from file
                     raw_exp = row.get('Expiration')
                     if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
                         exit_dt = pd.to_datetime(raw_exp)
@@ -250,7 +251,6 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", ""))
                     count_new += 1
                 else:
-                    # Update Existing (Always update exit_date to ensure Gamma Wall has data)
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
@@ -323,6 +323,7 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID'
         })
         
+        # Link column removed from required cols
         required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags']
         for col in required_cols:
             if col not in df.columns:
@@ -337,6 +338,7 @@ def load_data():
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
+        
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         
         df['Ticker'] = df['Name'].apply(extract_ticker)
@@ -1008,4 +1010,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v84.2 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v85.0 | Certified Stable & Audited")
