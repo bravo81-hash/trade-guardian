@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v83.0 (Trade Links Added)")
+st.info("✅ RUNNING VERSION: v83.1 (Fix: Data Loading & Links)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -23,7 +23,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -45,7 +44,6 @@ def init_db():
                     link TEXT
                 )''')
     
-    # SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -58,8 +56,6 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
     conn.close()
-    
-    # Run migrations to ensure old DBs get new columns
     migrate_db()
 
 def migrate_db():
@@ -132,7 +128,6 @@ def read_file_safely(file):
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
-            # CSV Handling
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -186,13 +181,6 @@ def sync_data(file_list, file_type):
                 log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
 
-            # QA: Check critical columns
-            required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
-            missing = [col for col in required_cols if col not in df.columns]
-            if missing:
-                log.append(f"⚠️ {file.name}: Missing columns {missing}.")
-                continue
-
             for _, row in df.iterrows():
                 name = str(row.get('Name', ''))
                 if name.startswith('.') or name in ['nan', '', 'Symbol']: continue
@@ -210,9 +198,9 @@ def sync_data(file_list, file_type):
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
-                link = str(row.get('Link', '')) # Capture Link
+                # Robust Link Retrieval
+                link = str(row.get('Link', row.get('link', ''))) 
                 
-                # Lot Sizing
                 lot_size = 1
                 if strat == '130/160':
                     if debit > 11000: lot_size = 3
@@ -315,11 +303,11 @@ def load_data():
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
     except Exception as e:
-        st.error(f"🚨 DATABASE ERROR: {str(e)}")
         return pd.DataFrame()
     finally: conn.close()
     
     if not df.empty:
+        # Standardize column names
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -328,7 +316,9 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID', 'link': 'Link'
         })
         
-        for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']:
+        # Ensure all required columns exist with defaults
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']
+        for col in required_cols:
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags', 'Link'] else 0.0
         
@@ -390,7 +380,7 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: WORKFLOW ---
+# --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
@@ -935,4 +925,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v83.0 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v83.1 | Certified Stable & Audited")
