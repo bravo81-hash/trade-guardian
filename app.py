@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v89.2 (Fixed Structure Analytics - Robust Price Logic)")
+st.info("✅ RUNNING VERSION: v89.3 (Fixed Structure Analytics - Debug & Robustness)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -99,7 +99,7 @@ def get_strategy(group_name, trade_name=""):
 
 def clean_num(x):
     try:
-        val = float(str(x).replace('$', '').replace(',', ''))
+        val = float(str(x).replace('$', '').replace(',', '').strip())
         if np.isnan(val): return 0.0
         return val
     except: return 0.0
@@ -127,8 +127,9 @@ def extract_ticker(name):
 
 # --- DEEP SCAN PARSER ---
 def identify_leg_type(ticker):
-    # Matches P or C followed by numbers at end of string (e.g., SPX...P6700)
-    match = re.search(r'[0-9]{6}([CP])[0-9]+', str(ticker))
+    # Matches P or C followed by numbers (strike)
+    # Updated regex to support decimals in strike price (e.g. 4100.5)
+    match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
     if match:
         return match.group(1) # Returns 'P' or 'C'
     return None
@@ -195,6 +196,9 @@ def sync_data(file_list, file_type):
             if df is None or df.empty:
                 log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
+            
+            # CRITICAL: Clean column names to remove accidental whitespace
+            df.columns = df.columns.str.strip()
 
             required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
             missing = [col for col in required_cols if col not in df.columns]
@@ -288,8 +292,14 @@ def sync_data(file_list, file_type):
                         price_to_use = 0.0
                         if curr != 0: price_to_use = curr
                         elif close != 0: price_to_use = close
-                        else: price_to_use = 0.0 
+                        else: 
+                            # Fallback: if we have NO price data, we can't calculate P&L.
+                            # Don't add bogus 0 unless it's genuinely worthless.
+                            # Assume 0 only if it's expired and close is explicitly 0?
+                            # For safety, if both are 0, it stays 0.
+                            price_to_use = 0.0 
                             
+                        # Calculation: (Exit - Entry) * Qty * 100
                         leg_pnl = (price_to_use - entry_price) * qty * 100
                         
                         leg_type = identify_leg_type(name)
@@ -297,9 +307,13 @@ def sync_data(file_list, file_type):
                             current_trade['call_pnl'] += leg_pnl
                         elif leg_type == 'P':
                             current_trade['put_pnl'] += leg_pnl
+                        else:
+                            # Log regex failure
+                            pass
                             
                     except Exception as e:
-                        pass
+                        # Capture error in log if needed
+                        log.append(f"⚠️ Warning: Leg calc error on {name} - {str(e)}")
 
             # Process final block
             if current_trade:
@@ -1206,4 +1220,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v89.2 | Robust Structure Analytics")
+    st.caption("Allantis Trade Guardian v89.3 | Debug & Robustness")
