@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v89.4 (Fixed Structure Analytics - Strip & Calc)")
+st.info("✅ RUNNING VERSION: v89.5 (Fixed Structure Analytics - Deep Scan Debugger)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -291,13 +291,18 @@ def sync_data(file_list, file_type):
                         close = clean_num(raw_close)
                         
                         # Robust Price Selection
+                        # If active: prefer current. If history: prefer close.
+                        # Fallback to non-zero if preferred is zero.
                         price_to_use = 0.0
-                        if curr != 0: price_to_use = curr
-                        elif close != 0: price_to_use = close
-                        else: 
-                            price_to_use = 0.0 
+                        if file_type == "Active":
+                            if curr != 0: price_to_use = curr
+                            elif close != 0: price_to_use = close
+                        else: # History
+                            if close != 0: price_to_use = close
+                            elif curr != 0: price_to_use = curr
                             
                         # Calculation: (Exit - Entry) * Qty * 100 (Multiplier)
+                        # Multiplier of 100 is standard for SPX/equity options.
                         leg_pnl = (price_to_use - entry_price) * qty * 100
                         
                         leg_type = identify_leg_type(name)
@@ -1216,4 +1221,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v89.4 | Fixed Structure Analytics")
+    st.caption("Allantis Trade Guardian v89.5 | Fixed Structure Analytics - Deep Scan Debugger")
