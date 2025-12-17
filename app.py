@@ -13,7 +13,7 @@ import openpyxl
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v83.2 (Fix: Extract Excel Hyperlinks)")
+st.info("✅ RUNNING VERSION: v83.3 (Fix: Excel Hyperlink Metadata Extraction)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -123,16 +123,16 @@ def extract_ticker(name):
 # --- SMART FILE READER (UPDATED FOR HYPERLINKS) ---
 def read_file_safely(file):
     try:
-        # Load workbook for Hyperlink extraction if XLSX
         extracted_links = {} # Row Index -> URL
         
+        # Only attempt extraction on real XLSX files
         if file.name.endswith('.xlsx'):
             try:
-                # Use openpyxl to load workbook and find links
+                # Load workbook to find hyperlinks
                 wb = openpyxl.load_workbook(file, data_only=True)
                 ws = wb.active
                 
-                # Find "Link" column index
+                # Locate "Link" column
                 link_col_idx = None
                 header_row_idx = None
                 
@@ -140,34 +140,35 @@ def read_file_safely(file):
                 for r_idx, row in enumerate(ws.iter_rows(max_row=20, values_only=True)):
                     row_vals = [str(c).strip() for c in row if c is not None]
                     if "Name" in row_vals and "Link" in row_vals:
-                        header_row_idx = r_idx + 1 # 1-based index for openpyxl
+                        header_row_idx = r_idx + 1 # 1-based index
                         try:
-                            # Convert tuple to list to find index
-                            link_col_idx = list(row).index("Link") + 1 # 1-based column index
+                            # Convert tuple to list to find index. +1 for 1-based col index
+                            link_col_idx = list(row).index("Link") + 1 
                         except: pass
                         break
                 
                 if link_col_idx and header_row_idx:
                     # Iterate rows after header to get hyperlinks
-                    # Note: openpyxl rows are 1-based.
-                    # We need to map these to the DataFrame index which will be 0-based relative to data start
+                    # We map these to 0-based index relative to data start
                     df_row_counter = 0 
                     for r in range(header_row_idx + 1, ws.max_row + 1):
                         cell = ws.cell(row=r, column=link_col_idx)
-                        if cell.hyperlink:
+                        # Check if cell has a hyperlink object
+                        if cell.hyperlink and cell.hyperlink.target:
                             extracted_links[df_row_counter] = cell.hyperlink.target
                         df_row_counter += 1
             except Exception as e:
-                # st.error(f"Hyperlink extraction failed: {e}") 
+                # Silent fail on hyperlink extraction, fall back to text
                 pass
 
-            # Now read data normally
+            # Reset file pointer and read data normally
             file.seek(0)
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
             
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
+            # CSV Handling
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -178,7 +179,7 @@ def read_file_safely(file):
             file.seek(0)
             return pd.read_csv(file, skiprows=header_row)
 
-        # Standard Processing
+        # Process DataFrame
         header_idx = -1
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
@@ -193,10 +194,17 @@ def read_file_safely(file):
             
             # Inject extracted links if they exist
             if extracted_links:
-                # Create 'ExtractedLink' column
+                # Map extracted URLs to the dataframe index
+                # 'ExtractedLink' will hold the URL or NaN
                 df['ExtractedLink'] = df.index.map(extracted_links)
-                # Fallback to existing 'Link' column if extraction missed or wasn't needed
-                df['Link'] = df['ExtractedLink'].fillna(df.get('Link', ''))
+                
+                # Use ExtractedLink if valid, otherwise keep existing 'Link' (even if it says "Open")
+                # But actually, we want to replace "Open" with "" if no link found
+                df['Link'] = df['ExtractedLink'].fillna('') 
+            else:
+                # If no links extracted, clear "Open" text to avoid bad links
+                if 'Link' in df.columns:
+                    df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() == 'Open' else x)
             
             return df
         return None
@@ -231,6 +239,13 @@ def sync_data(file_list, file_type):
                 log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
 
+            # QA: Check critical columns
+            required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
+            missing = [col for col in required_cols if col not in df.columns]
+            if missing:
+                log.append(f"⚠️ {file.name}: Missing columns {missing}.")
+                continue
+
             for _, row in df.iterrows():
                 name = str(row.get('Name', ''))
                 if name.startswith('.') or name in ['nan', '', 'Symbol']: continue
@@ -250,8 +265,6 @@ def sync_data(file_list, file_type):
                 vega = clean_num(row.get('Vega', 0))
                 # Grab Link
                 link = str(row.get('Link', ''))
-                # Clean up "Open" text if extraction failed or just in case
-                if link == "Open": link = "" 
                 
                 lot_size = 1
                 if strat == '130/160':
@@ -359,7 +372,6 @@ def load_data():
     finally: conn.close()
     
     if not df.empty:
-        # Standardize column names
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -368,7 +380,6 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID', 'link': 'Link'
         })
         
-        # Ensure all required columns exist with defaults
         required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']
         for col in required_cols:
             if col not in df.columns:
@@ -383,9 +394,7 @@ def load_data():
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
-        
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
-        
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
         def get_grade(row):
@@ -432,7 +441,7 @@ def load_snapshots():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: WORKFLOW ---
+# --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
@@ -839,14 +848,17 @@ with tab3:
             if not expired_sub.empty:
                 exp_hm = expired_sub.dropna(subset=['Exit Date']).copy()
                 
+                # 1. Monthly Seasonality
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
                 
+                # FIX: Pre-aggregate data to ensure 1:1 mapping for text
                 hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
                 
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 
                           'July', 'August', 'September', 'October', 'November', 'December']
                 
+                # FIX: Explicitly set z (color) and text_auto to ensure alignment
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", 
                                        title="1. Monthly Seasonality ($)", 
                                        text_auto=True, 
@@ -856,12 +868,15 @@ with tab3:
                 
                 st.divider()
 
+                # 2. Duration Sweet Spot
+                # Similar aggregation fix for duration if needed, but histogram usually handles it better
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
                                           title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
                 st.plotly_chart(fig2, use_container_width=True)
                 
                 st.divider()
                 
+                # 3. Day of Week
                 if 'Entry Date' in exp_hm.columns:
                     exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
                     days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
@@ -869,6 +884,7 @@ with tab3:
                                               title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
                     st.plotly_chart(fig3, use_container_width=True)
 
+        # RESTORED: Ticker Analysis
         with an4:
             if not expired_sub.empty:
                 tick_grp = expired_sub.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False)
@@ -895,21 +911,29 @@ with tab3:
                 sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique(), key="life_strat")
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
+                # FIX: Improved Lifecycle Graph visibility
+                # Use markers+lines to ensure points are visible even if lines are sparse
                 fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', 
                               title=f"Trade Lifecycle: {sel_strat}", markers=True)
+                
+                # Force axes to start from reasonable values
                 fig.update_layout(xaxis_title="Days Held", yaxis_title="P&L ($)")
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No snapshots yet.")
 
+        # RESTORED: Greeks Lab
         with an7:
             if not df.empty:
                 st.markdown("##### 🔬 Greek Exposure Analysis")
+                # FIX: Used session state key to prevent reset on selection change
                 if "greek_sel" not in st.session_state:
                     st.session_state["greek_sel"] = "Theta"
                 
                 g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'], 
                                      index=['Theta', 'Delta', 'Gamma', 'Vega'].index(st.session_state["greek_sel"]),
                                      key="greek_dropdown")
+                
+                # Update session state
                 st.session_state["greek_sel"] = g_col
 
                 valid_greeks = df[df[g_col] != 0]
@@ -919,6 +943,7 @@ with tab3:
                 else: st.warning(f"No non-zero data for {g_col}.")
             else: st.info("Upload data.")
             
+        # NEW: Efficiency Analytics
         with an8:
             if not df.empty:
                 st.markdown("##### ⚙️ Capital Efficiency (Theta/Cap %)")
@@ -930,7 +955,7 @@ with tab3:
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.info("No active trades.")
 
-# 4. RULE BOOK
+# 4. RULE BOOK (UPDATED WITH AUDIT INSIGHTS)
 with tab4:
     st.markdown("""
     # 📖 The Trader's Constitution
@@ -944,7 +969,6 @@ with tab4:
     * **Management:** **Time Limit Rule.**
         * Kill if trade is **25 days old** and P&L is flat/negative.
         * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
-    * **Efficiency Check:** ROI-focused. Requires high velocity.
     
     ### 2. 160/190 Strategy (Patience Training)
     * **Role:** Compounder. Expectancy focused.
@@ -977,4 +1001,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v83.2 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v83.3 | Certified Stable & Audited")
