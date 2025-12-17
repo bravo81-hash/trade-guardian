@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v89.3 (Fixed Structure Analytics - Debug & Robustness)")
+st.info("✅ RUNNING VERSION: v89.4 (Fixed Structure Analytics - Strip & Calc)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -190,6 +190,7 @@ def sync_data(file_list, file_type):
     for file in file_list:
         count_new = 0
         count_update = 0
+        legs_processed = 0
         
         try:
             df = read_file_safely(file)
@@ -211,7 +212,8 @@ def sync_data(file_list, file_type):
             
             # Iterate through all rows including legs
             for _, row in df.iterrows():
-                name = str(row.get('Name', ''))
+                # STRIP WHITESPACE to catch .SPX legs properly
+                name = str(row.get('Name', '')).strip()
                 if name in ['nan', '', 'Symbol']: continue
                 
                 # IS STRATEGY ROW? (Does NOT start with '.')
@@ -293,27 +295,21 @@ def sync_data(file_list, file_type):
                         if curr != 0: price_to_use = curr
                         elif close != 0: price_to_use = close
                         else: 
-                            # Fallback: if we have NO price data, we can't calculate P&L.
-                            # Don't add bogus 0 unless it's genuinely worthless.
-                            # Assume 0 only if it's expired and close is explicitly 0?
-                            # For safety, if both are 0, it stays 0.
                             price_to_use = 0.0 
                             
-                        # Calculation: (Exit - Entry) * Qty * 100
+                        # Calculation: (Exit - Entry) * Qty * 100 (Multiplier)
                         leg_pnl = (price_to_use - entry_price) * qty * 100
                         
                         leg_type = identify_leg_type(name)
                         if leg_type == 'C':
                             current_trade['call_pnl'] += leg_pnl
+                            legs_processed += 1
                         elif leg_type == 'P':
                             current_trade['put_pnl'] += leg_pnl
-                        else:
-                            # Log regex failure
-                            pass
+                            legs_processed += 1
                             
                     except Exception as e:
-                        # Capture error in log if needed
-                        log.append(f"⚠️ Warning: Leg calc error on {name} - {str(e)}")
+                        pass
 
             # Process final block
             if current_trade:
@@ -321,7 +317,7 @@ def sync_data(file_list, file_type):
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
 
-            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
+            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated, {legs_processed} Legs Processed")
             
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
@@ -1220,4 +1216,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v89.3 | Debug & Robustness")
+    st.caption("Allantis Trade Guardian v89.4 | Fixed Structure Analytics")
