@@ -13,7 +13,7 @@ import openpyxl
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v83.5 (Fix: Editable Links & Fallbacks)")
+st.info("✅ RUNNING VERSION: v83.6 (Fix: Manual Link Overrides)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -127,14 +127,12 @@ def read_file_safely(file):
         
         if file.name.endswith('.xlsx'):
             try:
-                # Load workbook for link extraction
                 wb = openpyxl.load_workbook(file, data_only=True)
                 ws = wb.active
                 
                 link_col_idx = None
                 header_row_idx = None
                 
-                # Scan first 20 rows for header
                 for r_idx, row in enumerate(ws.iter_rows(max_row=20, values_only=True)):
                     row_vals = [str(c).strip() for c in row if c is not None]
                     if "Name" in row_vals and "Link" in row_vals:
@@ -190,11 +188,9 @@ def read_file_safely(file):
             
             if extracted_links:
                 df['ExtractedLink'] = df.index.map(extracted_links)
-                # Use extracted link, if NaN use existing, if that's 'Open' make it empty
                 df['Link'] = df['ExtractedLink'].fillna(df.get('Link', '')).apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else x)
             else:
                 if 'Link' in df.columns:
-                    # Clean up placeholder text
                     df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else x)
             
             return df
@@ -230,7 +226,6 @@ def sync_data(file_list, file_type):
                 log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
 
-            # QA: Check critical columns
             required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
             missing = [col for col in required_cols if col not in df.columns]
             if missing:
@@ -254,7 +249,7 @@ def sync_data(file_list, file_type):
                 delta = clean_num(row.get('Delta', 0))
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
-                # Grab Link
+                
                 link = str(row.get('Link', ''))
                 if link in ['nan', 'None', 'Open']: link = ""
                 
@@ -291,7 +286,6 @@ def sync_data(file_list, file_type):
                 c.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
-                # UPDATE LOGIC: Ensure link is updated if new one found
                 if existing is None:
                     c.execute('''INSERT INTO trades 
                         (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, link)
@@ -301,7 +295,6 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", link))
                     count_new += 1
                 else:
-                    # Update Existing
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, link=? 
@@ -309,7 +302,7 @@ def sync_data(file_list, file_type):
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, link, trade_id))
                         count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
-                        # Only update link if we found a valid one, otherwise keep existing
+                        # Only overwrite link if new one is valid
                         if link:
                              c.execute('''UPDATE trades SET 
                                 pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
@@ -345,7 +338,6 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
-# UPDATE JOURNAL FUNCTION (Now includes LINK updates)
 def update_journal(edited_df):
     conn = get_db_connection()
     c = conn.cursor()
@@ -355,8 +347,7 @@ def update_journal(edited_df):
             t_id = row['id'] 
             notes = str(row['Notes'])
             tags = str(row['Tags'])
-            link = str(row.get('Link', '')) # Capture edited link
-            # Clean up 'Open' text if user didn't change it but it was somehow there
+            link = str(row.get('Link', ''))
             if link == 'Open': link = ''
             
             c.execute("UPDATE trades SET notes=?, tags=?, link=? WHERE id=?", (notes, tags, link, t_id))
@@ -587,7 +578,7 @@ with tab1:
 
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
-                st.caption("Edit 'Notes' and 'Tags', then click Save.")
+                st.caption("Edit 'Notes' and 'Tags', then click Save. Paste missing OptionStrat links directly in the 'Link' column.")
                 display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Link', 'Action']
                 column_config = {
                     "id": None, 
