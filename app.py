@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v86.0 (Full Analytics Suite)")
+st.info("✅ RUNNING VERSION: v87.0 (High Visibility Mode)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -251,13 +251,8 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", ""))
                     count_new += 1
                 else:
-                    # UPDATE LOGIC WITH GREEK PROTECTION
-                    # If existing greeks are non-zero and new greeks are zero (common in history files),
-                    # KEEP the old greeks to preserve "Last Active" data for analytics.
-                    
                     old_status, old_theta, old_delta, old_gamma, old_vega = existing
                     
-                    # If new theta is 0 but we have old data, use old data
                     final_theta = theta if theta != 0 else old_theta
                     final_delta = delta if delta != 0 else old_delta
                     final_gamma = gamma if gamma != 0 else old_gamma
@@ -326,7 +321,7 @@ def load_data():
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
         
-        # --- NEW: Volatility Calculation from Snapshots ---
+        # --- Volatility Calculation from Snapshots ---
         snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
@@ -365,11 +360,9 @@ def load_data():
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         
         # --- NEW METRICS ---
-        # 1. Annualized ROI
         df['Ann. ROI'] = df['Daily Yield %'] * 365
         
-        # 2. Theta Efficiency (P&L / Potential Decay)
-        # Avoid division by zero
+        # Theta Efficiency (P&L / Potential Decay)
         df['Theta Pot.'] = df['Theta'] * df['Days Held']
         df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
         
@@ -608,7 +601,7 @@ with tab1:
 
                 strat_agg = active_df.groupby('Strategy').agg({
                     'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
-                    'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean' 
+                    'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean' 
                 }).reset_index()
                 
                 strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
@@ -621,12 +614,14 @@ with tab1:
                     'Name': [strat_agg['Name'].sum()], 
                     'Daily Yield %': [active_df['Daily Yield %'].mean()],
                     'Ann. ROI': [active_df['Ann. ROI'].mean()],
+                    'Theta Eff.': [active_df['Theta Eff.'].mean()],
+                    'P&L Vol': [active_df['P&L Vol'].mean()],
                     'Trend': ['-'], 'Target %': ['-']
                 })
                 final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
                 
-                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
-                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'P&L Vol', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Θ Eff', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
                 
                 def highlight_trend(val):
                     return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
@@ -643,6 +638,8 @@ with tab1:
                         'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
                         'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
                         'Ann. ROI': lambda x: safe_fmt(x, "{:.1f}%"), 
+                        'Θ Eff': lambda x: safe_fmt(x, "{:.2f}"),
+                        'Sleep Well (Vol)': lambda x: safe_fmt(x, "{:.1f}"),
                         'Target': lambda x: safe_fmt(x, "{:.2f}%")
                     })
                     .map(highlight_trend, subset=['Trend'])
@@ -651,7 +648,8 @@ with tab1:
                 )
 
             # STRATEGY TAB RENDERER
-            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            # --- ADDED Theta Eff and P&L Vol to columns here ---
+            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -672,6 +670,8 @@ with tab1:
                             'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'Ann. ROI': [subset['Ann. ROI'].mean()],
+                            'Theta Eff.': [subset['Theta Eff.'].mean()],
+                            'P&L Vol': [subset['P&L Vol'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Days Held': [subset['Days Held'].mean()],
                             'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
@@ -688,7 +688,14 @@ with tab1:
 
                         st.dataframe(
                             display_df.style
-                            .format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
+                            .format({
+                                'Theta/Cap %': "{:.2f}%", 
+                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 
+                                'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 
+                                'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}",
+                                'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 
+                                'Days Held': "{:.0f}"
+                            })
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
                             .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else ('color: #842029; font-weight: bold' if 'F' in str(v) else 'color: #d97706; font-weight: bold'), subset=['Grade'])
                             .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
@@ -886,15 +893,21 @@ with tab3:
         with an5:
             active_only = df[df['Status'] == 'Active']
             if not active_only.empty:
-                st.subheader("Capital Concentration")
+                st.subheader("Capital Concentration & Volatility")
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_strat = px.pie(active_only, values='Debit', names='Strategy', title="Risk by Strategy", hole=0.4)
+                    fig_strat = px.pie(active_only, values='Debit', names='Strategy', title="Risk by Strategy (Capital)", hole=0.4)
                     st.plotly_chart(fig_strat, use_container_width=True)
                 with c2:
-                    fig_tick = px.pie(active_only, values='Debit', names='Ticker', title="Risk by Ticker", hole=0.4)
-                    st.plotly_chart(fig_tick, use_container_width=True)
-            else: st.info("No active trades.")
+                    # NEW: Sleep Well Score Chart
+                    if 'P&L Vol' in active_only.columns and active_only['P&L Vol'].sum() > 0:
+                        fig_vol = px.bar(active_only.sort_values('P&L Vol', ascending=False).head(10), 
+                                         x='P&L Vol', y='Name', orientation='h', 
+                                         title="Top 10 High Stress Trades (P&L Volatility)",
+                                         color='Strategy')
+                        st.plotly_chart(fig_vol, use_container_width=True)
+                    else:
+                        st.info("Volatility data builds over time (requires multiple snapshots).")
 
         with an6:
             snaps = load_snapshots()
@@ -924,6 +937,19 @@ with tab3:
                     fig = px.scatter(valid_greeks, x=g_col, y='P&L', color='Strategy', title=f"Correlation: {g_col} vs P&L", hover_data=['Name'])
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.warning(f"No non-zero data for {g_col}.")
+                
+                st.divider()
+                
+                # NEW: Theta Efficiency Chart
+                if 'Theta Eff.' in df.columns:
+                    active_greeks = df[df['Status'] == 'Active']
+                    if not active_greeks.empty:
+                        fig_eff = px.scatter(active_greeks, x='Days Held', y='Theta Eff.', 
+                                             size='Debit', color='Strategy',
+                                             title="Theta Efficiency Ratio (Target > 1.0)",
+                                             hover_data=['Name', 'P&L'])
+                        fig_eff.add_hline(y=1.0, line_dash="dash", line_color="green", annotation_text="Target Efficiency")
+                        st.plotly_chart(fig_eff, use_container_width=True)
             else: st.info("Upload data.")
             
         with an8:
@@ -1035,4 +1061,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v86.0 | Full Analytics Suite")
+    st.caption("Allantis Trade Guardian v87.0 | High Visibility Mode")
