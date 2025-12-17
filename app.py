@@ -119,7 +119,7 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- SMART FILE READER (SIMPLIFIED) ---
+# --- SMART FILE READER ---
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
@@ -261,23 +261,20 @@ def sync_data(file_list, file_type):
                 else:
                     # Update Existing
                     if file_type == "History":
-                        # For History, we update link if provided, but since file has "Open", it will likely be blanked out.
-                        # This is fine as history files don't usually need active links.
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
                             WHERE id=?''', 
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
-                        # For Active, ONLY update link if the file provides a valid one (not empty).
-                        # This preserves manual edits.
+                        # Only update link if we found a valid one, otherwise keep existing
                         if link:
                              c.execute('''UPDATE trades SET 
                                 pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
                                 WHERE id=?''', 
                                 (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
                         else:
-                             # Don't touch the link column if file has no valid link
+                             # Don't touch link if empty
                              c.execute('''UPDATE trades SET 
                                 pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
                                 WHERE id=?''', 
