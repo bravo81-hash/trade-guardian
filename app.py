@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v84.1 (Cleaned: No Auto-Links)")
+st.info("✅ RUNNING VERSION: v84.2 (Final Clean: Link Feature Removed)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -23,6 +23,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
+    # TRADES TABLE (Link column removed)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -40,10 +41,10 @@ def init_db():
                     vega REAL,
                     notes TEXT,
                     tags TEXT,
-                    parent_id TEXT,
-                    link TEXT
+                    parent_id TEXT
                 )''')
     
+    # SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -65,8 +66,7 @@ def migrate_db():
     except: pass 
     try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
     except: pass
-    try: c.execute("ALTER TABLE trades ADD COLUMN link TEXT")
-    except: pass
+    # Link column migration removed
     conn.commit()
     conn.close()
 
@@ -119,7 +119,7 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- SMART FILE READER (CLEANED) ---
+# --- SMART FILE READER ---
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
@@ -149,13 +149,6 @@ def read_file_safely(file):
             df = df_raw.iloc[header_idx+1:].copy()
             df.columns = df_raw.iloc[header_idx]
             df.reset_index(drop=True, inplace=True)
-            
-            # ERASE "Open" text from Link column to avoid bad UI
-            if 'Link' in df.columns:
-                df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else str(x))
-            else:
-                df['Link'] = ''
-            
             return df
         return None
 
@@ -213,9 +206,6 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
-                # File Link is already cleaned to "" if it was "Open"
-                file_link = str(row.get('Link', ''))
-                
                 lot_size = 1
                 if strat == '130/160':
                     if debit > 11000: lot_size = 3
@@ -250,35 +240,25 @@ def sync_data(file_list, file_type):
                 existing = c.fetchone()
                 
                 if existing is None:
-                    # New trade: use file link (which is "")
                     c.execute('''INSERT INTO trades 
-                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, link)
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (trade_id, name, strat, status, start_dt.date(), 
                          exit_dt.date() if exit_dt else None, 
-                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", file_link))
+                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", ""))
                     count_new += 1
                 else:
-                    # Existing trade: 
-                    # If file has valid link (unlikely), update. Else keep existing (manual) link.
                     if file_type == "History":
-                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?
+                        c.execute('''UPDATE trades SET 
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
                             WHERE id=?''', 
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
-                         count_update += 1
+                        count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
-                        if file_link: # Only if file actually has a URL
-                             c.execute('''UPDATE trades SET 
-                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
-                                WHERE id=?''', 
-                                (pnl, days_held, theta, delta, gamma, vega, file_link, trade_id))
-                        else:
-                             # Keep existing link (manual entry) safe
-                             c.execute('''UPDATE trades SET 
-                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
-                                WHERE id=?''', 
-                                (pnl, days_held, theta, delta, gamma, vega, trade_id))
+                        c.execute('''UPDATE trades SET 
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
+                            WHERE id=?''', 
+                            (pnl, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                         
                 if file_type == "Active":
@@ -313,8 +293,7 @@ def update_journal(edited_df):
             t_id = row['id'] 
             notes = str(row['Notes'])
             tags = str(row['Tags'])
-            link = str(row.get('Link', '')) # Manual link entry
-            c.execute("UPDATE trades SET notes=?, tags=?, link=? WHERE id=?", (notes, tags, link, t_id))
+            c.execute("UPDATE trades SET notes=?, tags=? WHERE id=?", (notes, tags, t_id))
             count += 1
         conn.commit()
         return count
@@ -338,13 +317,13 @@ def load_data():
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
             'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes',
-            'tags': 'Tags', 'parent_id': 'Parent ID', 'link': 'Link'
+            'tags': 'Tags', 'parent_id': 'Parent ID'
         })
         
-        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags']
         for col in required_cols:
             if col not in df.columns:
-                df[col] = "" if col in ['Notes', 'Tags', 'Link'] else 0.0
+                df[col] = "" if col in ['Notes', 'Tags'] else 0.0
         
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
@@ -542,8 +521,8 @@ with tab1:
 
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
-                st.caption("Edit 'Notes' and 'Tags', then click Save. Paste missing OptionStrat links directly in the 'Link' column.")
-                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Link', 'Action']
+                st.caption("Edit 'Notes' and 'Tags', then click Save.")
+                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
@@ -554,7 +533,6 @@ with tab1:
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
-                    "Link": st.column_config.TextColumn("🔗 Link (Edit)", width="medium", help="Paste OptionStrat URL here if missing"),
                     "Action": st.column_config.TextColumn("Signal", disabled=True),
                 }
                 edited_df = st.data_editor(
@@ -629,7 +607,7 @@ with tab1:
                 )
 
             # STRATEGY TAB RENDERER
-            cols = ['Name', 'Action', 'Grade', 'Link', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Daily Yield %', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -646,7 +624,7 @@ with tab1:
                     
                     if not subset.empty:
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'], 'Link': ['-'],
+                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
                             'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
@@ -673,8 +651,7 @@ with tab1:
                             .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
                             .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
-                            use_container_width=True,
-                            column_config={"Link": st.column_config.LinkColumn("🔗", display_text="Open")}
+                            use_container_width=True
                         )
                     else: st.info("No active trades.")
 
@@ -815,13 +792,11 @@ with tab3:
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
                 
-                # FIX: Pre-aggregate data to ensure 1:1 mapping for text
                 hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
                 
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 
                           'July', 'August', 'September', 'October', 'November', 'December']
                 
-                # FIX: Explicitly set z (color) and text_auto to ensure alignment
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", 
                                        title="1. Monthly Seasonality ($)", 
                                        text_auto=True, 
@@ -832,7 +807,6 @@ with tab3:
                 st.divider()
 
                 # 2. Duration Sweet Spot
-                # Similar aggregation fix for duration if needed, but histogram usually handles it better
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
                                           title="2. Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
                 st.plotly_chart(fig2, use_container_width=True)
@@ -847,7 +821,6 @@ with tab3:
                                               title="3. Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
                     st.plotly_chart(fig3, use_container_width=True)
 
-        # RESTORED: Ticker Analysis
         with an4:
             if not expired_sub.empty:
                 tick_grp = expired_sub.groupby('Ticker')['P&L'].sum().reset_index().sort_values('P&L', ascending=False)
@@ -874,29 +847,21 @@ with tab3:
                 sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique(), key="life_strat")
                 strat_snaps = snaps[snaps['strategy'] == sel_strat]
                 
-                # FIX: Improved Lifecycle Graph visibility
-                # Use markers+lines to ensure points are visible even if lines are sparse
                 fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', 
                               title=f"Trade Lifecycle: {sel_strat}", markers=True)
-                
-                # Force axes to start from reasonable values
                 fig.update_layout(xaxis_title="Days Held", yaxis_title="P&L ($)")
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No snapshots yet.")
 
-        # RESTORED: Greeks Lab
         with an7:
             if not df.empty:
                 st.markdown("##### 🔬 Greek Exposure Analysis")
-                # FIX: Used session state key to prevent reset on selection change
                 if "greek_sel" not in st.session_state:
                     st.session_state["greek_sel"] = "Theta"
                 
                 g_col = st.selectbox("Select Greek", ['Theta', 'Delta', 'Gamma', 'Vega'], 
                                      index=['Theta', 'Delta', 'Gamma', 'Vega'].index(st.session_state["greek_sel"]),
                                      key="greek_dropdown")
-                
-                # Update session state
                 st.session_state["greek_sel"] = g_col
 
                 valid_greeks = df[df[g_col] != 0]
@@ -906,7 +871,6 @@ with tab3:
                 else: st.warning(f"No non-zero data for {g_col}.")
             else: st.info("Upload data.")
             
-        # NEW: Efficiency Analytics
         with an8:
             if not df.empty:
                 st.markdown("##### ⚙️ Capital Efficiency (Theta/Cap %)")
@@ -918,7 +882,7 @@ with tab3:
                     st.plotly_chart(fig, use_container_width=True)
                 else: st.info("No active trades.")
 
-# 4. RULE BOOK (UPDATED WITH AUDIT INSIGHTS)
+# 4. RULE BOOK
 with tab4:
     st.markdown("""
     # 📖 The Trader's Constitution
@@ -965,4 +929,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v84.0 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v84.1 | Certified Stable & Audited")
