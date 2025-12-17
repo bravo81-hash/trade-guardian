@@ -13,7 +13,7 @@ import openpyxl
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v83.3 (Fix: Excel Hyperlink Metadata Extraction)")
+st.info("✅ RUNNING VERSION: v83.4 (Fix: Robust Link Extraction)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -156,9 +156,17 @@ def read_file_safely(file):
                         # Check if cell has a hyperlink object
                         if cell.hyperlink and cell.hyperlink.target:
                             extracted_links[df_row_counter] = cell.hyperlink.target
+                        elif cell.value and str(cell.value).startswith('=HYPERLINK'):
+                             # Attempt to extract from formula: =HYPERLINK("url", "friendly_name")
+                             try:
+                                 val = str(cell.value)
+                                 url = val.split('"')[1] # Simple extraction
+                                 if url.startswith('http'):
+                                     extracted_links[df_row_counter] = url
+                             except: pass
+                        
                         df_row_counter += 1
             except Exception as e:
-                # Silent fail on hyperlink extraction, fall back to text
                 pass
 
             # Reset file pointer and read data normally
@@ -198,13 +206,13 @@ def read_file_safely(file):
                 # 'ExtractedLink' will hold the URL or NaN
                 df['ExtractedLink'] = df.index.map(extracted_links)
                 
-                # Use ExtractedLink if valid, otherwise keep existing 'Link' (even if it says "Open")
-                # But actually, we want to replace "Open" with "" if no link found
-                df['Link'] = df['ExtractedLink'].fillna('') 
+                # Use ExtractedLink if valid, otherwise keep existing 'Link' 
+                # REPLACE "Open" or "None" with empty string if no link found
+                df['Link'] = df['ExtractedLink'].fillna('')
             else:
                 # If no links extracted, clear "Open" text to avoid bad links
                 if 'Link' in df.columns:
-                    df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() == 'Open' else x)
+                    df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else x)
             
             return df
         return None
@@ -265,6 +273,7 @@ def sync_data(file_list, file_type):
                 vega = clean_num(row.get('Vega', 0))
                 # Grab Link
                 link = str(row.get('Link', ''))
+                if link in ['nan', 'None', 'Open']: link = "" # Cleanup
                 
                 lot_size = 1
                 if strat == '130/160':
@@ -372,6 +381,7 @@ def load_data():
     finally: conn.close()
     
     if not df.empty:
+        # Standardize column names
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -380,6 +390,7 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID', 'link': 'Link'
         })
         
+        # Ensure all required columns exist with defaults
         required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']
         for col in required_cols:
             if col not in df.columns:
@@ -394,7 +405,9 @@ def load_data():
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
+        
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
+        
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
         def get_grade(row):
@@ -969,6 +982,7 @@ with tab4:
     * **Management:** **Time Limit Rule.**
         * Kill if trade is **25 days old** and P&L is flat/negative.
         * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
+    * **Efficiency Check:** ROI-focused. Requires high velocity.
     
     ### 2. 160/190 Strategy (Patience Training)
     * **Role:** Compounder. Expectancy focused.
@@ -1001,4 +1015,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v83.3 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v83.4 | Certified Stable & Audited")
