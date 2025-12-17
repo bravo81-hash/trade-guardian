@@ -13,7 +13,7 @@ import openpyxl
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v83.4 (Fix: Robust Link Extraction)")
+st.info("✅ RUNNING VERSION: v83.5 (Fix: Editable Links & Fallbacks)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -120,19 +120,17 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- SMART FILE READER (UPDATED FOR HYPERLINKS) ---
+# --- SMART FILE READER ---
 def read_file_safely(file):
     try:
-        extracted_links = {} # Row Index -> URL
+        extracted_links = {} 
         
-        # Only attempt extraction on real XLSX files
         if file.name.endswith('.xlsx'):
             try:
-                # Load workbook to find hyperlinks
+                # Load workbook for link extraction
                 wb = openpyxl.load_workbook(file, data_only=True)
                 ws = wb.active
                 
-                # Locate "Link" column
                 link_col_idx = None
                 header_row_idx = None
                 
@@ -140,43 +138,34 @@ def read_file_safely(file):
                 for r_idx, row in enumerate(ws.iter_rows(max_row=20, values_only=True)):
                     row_vals = [str(c).strip() for c in row if c is not None]
                     if "Name" in row_vals and "Link" in row_vals:
-                        header_row_idx = r_idx + 1 # 1-based index
+                        header_row_idx = r_idx + 1 
                         try:
-                            # Convert tuple to list to find index. +1 for 1-based col index
                             link_col_idx = list(row).index("Link") + 1 
                         except: pass
                         break
                 
                 if link_col_idx and header_row_idx:
-                    # Iterate rows after header to get hyperlinks
-                    # We map these to 0-based index relative to data start
                     df_row_counter = 0 
                     for r in range(header_row_idx + 1, ws.max_row + 1):
                         cell = ws.cell(row=r, column=link_col_idx)
-                        # Check if cell has a hyperlink object
                         if cell.hyperlink and cell.hyperlink.target:
                             extracted_links[df_row_counter] = cell.hyperlink.target
                         elif cell.value and str(cell.value).startswith('=HYPERLINK'):
-                             # Attempt to extract from formula: =HYPERLINK("url", "friendly_name")
                              try:
                                  val = str(cell.value)
-                                 url = val.split('"')[1] # Simple extraction
+                                 url = val.split('"')[1] 
                                  if url.startswith('http'):
                                      extracted_links[df_row_counter] = url
                              except: pass
-                        
                         df_row_counter += 1
-            except Exception as e:
-                pass
+            except: pass
 
-            # Reset file pointer and read data normally
             file.seek(0)
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
             
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
-            # CSV Handling
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -187,7 +176,6 @@ def read_file_safely(file):
             file.seek(0)
             return pd.read_csv(file, skiprows=header_row)
 
-        # Process DataFrame
         header_idx = -1
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
@@ -200,18 +188,13 @@ def read_file_safely(file):
             df.columns = df_raw.iloc[header_idx]
             df.reset_index(drop=True, inplace=True)
             
-            # Inject extracted links if they exist
             if extracted_links:
-                # Map extracted URLs to the dataframe index
-                # 'ExtractedLink' will hold the URL or NaN
                 df['ExtractedLink'] = df.index.map(extracted_links)
-                
-                # Use ExtractedLink if valid, otherwise keep existing 'Link' 
-                # REPLACE "Open" or "None" with empty string if no link found
-                df['Link'] = df['ExtractedLink'].fillna('')
+                # Use extracted link, if NaN use existing, if that's 'Open' make it empty
+                df['Link'] = df['ExtractedLink'].fillna(df.get('Link', '')).apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else x)
             else:
-                # If no links extracted, clear "Open" text to avoid bad links
                 if 'Link' in df.columns:
+                    # Clean up placeholder text
                     df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else x)
             
             return df
@@ -273,7 +256,7 @@ def sync_data(file_list, file_type):
                 vega = clean_num(row.get('Vega', 0))
                 # Grab Link
                 link = str(row.get('Link', ''))
-                if link in ['nan', 'None', 'Open']: link = "" # Cleanup
+                if link in ['nan', 'None', 'Open']: link = ""
                 
                 lot_size = 1
                 if strat == '130/160':
@@ -308,6 +291,7 @@ def sync_data(file_list, file_type):
                 c.execute("SELECT status FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
+                # UPDATE LOGIC: Ensure link is updated if new one found
                 if existing is None:
                     c.execute('''INSERT INTO trades 
                         (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, link)
@@ -317,6 +301,7 @@ def sync_data(file_list, file_type):
                          days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", link))
                     count_new += 1
                 else:
+                    # Update Existing
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, link=? 
@@ -324,10 +309,17 @@ def sync_data(file_list, file_type):
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, link, trade_id))
                         count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
-                        c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
-                            WHERE id=?''', 
-                            (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
+                        # Only update link if we found a valid one, otherwise keep existing
+                        if link:
+                             c.execute('''UPDATE trades SET 
+                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
+                                WHERE id=?''', 
+                                (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
+                        else:
+                             c.execute('''UPDATE trades SET 
+                                pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
+                                WHERE id=?''', 
+                                (pnl, days_held, theta, delta, gamma, vega, trade_id))
                         count_update += 1
                         
                 if file_type == "Active":
@@ -353,6 +345,7 @@ def sync_data(file_list, file_type):
     conn.close()
     return log
 
+# UPDATE JOURNAL FUNCTION (Now includes LINK updates)
 def update_journal(edited_df):
     conn = get_db_connection()
     c = conn.cursor()
@@ -362,7 +355,11 @@ def update_journal(edited_df):
             t_id = row['id'] 
             notes = str(row['Notes'])
             tags = str(row['Tags'])
-            c.execute("UPDATE trades SET notes=?, tags=? WHERE id=?", (notes, tags, t_id))
+            link = str(row.get('Link', '')) # Capture edited link
+            # Clean up 'Open' text if user didn't change it but it was somehow there
+            if link == 'Open': link = ''
+            
+            c.execute("UPDATE trades SET notes=?, tags=?, link=? WHERE id=?", (notes, tags, link, t_id))
             count += 1
         conn.commit()
         return count
@@ -381,7 +378,6 @@ def load_data():
     finally: conn.close()
     
     if not df.empty:
-        # Standardize column names
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -390,7 +386,6 @@ def load_data():
             'tags': 'Tags', 'parent_id': 'Parent ID', 'link': 'Link'
         })
         
-        # Ensure all required columns exist with defaults
         required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Link']
         for col in required_cols:
             if col not in df.columns:
@@ -604,7 +599,7 @@ with tab1:
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
-                    "Link": st.column_config.LinkColumn("🔗", display_text="Open", width="small"),
+                    "Link": st.column_config.TextColumn("🔗 Link (Edit)", width="medium", help="Paste OptionStrat URL here if missing"),
                     "Action": st.column_config.TextColumn("Signal", disabled=True),
                 }
                 edited_df = st.data_editor(
@@ -1015,4 +1010,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta/Cap %**. If it drops below 0.1%, the engine is stalling.
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v83.4 | Certified Stable & Audited")
+    st.caption("Allantis Trade Guardian v83.5 | Certified Stable & Audited")
