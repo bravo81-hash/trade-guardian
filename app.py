@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v84.0 (Simplified: Manual Link Entry Only)")
+st.info("✅ RUNNING VERSION: v84.1 (Cleaned: No Auto-Links)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -119,7 +119,7 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- SMART FILE READER ---
+# --- SMART FILE READER (CLEANED) ---
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
@@ -150,9 +150,8 @@ def read_file_safely(file):
             df.columns = df_raw.iloc[header_idx]
             df.reset_index(drop=True, inplace=True)
             
-            # Clean up the "Link" column immediately
+            # ERASE "Open" text from Link column to avoid bad UI
             if 'Link' in df.columns:
-                # If it says "Open" or "None", replace with empty string
                 df['Link'] = df['Link'].apply(lambda x: '' if str(x).strip() in ['Open', 'None', 'nan'] else str(x))
             else:
                 df['Link'] = ''
@@ -214,8 +213,8 @@ def sync_data(file_list, file_type):
                 gamma = clean_num(row.get('Gamma', 0))
                 vega = clean_num(row.get('Vega', 0))
                 
-                # Link is already cleaned in read_file_safely
-                link = str(row.get('Link', ''))
+                # File Link is already cleaned to "" if it was "Open"
+                file_link = str(row.get('Link', ''))
                 
                 lot_size = 1
                 if strat == '130/160':
@@ -251,30 +250,31 @@ def sync_data(file_list, file_type):
                 existing = c.fetchone()
                 
                 if existing is None:
+                    # New trade: use file link (which is "")
                     c.execute('''INSERT INTO trades 
                         (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, link)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (trade_id, name, strat, status, start_dt.date(), 
                          exit_dt.date() if exit_dt else None, 
-                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", link))
+                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", file_link))
                     count_new += 1
                 else:
-                    # Update Existing
+                    # Existing trade: 
+                    # If file has valid link (unlikely), update. Else keep existing (manual) link.
                     if file_type == "History":
-                        c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
+                         c.execute('''UPDATE trades SET 
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?
                             WHERE id=?''', 
                             (pnl, status, exit_dt.date() if exit_dt else None, days_held, theta, delta, gamma, vega, trade_id))
-                        count_update += 1
+                         count_update += 1
                     elif existing[0] in ["Active", "Missing"]: 
-                        # Only update link if we found a valid one, otherwise keep existing
-                        if link:
+                        if file_link: # Only if file actually has a URL
                              c.execute('''UPDATE trades SET 
                                 pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', link=?
                                 WHERE id=?''', 
-                                (pnl, days_held, theta, delta, gamma, vega, link, trade_id))
+                                (pnl, days_held, theta, delta, gamma, vega, file_link, trade_id))
                         else:
-                             # Don't touch link if empty
+                             # Keep existing link (manual entry) safe
                              c.execute('''UPDATE trades SET 
                                 pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active'
                                 WHERE id=?''', 
