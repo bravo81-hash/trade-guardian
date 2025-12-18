@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v94.0 (Feature: 'Unsaved Changes' Safety Guard)")
+st.info("✅ RUNNING VERSION: v95.1 (Fix: PnL Normalization Bug Patched)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -25,7 +25,7 @@ st.title("🛡️ Allantis Trade Guardian")
 DB_NAME = "trade_guardian_v4.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     c = conn.cursor()
     
     # TRADES TABLE
@@ -67,7 +67,7 @@ def init_db():
     migrate_db()
 
 def migrate_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     c = conn.cursor()
     # Add new columns if they don't exist (Safe to run multiple times)
     try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
@@ -82,7 +82,7 @@ def migrate_db():
     conn.close()
 
 def get_db_connection():
-    return sqlite3.connect(DB_NAME)
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 # --- CONFIGURATION ---
 BASE_CONFIG = {
@@ -125,7 +125,9 @@ def safe_fmt(val, fmt_str):
 
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
-    return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
+    # Sanitize ID to ensure it is robust
+    clean_name = re.sub(r'[^a-zA-Z0-9]', '', str(name))
+    return f"{clean_name}_{strategy}_{d_str}"
 
 def extract_ticker(name):
     try:
@@ -156,7 +158,6 @@ def get_col(row, candidates):
 # --- DEEP SCAN PARSER ---
 def identify_leg_type(ticker):
     # Matches P or C followed by numbers (strike)
-    # Updated regex to support decimals in strike price (e.g. 4100.5)
     # Handles .SPXW prefix as well
     # Looks for a pattern like: Date(6digits) -> C/P -> Strike
     match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
@@ -174,7 +175,7 @@ def read_file_safely(file):
             df_raw = pd.read_excel(file, header=None)
         else:
             # CSV Handling
-            content = file.getvalue().decode("utf-8")
+            content = file.getvalue().decode("utf-8", errors='ignore')
             lines = content.split('\n')
             header_row = 0
             for i, line in enumerate(lines[:20]):
@@ -182,7 +183,7 @@ def read_file_safely(file):
                     header_row = i
                     break
             file.seek(0)
-            return pd.read_csv(file, skiprows=header_row)
+            return pd.read_csv(file, skiprows=header_row, on_bad_lines='skip')
 
         header_idx = -1
         # Scan first 20 rows for the main header
@@ -202,7 +203,7 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (Deep Scan Version - Fixed) ---
+# --- SYNC ENGINE (Fixed Logic) ---
 def sync_data(file_list, file_type):
     # 1. FORCE MIGRATION
     migrate_db()
@@ -260,14 +261,6 @@ def sync_data(file_list, file_type):
                     if not name.startswith('.'):
                         # Save previous block if exists
                         if current_trade:
-                            # Normalization
-                            calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
-                            real_total = current_trade['pnl']
-                            if calc_total != 0 and real_total != 0:
-                                factor = real_total / calc_total
-                                current_trade['call_pnl'] *= factor
-                                current_trade['put_pnl'] *= factor
-
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
                             else: count_update += 1
@@ -329,13 +322,17 @@ def sync_data(file_list, file_type):
                     
                     # --- LEG ROW (Child) ---
                     elif name.startswith('.') and current_trade:
-                        # --- COLUMN MAPPING FIX FOR LEGS ---
-                        # Use fuzzy matching on the INDEX positions implicitly by name from strategy row
+                        # --- ROBUST COLUMN PARSING FOR LEGS ---
+                        # In OptionStrat CSVs, leg rows have shifted columns relative to the header.
+                        # The "Total Return %" column in the header aligns with "Quantity" for leg rows.
+                        # The "Total Return $" column in the header aligns with "Entry Price" for leg rows.
                         
                         qty = clean_num(get_col(row, ['Total Return %'])) 
                         entry_price = clean_num(get_col(row, ['Total Return $']))
                         
+                        # "Created At" column aligns with "Current Price" for leg rows
                         raw_current = get_col(row, ['Created At'])
+                        # "Expiration" column aligns with "Close Price" for leg rows
                         raw_close = get_col(row, ['Expiration'])
                         
                         curr = clean_num(raw_current)
@@ -350,6 +347,8 @@ def sync_data(file_list, file_type):
                             elif curr != 0: price_to_use = curr
                         
                         mult = get_multiplier(name)
+                        # Standard PnL Calculation: (Exit - Entry) * Qty * Mult
+                        # Note: Qty is negative for shorts, positive for longs.
                         leg_pnl = (price_to_use - entry_price) * qty * mult
                         
                         leg_type = identify_leg_type(name)
@@ -364,13 +363,6 @@ def sync_data(file_list, file_type):
 
             # Process final block
             if current_trade:
-                calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
-                real_total = current_trade['pnl']
-                if calc_total != 0 and real_total != 0:
-                    factor = real_total / calc_total
-                    current_trade['call_pnl'] *= factor
-                    current_trade['put_pnl'] *= factor
-                
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
@@ -424,13 +416,14 @@ def process_trade_block(cursor, t, file_type, found_ids):
         final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
         final_vega = t['vega'] if t['vega'] != 0 else old_vega
 
+        # ALWAYS update PnL columns to fix previous corruption
         if file_type == "History":
             cursor.execute('''UPDATE trades SET 
                 pnl=?, pnl_calls=?, pnl_puts=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
                 WHERE id=?''', 
                 (t['pnl'], t['call_pnl'], t['put_pnl'], t['status'], t['exit_dt'], t['days_held'], 
                  final_theta, final_delta, final_gamma, final_vega, t['id']))
-        elif old_status in ["Active", "Missing"]: 
+        else: # Active or currently Missing
             cursor.execute('''UPDATE trades SET 
                 pnl=?, pnl_calls=?, pnl_puts=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', exit_date=?
                 WHERE id=?''', 
@@ -1321,4 +1314,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v94.0 | Feature: 'Unsaved Changes' Safety Guard")
+    st.caption("Allantis Trade Guardian v95.1 | Feature: PnL Calculation Patched")
