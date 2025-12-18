@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 import re
 from datetime import datetime
 
@@ -11,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v95.0 (Cloud Database: Supabase/Postgres)")
+st.info("☁️ RUNNING VERSION: v95.1 (Supabase Connection Guard)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -21,12 +22,21 @@ conn = st.connection("supabase", type="sql")
 
 def run_query(query_str, params=None):
     """Helper to run queries safely with parameters and commit."""
-    with conn.session as s:
-        if params:
-            s.execute(text(query_str), params)
-        else:
-            s.execute(text(query_str))
-        s.commit()
+    try:
+        with conn.session as s:
+            if params:
+                s.execute(text(query_str), params)
+            else:
+                s.execute(text(query_str))
+            s.commit()
+    except OperationalError as e:
+        st.error("🚨 **Database Connection Failed!**")
+        st.warning("It looks like the password in your Streamlit Secrets is incorrect or the database is paused.")
+        st.markdown("1. Go to Streamlit Dashboard > App Settings > Secrets.\n2. Check that `[YOUR-PASSWORD]` in the URL is replaced with your actual Supabase password.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Database Error: {str(e)}")
+        raise e
 
 def init_db():
     # Postgres Syntax for Tables
