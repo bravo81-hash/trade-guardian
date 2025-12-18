@@ -12,67 +12,79 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v100.0 (Fix: Connection Caching Error)")
+st.info("☁️ RUNNING VERSION: v101.0 (Fix: Manual Connection Override & IPv6 Workaround)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- DATABASE CONNECTION ---
-def get_db_url():
-    """Retrieves and sanitizes the database URL from secrets."""
-    try:
-        # 1. Fetch URL from secrets
-        if "supabase" in st.secrets["connections"]:
-            url = st.secrets["connections"]["supabase"]["url"]
-        elif "postgres" in st.secrets["connections"]:
-            url = st.secrets["connections"]["postgres"]["url"]
-        else:
-            url = st.secrets["database"]["url"]
-            
-        # 2. FIX DRIVER: Ensure postgresql+psycopg2 for stability
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql+psycopg2://")
-        elif url.startswith("postgresql://"):
-            url = url.replace("postgresql://", "postgresql+psycopg2://")
-        
-        # 3. SSL MODE: Ensure SSL is required (Supabase mandates this)
-        if "sslmode" not in url:
-            if "?" in url:
-                url += "&sslmode=require"
-            else:
-                url += "?sslmode=require"
-            
-        return url
-    except Exception as e:
-        st.error(f"❌ Secret Key Error: Could not find valid database URL. ({str(e)})")
-        st.stop()
+# --- SIDEBAR DIAGNOSTICS & CONNECTION SETUP ---
+st.sidebar.markdown("### ☁️ Database Setup")
 
-# --- SIDEBAR DIAGNOSTICS (Must be defined before connection init) ---
-st.sidebar.markdown("### ☁️ Cloud Workflow")
-use_pooler = st.sidebar.checkbox("🔧 Use Pooler (Port 6543)", value=False, help="Check this ONLY if standard connection fails.")
+# 1. Manual Override Input
+with st.sidebar.expander("🔧 DB Connection Settings", expanded=True):
+    manual_db_url = st.text_input(
+        "Manual Connection String (Optional)", 
+        type="password", 
+        help="Paste your Supabase Transaction Pooler URL (Port 6543) here to override secrets."
+    )
+    
+    use_pooler_force = st.checkbox("Force Port 6543 (IPv4 Fix)", value=True, help="Automatically swaps port 5432 to 6543 to fix IPv6 errors.")
+
+# --- DATABASE CONNECTION LOGIC ---
+def get_final_db_url():
+    """Determines the best URL to use (Manual > Secrets)."""
+    url = ""
+    
+    # Priority 1: Manual Input
+    if manual_db_url.strip():
+        url = manual_db_url.strip()
+    
+    # Priority 2: Secrets
+    else:
+        try:
+            if "supabase" in st.secrets["connections"]:
+                url = st.secrets["connections"]["supabase"]["url"]
+            elif "postgres" in st.secrets["connections"]:
+                url = st.secrets["connections"]["postgres"]["url"]
+            else:
+                url = st.secrets["database"]["url"]
+        except:
+            pass # No secrets found, will handle later
+
+    if not url:
+        return None
+
+    # --- URL SANITIZATION & FIXES ---
+    
+    # 1. Driver Fix (Streamlit needs postgresql+psycopg2)
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg2://")
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg2://")
+    
+    # 2. Port Fix (IPv6 Workaround)
+    if use_pooler_force and ":5432" in url and "supabase.co" in url:
+        url = url.replace(":5432", ":6543")
+    
+    return url
 
 # Initialize Connection
-try:
-    db_url = get_db_url()
-    
-    # MANUAL OVERRIDE: Only swap port if user explicitly asks via checkbox
-    if use_pooler and ":5432" in db_url:
-        db_url = db_url.replace(":5432", ":6543")
-        st.sidebar.warning("Using Transaction Pooler (6543)")
+conn = None
+db_url = get_final_db_url()
 
-    # FIX: Pass URL string directly to st.connection instead of engine object
-    # This avoids the "UnhashableParamError" because strings are hashable.
-    # ttl=0 is used to prevent aggressive caching of the connection object itself if needed,
-    # but usually st.connection handles this. We keep it standard here.
-    conn = st.connection("supabase", type="sql", url=db_url)
-    
-except Exception as e:
-    st.error(f"⚠️ Connection Initialization Failed: {str(e)}")
-    st.stop()
+if db_url:
+    try:
+        # We pass the URL string directly to avoid hashing issues
+        # ttl=0 disables caching of the connection object
+        conn = st.connection("supabase", type="sql", url=db_url, ttl=0)
+    except Exception as e:
+        st.error(f"⚠️ Connection Init Error: {str(e)}")
+else:
+    st.warning("⚠️ No Database URL found. Please check secrets.toml or paste URL in sidebar.")
 
 def run_query(query_str, params=None):
     """Helper to run queries safely with parameters and commit."""
+    if not conn: return
     try:
-        # Use the connection session for transaction management
         with conn.session as s:
             if params:
                 s.execute(text(query_str), params)
@@ -81,14 +93,21 @@ def run_query(query_str, params=None):
             s.commit()
     except OperationalError as e:
         st.error("🚨 **Database Connection Failed!**")
-        st.warning("Please check your Supabase password in Streamlit Secrets.")
-        st.error(str(e))
+        st.markdown(f"**Error:** `{str(e)}`")
+        st.markdown("---")
+        st.warning("""
+        **Troubleshooting:**
+        1. **Check Password:** Did you replace `[YOUR-PASSWORD]` with your actual password?
+        2. **Use Port 6543:** Ensure you are using the 'Transaction Pooler' connection string.
+        3. **Manual Override:** Paste the full string into the sidebar box to test directly.
+        """)
         st.stop()
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
         raise e
 
 def init_db():
+    if not conn: return
     # Postgres Syntax for Tables
     run_query('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
@@ -444,6 +463,7 @@ def update_journal(edited_df):
 # --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
+    if not conn: return pd.DataFrame()
     try:
         init_db()
         df = conn.query("SELECT * FROM trades", ttl=0)
@@ -510,45 +530,30 @@ def load_data():
     return df
 
 # --- SIDEBAR ---
-st.sidebar.markdown("### ☁️ Cloud Workflow")
-
-# --- DIAGNOSTICS TOOL ---
-with st.sidebar.expander("🔧 DB Diagnostics", expanded=False):
-    st.write("Troubleshoot your Supabase connection here.")
-    if st.button("Test Connection"):
-        try:
-            res = conn.query("SELECT 1", ttl=0)
-            st.success(f"✅ Connection Successful! (Result: {res.iloc[0,0]})")
-        except Exception as e:
-            st.error(f"❌ Connection Failed:\n{str(e)}")
-            
-    if st.checkbox("Show Connection String Format"):
-        try:
-            url = get_db_url()
-            masked = re.sub(r':(.*?)@', ':****@', url)
-            st.code(masked)
-        except: st.error("Could not retrieve URL.")
-
 with st.sidebar.expander("🔵 WORK (Sync Files)", expanded=True):
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
     if st.button("🔄 Process & Reconcile"):
-        logs = []
-        if active_up: logs.extend(sync_data(active_up, "Active"))
-        if history_up: logs.extend(sync_data(history_up, "History"))
-        if logs:
-            for l in logs: st.write(l)
-            st.cache_data.clear()
-            st.success("Sync Complete to Cloud!")
+        if conn:
+            logs = []
+            if active_up: logs.extend(sync_data(active_up, "Active"))
+            if history_up: logs.extend(sync_data(history_up, "History"))
+            if logs:
+                for l in logs: st.write(l)
+                st.cache_data.clear()
+                st.success("Sync Complete to Cloud!")
+        else:
+            st.error("No Database Connection.")
 
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧨 Hard Reset Cloud DB"):
-        run_query("DROP TABLE IF EXISTS trades CASCADE")
-        run_query("DROP TABLE IF EXISTS snapshots CASCADE")
-        init_db()
-        st.cache_data.clear()
-        st.success("Cloud Database Wiped & Reset.")
-        st.rerun()
+        if conn:
+            run_query("DROP TABLE IF EXISTS trades CASCADE")
+            run_query("DROP TABLE IF EXISTS snapshots CASCADE")
+            init_db()
+            st.cache_data.clear()
+            st.success("Cloud Database Wiped & Reset.")
+            st.rerun()
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Strategy Settings")
