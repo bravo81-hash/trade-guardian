@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v95.2 (Fix: Removed Incorrect Multipliers from Leg Logic)")
+st.info("✅ RUNNING VERSION: v96.0 (Fixes: ID Duplication, 'Symbol' Row Filter, PnL Math)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -124,10 +124,9 @@ def safe_fmt(val, fmt_str):
     except: return str(val)
 
 def generate_id(name, strategy, entry_date):
+    # --- RESTORED ORIGINAL ID LOGIC to prevent Duplicates ---
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
-    # Sanitize ID to ensure it is robust
-    clean_name = re.sub(r'[^a-zA-Z0-9]', '', str(name))
-    return f"{clean_name}_{strategy}_{d_str}"
+    return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
 def extract_ticker(name):
     try:
@@ -139,6 +138,13 @@ def extract_ticker(name):
             return ticker
         return "UNKNOWN"
     except: return "UNKNOWN"
+
+def get_multiplier(ticker):
+    """Returns contract multiplier. Default 100 for SPX/Equities."""
+    t = str(ticker).upper()
+    if "/MES" in t: return 5
+    if "/ES" in t: return 50
+    return 100
 
 def get_col(row, candidates):
     """Fuzzy match column names to handle spaces or slight variations."""
@@ -248,7 +254,10 @@ def sync_data(file_list, file_type):
                     # STRIP WHITESPACE to catch .SPX legs properly
                     name_val = get_col(row, ['Name', 'Symbol'])
                     name = str(name_val).strip()
-                    if name in ['nan', '', 'Symbol', '0', '0.0']: continue
+                    
+                    # --- FIX v96.0: STRICT FILTERING for OptionStrat Header Rows ---
+                    # Skips rows that are just repeating headers or empty
+                    if name in ['nan', '', 'Symbol', 'Name', '0', '0.0']: continue
                     
                     # --- STRATEGY ROW (Parent) ---
                     if not name.startswith('.'):
@@ -339,7 +348,7 @@ def sync_data(file_list, file_type):
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
                         
-                        # --- CRITICAL FIX v95.2 ---
+                        # --- MATH FIX (Retained from v95.2) ---
                         # OptionStrat exports 'Entry Price' and 'Current Price' as TOTAL VALUES for the leg position.
                         # They are NOT per-share prices. 
                         # DO NOT Multiply by 100. DO NOT Multiply by Qty Magnitude.
@@ -1315,4 +1324,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v95.2 | Feature: PnL Calculation Patched")
+    st.caption("Allantis Trade Guardian v96.0 | Features: ID Fix, Symbol Row Filter, Math Patch")
