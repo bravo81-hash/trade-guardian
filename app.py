@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v89.5 (Fixed Structure Analytics - Deep Scan Debugger)")
+st.info("✅ RUNNING VERSION: v90.0 (Fixed PnL Logic & Dual-Header Parsing)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -98,11 +98,19 @@ def get_strategy(group_name, trade_name=""):
     return "Other"
 
 def clean_num(x):
+    """Robust number cleaner that handles '$', ',', spaces, and accounting style '(100)'."""
+    if pd.isna(x) or str(x).strip() == "":
+        return 0.0
+    s = str(x).replace('$', '').replace(',', '').strip()
+    # Handle accounting format (123.45) -> -123.45
+    if s.startswith('(') and s.endswith(')'):
+        s = '-' + s[1:-1]
     try:
-        val = float(str(x).replace('$', '').replace(',', '').strip())
+        val = float(s)
         if np.isnan(val): return 0.0
         return val
-    except: return 0.0
+    except:
+        return 0.0
 
 def safe_fmt(val, fmt_str):
     try:
@@ -125,10 +133,18 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
+def get_multiplier(ticker):
+    """Returns contract multiplier. Default 100 for SPX/Equities."""
+    t = str(ticker).upper()
+    if "/MES" in t: return 5
+    if "/ES" in t: return 50
+    return 100
+
 # --- DEEP SCAN PARSER ---
 def identify_leg_type(ticker):
     # Matches P or C followed by numbers (strike)
     # Updated regex to support decimals in strike price (e.g. 4100.5)
+    # Handles .SPXW prefix as well
     match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
     if match:
         return match.group(1) # Returns 'P' or 'C'
@@ -138,6 +154,7 @@ def identify_leg_type(ticker):
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
+            # Read header=None first to find the real header row safely
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
@@ -154,6 +171,7 @@ def read_file_safely(file):
             return pd.read_csv(file, skiprows=header_row)
 
         header_idx = -1
+        # Scan first 20 rows for the main header
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
             if "Name" in row_str and "Total Return" in row_str:
@@ -216,7 +234,8 @@ def sync_data(file_list, file_type):
                 name = str(row.get('Name', '')).strip()
                 if name in ['nan', '', 'Symbol']: continue
                 
-                # IS STRATEGY ROW? (Does NOT start with '.')
+                # --- STRATEGY ROW (Parent) ---
+                # Does NOT start with '.', is not a symbol row
                 if not name.startswith('.'):
                     # Save previous block if exists
                     if current_trade:
@@ -232,6 +251,7 @@ def sync_data(file_list, file_type):
                     
                     group = str(row.get('Group', ''))
                     strat = get_strategy(group, name)
+                    # For Strategy Rows: 'Total Return $' is the PnL
                     pnl = clean_num(row.get('Total Return $', 0))
                     debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
                     
@@ -277,33 +297,44 @@ def sync_data(file_list, file_type):
                         'call_pnl': 0.0, 'put_pnl': 0.0, 'is_new': False
                     }
                 
-                # IS LEG ROW? (Starts with '.')
+                # --- LEG ROW (Child) ---
+                # Starts with '.' indicating it belongs to the active strategy block
                 elif name.startswith('.') and current_trade:
                     try:
-                        # Fix for misaligned columns in leg rows
-                        qty = clean_num(row.get('Total Return %', 0)) 
-                        entry_price = clean_num(row.get('Total Return $', 0))
+                        # --- COLUMN MAPPING FIX FOR LEGS ---
+                        # In the OptionStrat export, the column headers for legs are shifted relative to the strategy headers.
+                        # Strategy Header: Name | Total Return % | Total Return $ | Created At    | Expiration
+                        # Leg Data:        Sym  | Quantity       | Entry Price    | Current Price | Close Price
                         
-                        raw_current = row.get('Created At')
-                        raw_close = row.get('Expiration')
+                        qty = clean_num(row.get('Total Return %', 0))  # Column 2: Quantity
+                        entry_price = clean_num(row.get('Total Return $', 0)) # Column 3: Entry Price
+                        
+                        raw_current = row.get('Created At') # Column 4: Current Price (Active)
+                        raw_close = row.get('Expiration')   # Column 5: Close Price (History/Active fallback)
                         
                         curr = clean_num(raw_current)
                         close = clean_num(raw_close)
                         
                         # Robust Price Selection
-                        # If active: prefer current. If history: prefer close.
-                        # Fallback to non-zero if preferred is zero.
+                        # Active Files: Often 'Created At' (Current) is empty, but 'Expiration' (Close) has the mark.
                         price_to_use = 0.0
+                        
                         if file_type == "Active":
-                            if curr != 0: price_to_use = curr
-                            elif close != 0: price_to_use = close
+                            # Prioritize Close column if Current is empty/zero, as imports often put mark in Close col
+                            if close != 0: price_to_use = close
+                            elif curr != 0: price_to_use = curr
+                            else: price_to_use = 0.0 # Warning: Missing Price
                         else: # History
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
-                            
-                        # Calculation: (Exit - Entry) * Qty * 100 (Multiplier)
-                        # Multiplier of 100 is standard for SPX/equity options.
-                        leg_pnl = (price_to_use - entry_price) * qty * 100
+                        
+                        # Multiplier Check (SPX=100, /ES=50)
+                        mult = get_multiplier(name)
+
+                        # Calculation: (Exit - Entry) * Qty * Multiplier
+                        # Works for Long (Qty > 0): Exit > Entry = Profit
+                        # Works for Short (Qty < 0): Entry > Exit = Profit (e.g. (10 - 15) * -1 = 5)
+                        leg_pnl = (price_to_use - entry_price) * qty * mult
                         
                         leg_type = identify_leg_type(name)
                         if leg_type == 'C':
@@ -314,6 +345,7 @@ def sync_data(file_list, file_type):
                             legs_processed += 1
                             
                     except Exception as e:
+                        # Fail silently on single leg errors to preserve the trade block
                         pass
 
             # Process final block
@@ -1221,4 +1253,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v89.5 | Fixed Structure Analytics - Deep Scan Debugger")
+    st.caption("Allantis Trade Guardian v90.0 | Fixed PnL Logic & Dual-Header Parsing")
