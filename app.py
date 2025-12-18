@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import text, create_engine, inspect
+from sqlalchemy import text, inspect
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError, ArgumentError
 import re
@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v103.0 (Tool: Connection String Analyzer)")
+st.info("☁️ RUNNING VERSION: v104.0 (Fix: Removed Manual Engine Creation)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -108,26 +108,21 @@ with st.sidebar.expander("🕵️ Connection Analyzer", expanded=False):
 conn = None
 if db_url:
     try:
-        # Create engine
-        engine = create_engine(db_url, pool_pre_ping=True)
-        conn = st.connection("supabase", type="sql", engine=engine)
+        # FIX: We pass arguments directly to st.connection instead of creating an engine manually.
+        # This avoids the "UnhashableParamError".
+        conn = st.connection("supabase", type="sql", url=db_url, pool_pre_ping=True)
     except Exception as e:
         st.error(f"⚠️ Init Error: {str(e)}")
 
 def run_query(query_str, params=None):
     if not conn: return
     try:
-        with engine.connect() as connection:
-            trans = connection.begin()
-            try:
-                if params:
-                    connection.execute(text(query_str), params)
-                else:
-                    connection.execute(text(query_str))
-                trans.commit()
-            except:
-                trans.rollback()
-                raise
+        with conn.session as s:
+            if params:
+                s.execute(text(query_str), params)
+            else:
+                s.execute(text(query_str))
+            s.commit()
     except OperationalError as e:
         st.error("🚨 **Authentication Failed**")
         st.error(f"Message: {e.orig}")
@@ -280,7 +275,7 @@ def sync_data(file_list, file_type):
     db_active_ids = set()
     if file_type == "Active":
         try:
-            current_active = pd.read_sql("SELECT id FROM trades WHERE status = 'Active'", engine)
+            current_active = conn.query("SELECT id FROM trades WHERE status = 'Active'", ttl=0)
             db_active_ids = set(current_active['id'].tolist())
         except: pass
     
@@ -434,10 +429,10 @@ def process_trade_block(t, file_type, found_ids):
     if file_type == "Active":
         found_ids.add(t['id'])
     
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id"), {"id": t['id']}).fetchone()
+    existing = conn.query("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id", 
+                          params={"id": t['id']}, ttl=0)
     
-    if not result:
+    if existing.empty:
         t['is_new'] = True
         run_query('''INSERT INTO trades 
             (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, 
@@ -449,22 +444,20 @@ def process_trade_block(t, file_type, found_ids):
             ''', t)
     else:
         t['is_new'] = False
-        row_theta = result[1]
-        row_delta = result[2]
-        row_gamma = result[3]
-        row_vega = result[4]
+        row = existing.iloc[0]
+        old_status = row['status']
         
-        t['theta'] = t['theta'] if t['theta'] != 0 else row_theta
-        t['delta'] = t['delta'] if t['delta'] != 0 else row_delta
-        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row_gamma
-        t['vega']  = t['vega']  if t['vega']  != 0 else row_vega
+        t['theta'] = t['theta'] if t['theta'] != 0 else row['theta']
+        t['delta'] = t['delta'] if t['delta'] != 0 else row['delta']
+        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row['gamma']
+        t['vega']  = t['vega']  if t['vega']  != 0 else row['vega']
 
         if file_type == "History":
             run_query('''UPDATE trades SET 
                 pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, status=:status, 
                 exit_date=:exit_dt, days_held=:days_held, theta=:theta, delta=:delta, gamma=:gamma, vega=:vega 
                 WHERE id=:id''', t)
-        elif result[0] in ["Active", "Missing"]: 
+        elif old_status in ["Active", "Missing"]: 
             run_query('''UPDATE trades SET 
                 pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, days_held=:days_held, 
                 theta=:theta, delta=:delta, gamma=:gamma, vega=:vega, status='Active', exit_date=:exit_dt
@@ -472,10 +465,9 @@ def process_trade_block(t, file_type, found_ids):
             
     if file_type == "Active":
         today = datetime.now().date()
-        with engine.connect() as conn:
-            snap = conn.execute(text("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date"), {"id": t['id'], "date": today}).fetchone()
-        
-        if not snap:
+        snap_check = conn.query("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date", 
+                                params={"id": t['id'], "date": today}, ttl=0)
+        if snap_check.empty:
             run_query("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (:id, :date, :pnl, :days_held)",
                       {"id": t['id'], "date": today, "pnl": t['pnl'], "days_held": t['days_held']})
 
@@ -500,8 +492,8 @@ def load_data():
     if not conn: return pd.DataFrame()
     try:
         init_db()
-        df = pd.read_sql("SELECT * FROM trades", engine)
-        snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", engine)
+        df = conn.query("SELECT * FROM trades", ttl=0)
+        snaps = conn.query("SELECT trade_id, pnl FROM snapshots", ttl=0)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
             vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
@@ -1278,4 +1270,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v103.0 | Tool: Connection String Analyzer")
+    st.caption("Allantis Trade Guardian v104.0 | Fix: Removed Manual Engine Creation")
