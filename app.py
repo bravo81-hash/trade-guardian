@@ -12,22 +12,21 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v101.0 (Fix: Manual Connection Override & IPv6 Workaround)")
+st.info("☁️ RUNNING VERSION: v102.0 (Fix: SSL Mode & Port Toggling)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- SIDEBAR DIAGNOSTICS & CONNECTION SETUP ---
 st.sidebar.markdown("### ☁️ Database Setup")
 
-# 1. Manual Override Input
 with st.sidebar.expander("🔧 DB Connection Settings", expanded=True):
     manual_db_url = st.text_input(
         "Manual Connection String (Optional)", 
         type="password", 
-        help="Paste your Supabase Transaction Pooler URL (Port 6543) here to override secrets."
+        help="Paste your Supabase URL here to override secrets."
     )
     
-    use_pooler_force = st.checkbox("Force Port 6543 (IPv4 Fix)", value=True, help="Automatically swaps port 5432 to 6543 to fix IPv6 errors.")
+    use_pooler = st.checkbox("Use Transaction Pooler (Port 6543)", value=False, help="Check if direct connection (5432) fails.")
 
 # --- DATABASE CONNECTION LOGIC ---
 def get_final_db_url():
@@ -48,10 +47,9 @@ def get_final_db_url():
             else:
                 url = st.secrets["database"]["url"]
         except:
-            pass # No secrets found, will handle later
+            pass 
 
-    if not url:
-        return None
+    if not url: return None
 
     # --- URL SANITIZATION & FIXES ---
     
@@ -61,10 +59,19 @@ def get_final_db_url():
     elif url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg2://")
     
-    # 2. Port Fix (IPv6 Workaround)
-    if use_pooler_force and ":5432" in url and "supabase.co" in url:
-        url = url.replace(":5432", ":6543")
-    
+    # 2. Port Fix (Toggle)
+    if use_pooler:
+        if ":5432" in url: url = url.replace(":5432", ":6543")
+    else:
+        if ":6543" in url: url = url.replace(":6543", ":5432")
+
+    # 3. SSL Fix (Critical for Supabase)
+    if "sslmode" not in url:
+        if "?" in url:
+            url += "&sslmode=require"
+        else:
+            url += "?sslmode=require"
+            
     return url
 
 # Initialize Connection
@@ -73,7 +80,6 @@ db_url = get_final_db_url()
 
 if db_url:
     try:
-        # We pass the URL string directly to avoid hashing issues
         # ttl=0 disables caching of the connection object
         conn = st.connection("supabase", type="sql", url=db_url, ttl=0)
     except Exception as e:
@@ -94,13 +100,7 @@ def run_query(query_str, params=None):
     except OperationalError as e:
         st.error("🚨 **Database Connection Failed!**")
         st.markdown(f"**Error:** `{str(e)}`")
-        st.markdown("---")
-        st.warning("""
-        **Troubleshooting:**
-        1. **Check Password:** Did you replace `[YOUR-PASSWORD]` with your actual password?
-        2. **Use Port 6543:** Ensure you are using the 'Transaction Pooler' connection string.
-        3. **Manual Override:** Paste the full string into the sidebar box to test directly.
-        """)
+        st.warning("Try toggling 'Use Transaction Pooler' in the sidebar.")
         st.stop()
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
@@ -1244,4 +1244,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v100.0 | Fix: Connection Caching Error")
+    st.caption("Allantis Trade Guardian v101.0 | Fix: Manual Connection Override & IPv6 Workaround")
