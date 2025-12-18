@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import text, inspect
+from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError, ArgumentError
 import re
@@ -13,21 +13,21 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v104.0 (Fix: Removed Manual Engine Creation)")
+st.info("☁️ RUNNING VERSION: v105.0 (Fix: Simplified Connection for Stability)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- SIDEBAR DIAGNOSTICS & CONNECTION SETUP ---
+# --- SIDEBAR: CONNECTION SETUP ---
 st.sidebar.markdown("### ☁️ Database Setup")
 
 with st.sidebar.expander("🔧 DB Connection Settings", expanded=True):
     manual_db_url = st.text_input(
         "Manual Connection String", 
         type="password", 
-        help="Paste your Supabase URL (Transaction Pooler / Port 6543) here."
+        help="Paste the 'Transaction' mode URL from Supabase here."
     )
     
-    use_pooler_toggle = st.checkbox("Force Port 6543", value=True, help="Swaps 5432 to 6543 automatically.")
+    st.caption("ℹ️ **Tip:** Use the 'Transaction' pooler URL from Supabase settings. It usually runs on port 6543.")
 
 # --- CONNECTION STRING LOGIC ---
 def get_final_db_url():
@@ -57,15 +57,11 @@ def get_final_db_url():
     if not url: return None, "Missing"
 
     # --- SANITIZATION ---
-    # Driver Fix
+    # Driver Fix (Streamlit needs postgresql+psycopg2)
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg2://")
     elif url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg2://")
-    
-    # Port Fix
-    if use_pooler_toggle and ":5432" in url and "supabase" in url:
-        url = url.replace(":5432", ":6543")
 
     # SSL Fix
     if "sslmode" not in url:
@@ -84,23 +80,20 @@ with st.sidebar.expander("🕵️ Connection Analyzer", expanded=False):
             st.error("No URL found.")
         else:
             try:
-                # Parse URL without connecting
                 u = make_url(db_url)
                 st.markdown(f"""
                 **Parsed Successfully:**
-                * **Driver:** `{u.drivername}`
                 * **User:** `{u.username}`
-                * **Host:** `{u.host}` (Should be `...pooler.supabase.com`)
-                * **Port:** `{u.port}` (Should be `6543`)
+                * **Host:** `{u.host}`
+                * **Port:** `{u.port}`
                 * **Database:** `{u.database}`
-                * **Password Detected:** {"✅ Yes" if u.password else "❌ No"}
                 """)
                 
-                if u.password and any(c in u.password for c in ['@', ':', '/']):
-                    st.error("⚠️ **Warning:** Your password contains special characters (`@`, `:`, `/`). This often breaks the connection string parser. Please reset your database password to be alphanumeric only.")
+                if u.port == 5432 and "supabase" in str(u.host):
+                    st.warning("⚠️ Port 5432 detected. If connection fails, try Port 6543 (Transaction Pooler).")
                 
             except ArgumentError:
-                st.error("❌ **Invalid URL Format.** The connection string could not be parsed. Check for typos.")
+                st.error("❌ Invalid URL Format.")
             except Exception as e:
                 st.error(f"Error: {e}")
 
@@ -108,9 +101,8 @@ with st.sidebar.expander("🕵️ Connection Analyzer", expanded=False):
 conn = None
 if db_url:
     try:
-        # FIX: We pass arguments directly to st.connection instead of creating an engine manually.
-        # This avoids the "UnhashableParamError".
-        conn = st.connection("supabase", type="sql", url=db_url, pool_pre_ping=True)
+        # v105 FIX: Removed pool_pre_ping kwarg to avoid unhashable engine error in strict caching environments
+        conn = st.connection("supabase", type="sql", url=db_url)
     except Exception as e:
         st.error(f"⚠️ Init Error: {str(e)}")
 
@@ -124,9 +116,8 @@ def run_query(query_str, params=None):
                 s.execute(text(query_str))
             s.commit()
     except OperationalError as e:
-        st.error("🚨 **Authentication Failed**")
+        st.error("🚨 **Database Error**")
         st.error(f"Message: {e.orig}")
-        st.info("💡 **Tip:** Go to Supabase -> Settings -> Database -> Reset Password. Use only letters and numbers.")
         st.stop()
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
@@ -1270,4 +1261,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v104.0 | Fix: Removed Manual Engine Creation")
+    st.caption("Allantis Trade Guardian v105.0 | Fix: Simplified Connection for Stability")
