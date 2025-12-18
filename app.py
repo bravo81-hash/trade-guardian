@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import text
+from sqlalchemy import text, create_engine
 from sqlalchemy.exc import OperationalError
 import re
 from datetime import datetime
@@ -12,13 +12,13 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v98.0 (Fix: Supabase Port Auto-Correction)")
+st.info("☁️ RUNNING VERSION: v99.0 (Fix: Removed Auto-Port Forcing)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE CONNECTION ---
 def get_db_url():
-    """Retrieves and sanitizes the database URL."""
+    """Retrieves and sanitizes the database URL from secrets."""
     try:
         # 1. Fetch URL from secrets
         if "supabase" in st.secrets["connections"]:
@@ -28,27 +28,42 @@ def get_db_url():
         else:
             url = st.secrets["database"]["url"]
             
-        # 2. FIX DRIVER: Ensure postgresql+psycopg2
+        # 2. FIX DRIVER: Ensure postgresql+psycopg2 for stability
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+psycopg2://")
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+psycopg2://")
-            
-        # 3. FIX PORT: Force Supabase Transaction Pooler (Port 6543)
-        # Streamlit Cloud often fails on port 5432 (Session mode) due to IPv6.
-        if "supabase.co" in url and ":5432" in url:
-            url = url.replace(":5432", ":6543")
+        
+        # 3. SSL MODE: Ensure SSL is required (Supabase mandates this)
+        if "sslmode" not in url:
+            if "?" in url:
+                url += "&sslmode=require"
+            else:
+                url += "?sslmode=require"
             
         return url
     except Exception as e:
         st.error(f"❌ Secret Key Error: Could not find valid database URL. ({str(e)})")
         st.stop()
 
+# --- SIDEBAR DIAGNOSTICS (Must be defined before connection init) ---
+st.sidebar.markdown("### ☁️ Cloud Workflow")
+use_pooler = st.sidebar.checkbox("🔧 Use Pooler (Port 6543)", value=False, help="Check this ONLY if standard connection fails.")
+
 # Initialize Connection
 try:
     db_url = get_db_url()
-    # ttl=0 disables caching of the connection object itself to prevent hashing errors
-    conn = st.connection("supabase", type="sql", url=db_url, ttl=0)
+    
+    # MANUAL OVERRIDE: Only swap port if user explicitly asks via checkbox
+    if use_pooler and ":5432" in db_url:
+        db_url = db_url.replace(":5432", ":6543")
+        st.sidebar.warning("Using Transaction Pooler (6543)")
+
+    # Create engine with pre-ping to keep connections alive
+    # We use create_engine directly to pass pool_pre_ping
+    engine = create_engine(db_url, pool_pre_ping=True)
+    conn = st.connection("supabase", type="sql", engine=engine)
+    
 except Exception as e:
     st.error(f"⚠️ Connection Initialization Failed: {str(e)}")
     st.stop()
@@ -56,16 +71,22 @@ except Exception as e:
 def run_query(query_str, params=None):
     """Helper to run queries safely with parameters and commit."""
     try:
-        with conn.session as s:
-            if params:
-                s.execute(text(query_str), params)
-            else:
-                s.execute(text(query_str))
-            s.commit()
+        # Use a new connection for each transaction block to ensure thread safety
+        with engine.connect() as connection:
+            trans = connection.begin()
+            try:
+                if params:
+                    connection.execute(text(query_str), params)
+                else:
+                    connection.execute(text(query_str))
+                trans.commit()
+            except:
+                trans.rollback()
+                raise
     except OperationalError as e:
         st.error("🚨 **Database Connection Failed!**")
-        st.warning("Double check your Supabase password in Streamlit Secrets.")
-        st.code(str(e))
+        st.warning("Please check your Supabase password in Streamlit Secrets.")
+        st.error(str(e))
         st.stop()
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
@@ -213,8 +234,9 @@ def sync_data(file_list, file_type):
     db_active_ids = set()
     if file_type == "Active":
         try:
-            current_active = conn.query("SELECT id FROM trades WHERE status = 'Active'", ttl=0)
-            db_active_ids = set(current_active['id'].tolist())
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT id FROM trades WHERE status = 'Active'"))
+                db_active_ids = set([row[0] for row in result])
         except: pass
     
     file_found_ids = set()
@@ -367,10 +389,10 @@ def process_trade_block(t, file_type, found_ids):
     if file_type == "Active":
         found_ids.add(t['id'])
     
-    existing = conn.query("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id", 
-                          params={"id": t['id']}, ttl=0)
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id"), {"id": t['id']}).fetchone()
     
-    if existing.empty:
+    if not result:
         t['is_new'] = True
         run_query('''INSERT INTO trades 
             (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, 
@@ -382,20 +404,22 @@ def process_trade_block(t, file_type, found_ids):
             ''', t)
     else:
         t['is_new'] = False
-        row = existing.iloc[0]
-        old_status = row['status']
+        row_theta = result[1]
+        row_delta = result[2]
+        row_gamma = result[3]
+        row_vega = result[4]
         
-        t['theta'] = t['theta'] if t['theta'] != 0 else row['theta']
-        t['delta'] = t['delta'] if t['delta'] != 0 else row['delta']
-        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row['gamma']
-        t['vega']  = t['vega']  if t['vega']  != 0 else row['vega']
+        t['theta'] = t['theta'] if t['theta'] != 0 else row_theta
+        t['delta'] = t['delta'] if t['delta'] != 0 else row_delta
+        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row_gamma
+        t['vega']  = t['vega']  if t['vega']  != 0 else row_vega
 
         if file_type == "History":
             run_query('''UPDATE trades SET 
                 pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, status=:status, 
                 exit_date=:exit_dt, days_held=:days_held, theta=:theta, delta=:delta, gamma=:gamma, vega=:vega 
                 WHERE id=:id''', t)
-        elif old_status in ["Active", "Missing"]: 
+        elif result[0] in ["Active", "Missing"]: # result[0] is status
             run_query('''UPDATE trades SET 
                 pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, days_held=:days_held, 
                 theta=:theta, delta=:delta, gamma=:gamma, vega=:vega, status='Active', exit_date=:exit_dt
@@ -403,9 +427,10 @@ def process_trade_block(t, file_type, found_ids):
             
     if file_type == "Active":
         today = datetime.now().date()
-        snap_check = conn.query("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date", 
-                                params={"id": t['id'], "date": today}, ttl=0)
-        if snap_check.empty:
+        with engine.connect() as conn:
+            snap = conn.execute(text("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date"), {"id": t['id'], "date": today}).fetchone()
+        
+        if not snap:
             run_query("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (:id, :date, :pnl, :days_held)",
                       {"id": t['id'], "date": today, "pnl": t['pnl'], "days_held": t['days_held']})
 
@@ -429,8 +454,8 @@ def update_journal(edited_df):
 def load_data():
     try:
         init_db()
-        df = conn.query("SELECT * FROM trades", ttl=0)
-        snaps = conn.query("SELECT trade_id, pnl FROM snapshots", ttl=0)
+        df = pd.read_sql("SELECT * FROM trades", engine)
+        snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", engine)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
             vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
@@ -491,26 +516,6 @@ def load_data():
 
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
     return df
-
-# --- SIDEBAR ---
-st.sidebar.markdown("### ☁️ Cloud Workflow")
-
-# --- DIAGNOSTICS TOOL ---
-with st.sidebar.expander("🔧 DB Diagnostics", expanded=False):
-    st.write("Troubleshoot your Supabase connection here.")
-    if st.button("Test Connection"):
-        try:
-            res = conn.query("SELECT 1", ttl=0)
-            st.success(f"✅ Connection Successful! (Result: {res.iloc[0,0]})")
-        except Exception as e:
-            st.error(f"❌ Connection Failed:\n{str(e)}")
-            
-    if st.checkbox("Show Connection String Format"):
-        try:
-            url = get_db_url()
-            masked = re.sub(r':(.*?)@', ':****@', url)
-            st.code(masked)
-        except: st.error("Could not retrieve URL.")
 
 with st.sidebar.expander("🔵 WORK (Sync Files)", expanded=True):
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
@@ -1222,4 +1227,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v97.0 | Fix: Streamlit Connection Caching")
+    st.caption("Allantis Trade Guardian v99.0 | Fix: Removed Auto-Port Forcing")
