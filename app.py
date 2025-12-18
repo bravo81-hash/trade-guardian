@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v90.0 (Fixed PnL Logic & Dual-Header Parsing)")
+st.info("✅ RUNNING VERSION: v91.0 (Fixed PnL Normalization & Sync Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -145,6 +145,7 @@ def identify_leg_type(ticker):
     # Matches P or C followed by numbers (strike)
     # Updated regex to support decimals in strike price (e.g. 4100.5)
     # Handles .SPXW prefix as well
+    # Looks for a pattern like: Date(6digits) -> C/P -> Strike
     match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
     if match:
         return match.group(1) # Returns 'P' or 'C'
@@ -239,6 +240,21 @@ def sync_data(file_list, file_type):
                 if not name.startswith('.'):
                     # Save previous block if exists
                     if current_trade:
+                        # --- NORMALIZATION STEP ---
+                        # Ensure Leg PnLs sum to Total PnL (Source of Truth)
+                        calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                        real_total = current_trade['pnl']
+                        
+                        if calc_total != 0 and real_total != 0:
+                            # Scale legs to match real total
+                            factor = real_total / calc_total
+                            current_trade['call_pnl'] *= factor
+                            current_trade['put_pnl'] *= factor
+                        elif calc_total == 0 and real_total != 0:
+                            # Fallback if no legs had PnL but trade did (rare)
+                            # Assign 50/50? Or leave 0. Leaving 0 is safer than guessing.
+                            pass
+
                         process_trade_block(c, current_trade, file_type, file_found_ids)
                         if current_trade['is_new']: count_new += 1
                         else: count_update += 1
@@ -302,7 +318,6 @@ def sync_data(file_list, file_type):
                 elif name.startswith('.') and current_trade:
                     try:
                         # --- COLUMN MAPPING FIX FOR LEGS ---
-                        # In the OptionStrat export, the column headers for legs are shifted relative to the strategy headers.
                         # Strategy Header: Name | Total Return % | Total Return $ | Created At    | Expiration
                         # Leg Data:        Sym  | Quantity       | Entry Price    | Current Price | Close Price
                         
@@ -350,6 +365,14 @@ def sync_data(file_list, file_type):
 
             # Process final block
             if current_trade:
+                # Normalization for final block
+                calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                real_total = current_trade['pnl']
+                if calc_total != 0 and real_total != 0:
+                    factor = real_total / calc_total
+                    current_trade['call_pnl'] *= factor
+                    current_trade['put_pnl'] *= factor
+                
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
@@ -1253,4 +1276,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v90.0 | Fixed PnL Logic & Dual-Header Parsing")
+    st.caption("Allantis Trade Guardian v91.0 | Fixed PnL Normalization & Sync Logic")
