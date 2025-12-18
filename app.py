@@ -12,38 +12,43 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v97.0 (Fix: Streamlit Connection Caching)")
+st.info("☁️ RUNNING VERSION: v98.0 (Fix: Supabase Port Auto-Correction)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE CONNECTION ---
-# Helper to get the URL safely and patch the driver if needed
 def get_db_url():
+    """Retrieves and sanitizes the database URL."""
     try:
-        # Check standard Streamlit secrets location
+        # 1. Fetch URL from secrets
         if "supabase" in st.secrets["connections"]:
             url = st.secrets["connections"]["supabase"]["url"]
         elif "postgres" in st.secrets["connections"]:
             url = st.secrets["connections"]["postgres"]["url"]
         else:
-            # Fallback for generic structure
             url = st.secrets["database"]["url"]
             
-        # FORCE DRIVER: Streamlit needs postgresql+psycopg2 for stability in cloud
+        # 2. FIX DRIVER: Ensure postgresql+psycopg2
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+psycopg2://")
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+psycopg2://")
             
+        # 3. FIX PORT: Force Supabase Transaction Pooler (Port 6543)
+        # Streamlit Cloud often fails on port 5432 (Session mode) due to IPv6.
+        if "supabase.co" in url and ":5432" in url:
+            url = url.replace(":5432", ":6543")
+            
         return url
     except Exception as e:
-        st.error(f"❌ Secret Key Error: Could not find database URL in secrets.toml. ({str(e)})")
+        st.error(f"❌ Secret Key Error: Could not find valid database URL. ({str(e)})")
         st.stop()
 
-# Initialize Connection using the URL directly (Avoiding unhashable engine object)
+# Initialize Connection
 try:
     db_url = get_db_url()
-    conn = st.connection("supabase", type="sql", url=db_url)
+    # ttl=0 disables caching of the connection object itself to prevent hashing errors
+    conn = st.connection("supabase", type="sql", url=db_url, ttl=0)
 except Exception as e:
     st.error(f"⚠️ Connection Initialization Failed: {str(e)}")
     st.stop()
@@ -59,8 +64,8 @@ def run_query(query_str, params=None):
             s.commit()
     except OperationalError as e:
         st.error("🚨 **Database Connection Failed!**")
+        st.warning("Double check your Supabase password in Streamlit Secrets.")
         st.code(str(e))
-        st.warning("Diagnostic Hint: Check the sidebar 'DB Diagnostics' tool.")
         st.stop()
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
@@ -68,8 +73,6 @@ def run_query(query_str, params=None):
 
 def init_db():
     # Postgres Syntax for Tables
-    
-    # TRADES TABLE
     run_query('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -92,7 +95,6 @@ def init_db():
                     parent_id TEXT
                 )''')
     
-    # SNAPSHOTS TABLE
     run_query('''CREATE TABLE IF NOT EXISTS snapshots (
                     id SERIAL PRIMARY KEY,
                     trade_id TEXT,
@@ -102,7 +104,6 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
                 
-    # Indexes
     run_query("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
 
 # --- CONFIGURATION ---
@@ -204,7 +205,6 @@ def read_file_safely(file):
 
 # --- SYNC ENGINE (Postgres Version) ---
 def sync_data(file_list, file_type):
-    # Ensure tables exist
     init_db()
     
     log = []
@@ -352,10 +352,8 @@ def sync_data(file_list, file_type):
     if file_type == "Active" and file_found_ids:
         missing_ids = db_active_ids - file_found_ids
         if missing_ids:
-            # Postgres needs tuple for IN clause
             ids_tuple = tuple(missing_ids)
             if len(ids_tuple) == 1:
-                # Handle single item tuple formatting
                 query = f"UPDATE trades SET status = 'Missing' WHERE id = '{ids_tuple[0]}'"
                 run_query(query)
             else:
@@ -369,7 +367,6 @@ def process_trade_block(t, file_type, found_ids):
     if file_type == "Active":
         found_ids.add(t['id'])
     
-    # Query for existing. Using params dict for sqlalchemy
     existing = conn.query("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id", 
                           params={"id": t['id']}, ttl=0)
     
@@ -388,7 +385,6 @@ def process_trade_block(t, file_type, found_ids):
         row = existing.iloc[0]
         old_status = row['status']
         
-        # Merge Greeks (prefer new non-zero, else old)
         t['theta'] = t['theta'] if t['theta'] != 0 else row['theta']
         t['delta'] = t['delta'] if t['delta'] != 0 else row['delta']
         t['gamma'] = t['gamma'] if t['gamma'] != 0 else row['gamma']
@@ -407,7 +403,6 @@ def process_trade_block(t, file_type, found_ids):
             
     if file_type == "Active":
         today = datetime.now().date()
-        # Check snapshot existence
         snap_check = conn.query("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date", 
                                 params={"id": t['id'], "date": today}, ttl=0)
         if snap_check.empty:
@@ -433,11 +428,8 @@ def update_journal(edited_df):
 @st.cache_data(ttl=60)
 def load_data():
     try:
-        # Initialize tables on first load to be safe
         init_db()
-        
         df = conn.query("SELECT * FROM trades", ttl=0)
-        
         snaps = conn.query("SELECT trade_id, pnl FROM snapshots", ttl=0)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
@@ -499,21 +491,6 @@ def load_data():
 
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
     return df
-
-@st.cache_data(ttl=300)
-def load_snapshots():
-    try:
-        q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
-        FROM snapshots s
-        JOIN trades t ON s.trade_id = t.id
-        """
-        df = conn.query(q, ttl=0)
-        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
-        df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
-        df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
-        return df
-    except: return pd.DataFrame()
 
 # --- SIDEBAR ---
 st.sidebar.markdown("### ☁️ Cloud Workflow")
@@ -1245,4 +1222,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v96.0 | Supabase Diagnostics & Driver Fix")
+    st.caption("Allantis Trade Guardian v97.0 | Fix: Streamlit Connection Caching")
