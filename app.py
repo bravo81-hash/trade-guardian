@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import text
-from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import OperationalError, ArgumentError
+import sqlite3
+import os
 import re
 from datetime import datetime
 
@@ -13,120 +13,19 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v105.0 (Fix: Simplified Connection for Stability)")
+st.info("✅ RUNNING VERSION: v93.0 (Fix: Auto-Schema Repair & Fuzzy Column Matching)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- SIDEBAR: CONNECTION SETUP ---
-st.sidebar.markdown("### ☁️ Database Setup")
-
-with st.sidebar.expander("🔧 DB Connection Settings", expanded=True):
-    manual_db_url = st.text_input(
-        "Manual Connection String", 
-        type="password", 
-        help="Paste the 'Transaction' mode URL from Supabase here."
-    )
-    
-    st.caption("ℹ️ **Tip:** Use the 'Transaction' pooler URL from Supabase settings. It usually runs on port 6543.")
-
-# --- CONNECTION STRING LOGIC ---
-def get_final_db_url():
-    url = ""
-    source = "None"
-    
-    # 1. Manual Input
-    if manual_db_url.strip():
-        url = manual_db_url.strip()
-        source = "Manual Input"
-    
-    # 2. Secrets
-    else:
-        try:
-            if "supabase" in st.secrets["connections"]:
-                url = st.secrets["connections"]["supabase"]["url"]
-                source = "Secrets (Supabase)"
-            elif "postgres" in st.secrets["connections"]:
-                url = st.secrets["connections"]["postgres"]["url"]
-                source = "Secrets (Postgres)"
-            else:
-                url = st.secrets["database"]["url"]
-                source = "Secrets (Generic)"
-        except:
-            pass 
-
-    if not url: return None, "Missing"
-
-    # --- SANITIZATION ---
-    # Driver Fix (Streamlit needs postgresql+psycopg2)
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql+psycopg2://")
-    elif url.startswith("postgresql://"):
-        url = url.replace("postgresql://", "postgresql+psycopg2://")
-
-    # SSL Fix
-    if "sslmode" not in url:
-        sep = "&" if "?" in url else "?"
-        url += f"{sep}sslmode=require"
-            
-    return url, source
-
-# --- DIAGNOSTICS TAB ---
-with st.sidebar.expander("🕵️ Connection Analyzer", expanded=False):
-    db_url, src = get_final_db_url()
-    st.write(f"**Source:** {src}")
-    
-    if st.button("Analyze Connection String"):
-        if not db_url:
-            st.error("No URL found.")
-        else:
-            try:
-                u = make_url(db_url)
-                st.markdown(f"""
-                **Parsed Successfully:**
-                * **User:** `{u.username}`
-                * **Host:** `{u.host}`
-                * **Port:** `{u.port}`
-                * **Database:** `{u.database}`
-                """)
-                
-                if u.port == 5432 and "supabase" in str(u.host):
-                    st.warning("⚠️ Port 5432 detected. If connection fails, try Port 6543 (Transaction Pooler).")
-                
-            except ArgumentError:
-                st.error("❌ Invalid URL Format.")
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-# --- INIT CONNECTION ---
-conn = None
-if db_url:
-    try:
-        # v105 FIX: Removed pool_pre_ping kwarg to avoid unhashable engine error in strict caching environments
-        conn = st.connection("supabase", type="sql", url=db_url)
-    except Exception as e:
-        st.error(f"⚠️ Init Error: {str(e)}")
-
-def run_query(query_str, params=None):
-    if not conn: return
-    try:
-        with conn.session as s:
-            if params:
-                s.execute(text(query_str), params)
-            else:
-                s.execute(text(query_str))
-            s.commit()
-    except OperationalError as e:
-        st.error("🚨 **Database Error**")
-        st.error(f"Message: {e.orig}")
-        st.stop()
-    except Exception as e:
-        st.error(f"Database Error: {str(e)}")
-        raise e
+# --- DATABASE ENGINE ---
+DB_NAME = "trade_guardian_v4.db"
 
 def init_db():
-    if not conn: return
-    # Postgres Syntax for Tables
-    run_query('''CREATE TABLE IF NOT EXISTS trades (
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # TRADES TABLE
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
                     strategy TEXT,
@@ -148,8 +47,9 @@ def init_db():
                     parent_id TEXT
                 )''')
     
-    run_query('''CREATE TABLE IF NOT EXISTS snapshots (
-                    id SERIAL PRIMARY KEY,
+    # SNAPSHOTS TABLE
+    c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
                     snapshot_date DATE,
                     pnl REAL,
@@ -157,14 +57,35 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
                 
-    run_query("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+    conn.commit()
+    conn.close()
+    migrate_db()
+
+def migrate_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Add new columns if they don't exist (Safe to run multiple times)
+    try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
+    except: pass 
+    try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
+    except: pass
+    try: c.execute("ALTER TABLE trades ADD COLUMN pnl_calls REAL")
+    except: pass
+    try: c.execute("ALTER TABLE trades ADD COLUMN pnl_puts REAL")
+    except: pass
+    conn.commit()
+    conn.close()
+
+def get_db_connection():
+    return sqlite3.connect(DB_NAME)
 
 # --- CONFIGURATION ---
 BASE_CONFIG = {
-    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36, 'target_debit_min': 3500, 'target_debit_max': 4500, 'target_days': [0, 1]},
-    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44, 'target_debit_min': 4800, 'target_debit_max': 5500, 'target_days': [4]},
-    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41, 'target_debit_min': 7500, 'target_debit_max': 8500, 'target_days': [2]},
-    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40, 'target_debit_min': 2000, 'target_debit_max': 15000, 'target_days': [0, 1, 2, 3, 4]}
+    '130/160': {'yield': 0.13, 'pnl': 500, 'roi': 6.8, 'dit': 36, 'target_debit_min': 3500, 'target_debit_max': 4500, 'target_days': [0, 1]}, # Mon=0, Tue=1
+    '160/190': {'yield': 0.28, 'pnl': 700, 'roi': 12.7, 'dit': 44, 'target_debit_min': 4800, 'target_debit_max': 5500, 'target_days': [4]}, # Fri=4
+    'M200':    {'yield': 0.56, 'pnl': 900, 'roi': 11.1, 'dit': 41, 'target_debit_min': 7500, 'target_debit_max': 8500, 'target_days': [2]}, # Wed=2
+    'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40, 'target_debit_min': 2000, 'target_debit_max': 15000, 'target_days': [0, 1, 2, 3, 4]} # Any day
 }
 
 # --- HELPER FUNCTIONS ---
@@ -178,14 +99,19 @@ def get_strategy(group_name, trade_name=""):
     return "Other"
 
 def clean_num(x):
-    if pd.isna(x) or str(x).strip() == "": return 0.0
+    """Robust number cleaner that handles '$', ',', spaces, and accounting style '(100)'."""
+    if pd.isna(x) or str(x).strip() == "":
+        return 0.0
     s = str(x).replace('$', '').replace(',', '').strip()
-    if s.startswith('(') and s.endswith(')'): s = '-' + s[1:-1]
+    # Handle accounting format (123.45) -> -123.45
+    if s.startswith('(') and s.endswith(')'):
+        s = '-' + s[1:-1]
     try:
         val = float(s)
         if np.isnan(val): return 0.0
         return val
-    except: return 0.0
+    except:
+        return 0.0
 
 def safe_fmt(val, fmt_str):
     try:
@@ -202,35 +128,48 @@ def extract_ticker(name):
         parts = str(name).split(' ')
         if parts:
             ticker = parts[0].replace('.', '').upper()
-            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']: return "UNKNOWN"
+            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']:
+                return "UNKNOWN"
             return ticker
         return "UNKNOWN"
     except: return "UNKNOWN"
 
 def get_multiplier(ticker):
+    """Returns contract multiplier. Default 100 for SPX/Equities."""
     t = str(ticker).upper()
     if "/MES" in t: return 5
     if "/ES" in t: return 50
     return 100
 
 def get_col(row, candidates):
+    """Fuzzy match column names to handle spaces or slight variations."""
     for col in row.index:
         for cand in candidates:
-            if cand.lower() in col.lower(): return row[col]
+            if cand.lower() in col.lower():
+                return row[col]
     return 0
 
+# --- DEEP SCAN PARSER ---
 def identify_leg_type(ticker):
+    # Matches P or C followed by numbers (strike)
+    # Updated regex to support decimals in strike price (e.g. 4100.5)
+    # Handles .SPXW prefix as well
+    # Looks for a pattern like: Date(6digits) -> C/P -> Strike
     match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
-    if match: return match.group(1)
+    if match:
+        return match.group(1) # Returns 'P' or 'C'
     return None
 
+# --- SMART FILE READER ---
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
+            # Read header=None first to find the real header row safely
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
+            # CSV Handling
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -242,6 +181,7 @@ def read_file_safely(file):
             return pd.read_csv(file, skiprows=header_row)
 
         header_idx = -1
+        # Scan first 20 rows for the main header
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
             if "Name" in row_str and "Total Return" in row_str:
@@ -254,19 +194,25 @@ def read_file_safely(file):
             df.reset_index(drop=True, inplace=True)
             return df
         return None
-    except: return None
 
-# --- SYNC ENGINE (Postgres Version) ---
+    except Exception as e:
+        return None
+
+# --- SYNC ENGINE (Deep Scan Version - Fixed) ---
 def sync_data(file_list, file_type):
-    init_db()
+    # 1. FORCE MIGRATION (Fixes "Missing Column" errors after DB restore)
+    migrate_db()
     
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
     
+    conn = get_db_connection()
+    c = conn.cursor()
+    
     db_active_ids = set()
     if file_type == "Active":
         try:
-            current_active = conn.query("SELECT id FROM trades WHERE status = 'Active'", ttl=0)
+            current_active = pd.read_sql("SELECT id FROM trades WHERE status = 'Active'", conn)
             db_active_ids = set(current_active['id'].tolist())
         except: pass
     
@@ -283,39 +229,58 @@ def sync_data(file_list, file_type):
                 log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
             
+            # CRITICAL: Clean column names to remove accidental whitespace
             df.columns = df.columns.str.strip()
-            
+
+            # Relaxed column check
+            has_name = any('name' in c.lower() for c in df.columns)
+            if not has_name:
+                log.append(f"⚠️ {file.name}: Missing 'Name' column.")
+                continue
+
+            # BLOCK PROCESSING LOGIC
             current_trade = None
+            
+            # Iterate through all rows including legs
             for _, row in df.iterrows():
                 try:
+                    # STRIP WHITESPACE to catch .SPX legs properly
                     name_val = get_col(row, ['Name', 'Symbol'])
                     name = str(name_val).strip()
                     if name in ['nan', '', 'Symbol', '0', '0.0']: continue
                     
+                    # --- STRATEGY ROW (Parent) ---
                     if not name.startswith('.'):
+                        # Save previous block if exists
                         if current_trade:
-                            # Normalize
-                            calc = current_trade['call_pnl'] + current_trade['put_pnl']
-                            real = current_trade['pnl']
-                            if calc != 0 and real != 0:
-                                factor = real / calc
+                            # Normalization
+                            calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                            real_total = current_trade['pnl']
+                            if calc_total != 0 and real_total != 0:
+                                # Only normalize if directions match to avoid flipping signs
+                                # or assume logic is sound for components
+                                factor = real_total / calc_total
                                 current_trade['call_pnl'] *= factor
                                 current_trade['put_pnl'] *= factor
-                            
-                            process_trade_block(current_trade, file_type, file_found_ids)
+
+                            process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
                             else: count_update += 1
                             current_trade = None
                         
+                        # Start New Block
                         created = get_col(row, ['Created At'])
                         try: start_dt = pd.to_datetime(created)
                         except: continue
                         
                         group = str(get_col(row, ['Group']))
                         strat = get_strategy(group, name)
+                        
+                        # FUZZY MATCH PnL and DEBIT to handle column name vars
                         pnl = clean_num(get_col(row, ['Total Return $', 'Total Return']))
                         debit = abs(clean_num(get_col(row, ['Net Debit', 'Debit', 'Credit'])))
                         
+                        # Greeks
                         theta = clean_num(get_col(row, ['Theta']))
                         delta = clean_num(get_col(row, ['Delta']))
                         gamma = clean_num(get_col(row, ['Gamma']))
@@ -357,11 +322,21 @@ def sync_data(file_list, file_type):
                             'call_pnl': 0.0, 'put_pnl': 0.0, 'is_new': False
                         }
                     
+                    # --- LEG ROW (Child) ---
                     elif name.startswith('.') and current_trade:
+                        # --- COLUMN MAPPING FIX FOR LEGS ---
+                        # Use fuzzy matching on the INDEX positions implicitly by name from strategy row
+                        # Total Return % -> Quantity
+                        # Total Return $ -> Entry Price
+                        # Created At -> Current Price
+                        # Expiration -> Close Price
+                        
                         qty = clean_num(get_col(row, ['Total Return %'])) 
                         entry_price = clean_num(get_col(row, ['Total Return $']))
+                        
                         raw_current = get_col(row, ['Created At'])
                         raw_close = get_col(row, ['Expiration'])
+                        
                         curr = clean_num(raw_current)
                         close = clean_num(raw_close)
                         
@@ -369,7 +344,7 @@ def sync_data(file_list, file_type):
                         if file_type == "Active":
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
-                        else: 
+                        else: # History
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
                         
@@ -383,21 +358,25 @@ def sync_data(file_list, file_type):
                         elif leg_type == 'P':
                             current_trade['put_pnl'] += leg_pnl
                             legs_processed += 1
-                except: pass
+                except Exception as e:
+                    # Log error for specific row but don't stop the whole file
+                    # print(f"Row Error: {e}") 
+                    pass
 
+            # Process final block
             if current_trade:
-                calc = current_trade['call_pnl'] + current_trade['put_pnl']
-                real = current_trade['pnl']
-                if calc != 0 and real != 0:
-                    factor = real / calc
+                calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                real_total = current_trade['pnl']
+                if calc_total != 0 and real_total != 0:
+                    factor = real_total / calc_total
                     current_trade['call_pnl'] *= factor
                     current_trade['put_pnl'] *= factor
                 
-                process_trade_block(current_trade, file_type, file_found_ids)
+                process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
 
-            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
+            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated, {legs_processed} Legs Processed")
             
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
@@ -405,86 +384,86 @@ def sync_data(file_list, file_type):
     if file_type == "Active" and file_found_ids:
         missing_ids = db_active_ids - file_found_ids
         if missing_ids:
-            ids_tuple = tuple(missing_ids)
-            if len(ids_tuple) == 1:
-                query = f"UPDATE trades SET status = 'Missing' WHERE id = '{ids_tuple[0]}'"
-                run_query(query)
-            else:
-                query = f"UPDATE trades SET status = 'Missing' WHERE id IN {ids_tuple}"
-                run_query(query)
+            placeholders = ','.join('?' for _ in missing_ids)
+            c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
             log.append(f"⚠️ Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
 
+    conn.commit()
+    conn.close()
     return log
 
-def process_trade_block(t, file_type, found_ids):
+def process_trade_block(cursor, t, file_type, found_ids):
     if file_type == "Active":
         found_ids.add(t['id'])
     
-    existing = conn.query("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id", 
-                          params={"id": t['id']}, ttl=0)
+    cursor.execute("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = ?", (t['id'],))
+    existing = cursor.fetchone()
     
-    if existing.empty:
+    if existing is None:
         t['is_new'] = True
-        run_query('''INSERT INTO trades 
+        cursor.execute('''INSERT INTO trades 
             (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, 
              pnl_calls, pnl_puts, theta, delta, gamma, vega, notes, tags, parent_id)
-            VALUES (:id, :name, :strat, :status, :start_dt, :exit_dt, :days_held, :debit, :lot_size, :pnl, 
-             :call_pnl, :put_pnl, :theta, :delta, :gamma, :vega, '', '', '')
-            ON CONFLICT (id) DO UPDATE SET 
-            pnl = EXCLUDED.pnl, status = EXCLUDED.status, days_held = EXCLUDED.days_held
-            ''', t)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (t['id'], t['name'], t['strat'], t['status'], t['start_dt'], t['exit_dt'], 
+             t['days_held'], t['debit'], t['lot_size'], t['pnl'], t['call_pnl'], t['put_pnl'],
+             t['theta'], t['delta'], t['gamma'], t['vega'], "", "", ""))
     else:
         t['is_new'] = False
-        row = existing.iloc[0]
-        old_status = row['status']
+        old_status, old_theta, old_delta, old_gamma, old_vega = existing
         
-        t['theta'] = t['theta'] if t['theta'] != 0 else row['theta']
-        t['delta'] = t['delta'] if t['delta'] != 0 else row['delta']
-        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row['gamma']
-        t['vega']  = t['vega']  if t['vega']  != 0 else row['vega']
+        final_theta = t['theta'] if t['theta'] != 0 else old_theta
+        final_delta = t['delta'] if t['delta'] != 0 else old_delta
+        final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
+        final_vega = t['vega'] if t['vega'] != 0 else old_vega
 
         if file_type == "History":
-            run_query('''UPDATE trades SET 
-                pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, status=:status, 
-                exit_date=:exit_dt, days_held=:days_held, theta=:theta, delta=:delta, gamma=:gamma, vega=:vega 
-                WHERE id=:id''', t)
+            cursor.execute('''UPDATE trades SET 
+                pnl=?, pnl_calls=?, pnl_puts=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
+                WHERE id=?''', 
+                (t['pnl'], t['call_pnl'], t['put_pnl'], t['status'], t['exit_dt'], t['days_held'], 
+                 final_theta, final_delta, final_gamma, final_vega, t['id']))
         elif old_status in ["Active", "Missing"]: 
-            run_query('''UPDATE trades SET 
-                pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, days_held=:days_held, 
-                theta=:theta, delta=:delta, gamma=:gamma, vega=:vega, status='Active', exit_date=:exit_dt
-                WHERE id=:id''', t)
+            cursor.execute('''UPDATE trades SET 
+                pnl=?, pnl_calls=?, pnl_puts=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', exit_date=?
+                WHERE id=?''', 
+                (t['pnl'], t['call_pnl'], t['put_pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, 
+                 t['exit_dt'], t['id']))
             
     if file_type == "Active":
         today = datetime.now().date()
-        snap_check = conn.query("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date", 
-                                params={"id": t['id'], "date": today}, ttl=0)
-        if snap_check.empty:
-            run_query("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (:id, :date, :pnl, :days_held)",
-                      {"id": t['id'], "date": today, "pnl": t['pnl'], "days_held": t['days_held']})
+        cursor.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (t['id'], today))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (?,?,?,?)",
+                      (t['id'], today, t['pnl'], t['days_held']))
 
 def update_journal(edited_df):
+    conn = get_db_connection()
+    c = conn.cursor()
     count = 0
     try:
         for index, row in edited_df.iterrows():
-            params = {
-                "notes": str(row['Notes']),
-                "tags": str(row['Tags']),
-                "pid": str(row['Parent ID']),
-                "id": row['id']
-            }
-            run_query("UPDATE trades SET notes=:notes, tags=:tags, parent_id=:pid WHERE id=:id", params)
+            t_id = row['id'] 
+            notes = str(row['Notes'])
+            tags = str(row['Tags'])
+            pid = str(row['Parent ID'])
+            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=? WHERE id=?", (notes, tags, pid, t_id))
             count += 1
+        conn.commit()
         return count
     except Exception as e: return 0
+    finally: conn.close()
 
 # --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
-    if not conn: return pd.DataFrame()
+    if not os.path.exists(DB_NAME): return pd.DataFrame()
+    conn = get_db_connection()
     try:
-        init_db()
-        df = conn.query("SELECT * FROM trades", ttl=0)
-        snaps = conn.query("SELECT trade_id, pnl FROM snapshots", ttl=0)
+        df = pd.read_sql("SELECT * FROM trades", conn)
+        
+        # --- Volatility Calculation from Snapshots ---
+        snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
             vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
@@ -492,9 +471,10 @@ def load_data():
             df['P&L Vol'] = df['P&L Vol'].fillna(0)
         else:
             df['P&L Vol'] = 0.0
-            
+
     except Exception as e:
         return pd.DataFrame()
+    finally: conn.close()
     
     if not df.empty:
         df = df.rename(columns={
@@ -506,71 +486,131 @@ def load_data():
             'pnl_calls': 'Call P&L', 'pnl_puts': 'Put P&L'
         })
         
-        cols = ['Gamma','Vega','Theta','Delta','P&L','Debit','lot_size','Notes','Tags','Parent ID','Call P&L','Put P&L']
-        for col in cols:
-            if col not in df.columns: df[col] = "" if col in ['Notes','Tags'] else 0.0
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Call P&L', 'Put P&L']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
         
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
-        num_cols = ['Debit', 'P&L', 'Call P&L', 'Put P&L', 'Days Held']
-        for c in num_cols:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
+        df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
+        df['Call P&L'] = pd.to_numeric(df['Call P&L'], errors='coerce').fillna(0)
+        df['Put P&L'] = pd.to_numeric(df['Put P&L'], errors='coerce').fillna(0)
+        df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
+        
+        # --- NEW METRICS ---
         df['Ann. ROI'] = df['Daily Yield %'] * 365
+        
+        # Theta Efficiency (P&L / Potential Decay)
         df['Theta Pot.'] = df['Theta'] * df['Days Held']
         df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
+        
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
+        
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
-            reason, grade = "Standard", "C"
+            reason = "Standard"
+            grade = "C"
             if s == '130/160':
-                if d > 4800: grade, reason = "F", "Overpriced (> $4.8k)"
-                elif 3500 <= d <= 4500: grade, reason = "A+", "Sweet Spot"
-                else: grade, reason = "B", "Acceptable"
+                if d > 4800: grade="F"; reason="Overpriced (> $4.8k)"
+                elif 3500 <= d <= 4500: grade="A+"; reason="Sweet Spot"
+                else: grade="B"; reason="Acceptable"
             elif s == '160/190':
-                if 4800 <= d <= 5500: grade, reason = "A", "Ideal Pricing"
-                else: grade, reason = "C", "Check Pricing"
+                if 4800 <= d <= 5500: grade="A"; reason="Ideal Pricing"
+                else: grade="C"; reason="Check Pricing"
             elif s == 'M200':
-                if 7500 <= d <= 8500: grade, reason = "A", "Perfect Entry"
-                else: grade, reason = "B", "Variance"
+                if 7500 <= d <= 8500: grade="A"; reason="Perfect Entry"
+                else: grade="B"; reason="Variance"
             elif s == 'SMSF':
-                if d > 15000: grade, reason = "B", "High Debit"
-                else: grade, reason = "A", "Standard"
+                if d > 15000: grade="B"; reason="High Debit" 
+                else: grade="A"; reason="Standard"
             return pd.Series([grade, reason])
 
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
+        
     return df
 
+@st.cache_data(ttl=300)
+def load_snapshots():
+    if not os.path.exists(DB_NAME): return pd.DataFrame()
+    conn = get_db_connection()
+    try:
+        q = """
+        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
+        FROM snapshots s
+        JOIN trades t ON s.trade_id = t.id
+        """
+        df = pd.read_sql(q, conn)
+        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
+        df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
+        return df
+    except: return pd.DataFrame()
+    finally: conn.close()
+
+# --- INITIALIZE DB ---
+init_db()
+
 # --- SIDEBAR ---
-with st.sidebar.expander("🔵 WORK (Sync Files)", expanded=True):
+st.sidebar.markdown("### 🚦 Daily Workflow")
+with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
+    restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
+    if restore:
+        with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+        st.cache_data.clear()
+        st.success("Restored.")
+        if 'restored' not in st.session_state:
+            st.session_state['restored'] = True
+            st.rerun()
+
+st.sidebar.markdown("⬇️ *then...*")
+with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
     history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
     if st.button("🔄 Process & Reconcile"):
-        if conn:
-            logs = []
-            if active_up: logs.extend(sync_data(active_up, "Active"))
-            if history_up: logs.extend(sync_data(history_up, "History"))
-            if logs:
-                for l in logs: st.write(l)
-                st.cache_data.clear()
-                st.success("Sync Complete to Cloud!")
-        else:
-            st.error("No Database Connection.")
+        logs = []
+        if active_up: logs.extend(sync_data(active_up, "Active"))
+        if history_up: logs.extend(sync_data(history_up, "History"))
+        if logs:
+            for l in logs: st.write(l)
+            st.cache_data.clear()
+            st.success("Sync Complete!")
+
+st.sidebar.markdown("⬇️ *finally...*")
+with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
+    with open(DB_NAME, "rb") as f:
+        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
 with st.sidebar.expander("🛠️ Maintenance"):
-    if st.button("🧨 Hard Reset Cloud DB"):
-        if conn:
-            run_query("DROP TABLE IF EXISTS trades CASCADE")
-            run_query("DROP TABLE IF EXISTS snapshots CASCADE")
-            init_db()
-            st.cache_data.clear()
-            st.success("Cloud Database Wiped & Reset.")
-            st.rerun()
+    if st.button("🧹 Vacuum DB"):
+        conn = get_db_connection()
+        conn.execute("VACUUM")
+        conn.close()
+        st.success("Optimized.")
+    if st.button("🔥 Purge Old Snapshots (>90d)"):
+        conn = get_db_connection()
+        cutoff = (datetime.now() - pd.Timedelta(days=90)).date()
+        conn.execute("DELETE FROM snapshots WHERE snapshot_date < ?", (cutoff,))
+        conn.commit()
+        conn.close()
+        st.success("Purged.")
+    if st.button("🧨 Hard Reset (Delete All Data)"):
+        conn = get_db_connection()
+        conn.execute("DROP TABLE IF EXISTS trades")
+        conn.execute("DROP TABLE IF EXISTS snapshots")
+        conn.commit()
+        conn.close()
+        init_db()
+        st.cache_data.clear()
+        st.success("Wiped & Reset.")
+        st.rerun()
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Strategy Settings")
@@ -1261,4 +1301,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v105.0 | Fix: Simplified Connection for Stability")
+    st.caption("Allantis Trade Guardian v93.0 | Fix: Auto-Schema Repair & Fuzzy Column Matching")
