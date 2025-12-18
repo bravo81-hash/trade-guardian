@@ -12,12 +12,8 @@ from datetime import datetime
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
-# --- SESSION STATE INITIALIZATION ---
-if 'db_changed' not in st.session_state:
-    st.session_state['db_changed'] = False
-
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v94.0 (Feature: 'Unsaved Changes' Safety Guard)")
+st.info("✅ RUNNING VERSION: v91.0 (Fixed PnL Normalization & Sync Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -69,7 +65,6 @@ def init_db():
 def migrate_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Add new columns if they don't exist (Safe to run multiple times)
     try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
     except: pass 
     try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
@@ -145,14 +140,6 @@ def get_multiplier(ticker):
     if "/ES" in t: return 50
     return 100
 
-def get_col(row, candidates):
-    """Fuzzy match column names to handle spaces or slight variations."""
-    for col in row.index:
-        for cand in candidates:
-            if cand.lower() in col.lower():
-                return row[col]
-    return 0
-
 # --- DEEP SCAN PARSER ---
 def identify_leg_type(ticker):
     # Matches P or C followed by numbers (strike)
@@ -204,9 +191,6 @@ def read_file_safely(file):
 
 # --- SYNC ENGINE (Deep Scan Version - Fixed) ---
 def sync_data(file_list, file_type):
-    # 1. FORCE MIGRATION
-    migrate_db()
-    
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
     
@@ -221,9 +205,6 @@ def sync_data(file_list, file_type):
         except: pass
     
     file_found_ids = set()
-    
-    # TRACK CHANGES
-    changes_made = False
 
     for file in file_list:
         count_new = 0
@@ -239,10 +220,10 @@ def sync_data(file_list, file_type):
             # CRITICAL: Clean column names to remove accidental whitespace
             df.columns = df.columns.str.strip()
 
-            # Relaxed column check
-            has_name = any('name' in c.lower() for c in df.columns)
-            if not has_name:
-                log.append(f"⚠️ {file.name}: Missing 'Name' column.")
+            required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
+            missing = [col for col in required_cols if col not in df.columns]
+            if missing:
+                log.append(f"⚠️ {file.name}: Missing columns {missing}.")
                 continue
 
             # BLOCK PROCESSING LOGIC
@@ -250,106 +231,124 @@ def sync_data(file_list, file_type):
             
             # Iterate through all rows including legs
             for _, row in df.iterrows():
-                try:
-                    # STRIP WHITESPACE to catch .SPX legs properly
-                    name_val = get_col(row, ['Name', 'Symbol'])
-                    name = str(name_val).strip()
-                    if name in ['nan', '', 'Symbol', '0', '0.0']: continue
+                # STRIP WHITESPACE to catch .SPX legs properly
+                name = str(row.get('Name', '')).strip()
+                if name in ['nan', '', 'Symbol']: continue
+                
+                # --- STRATEGY ROW (Parent) ---
+                # Does NOT start with '.', is not a symbol row
+                if not name.startswith('.'):
+                    # Save previous block if exists
+                    if current_trade:
+                        # --- NORMALIZATION STEP ---
+                        # Ensure Leg PnLs sum to Total PnL (Source of Truth)
+                        calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                        real_total = current_trade['pnl']
+                        
+                        if calc_total != 0 and real_total != 0:
+                            # Scale legs to match real total
+                            factor = real_total / calc_total
+                            current_trade['call_pnl'] *= factor
+                            current_trade['put_pnl'] *= factor
+                        elif calc_total == 0 and real_total != 0:
+                            # Fallback if no legs had PnL but trade did (rare)
+                            # Assign 50/50? Or leave 0. Leaving 0 is safer than guessing.
+                            pass
+
+                        process_trade_block(c, current_trade, file_type, file_found_ids)
+                        if current_trade['is_new']: count_new += 1
+                        else: count_update += 1
+                        current_trade = None
                     
-                    # --- STRATEGY ROW (Parent) ---
-                    if not name.startswith('.'):
-                        # Save previous block if exists
-                        if current_trade:
-                            # Normalization
-                            calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
-                            real_total = current_trade['pnl']
-                            if calc_total != 0 and real_total != 0:
-                                factor = real_total / calc_total
-                                current_trade['call_pnl'] *= factor
-                                current_trade['put_pnl'] *= factor
-
-                            process_trade_block(c, current_trade, file_type, file_found_ids)
-                            if current_trade['is_new']: count_new += 1
-                            else: count_update += 1
-                            current_trade = None
-                        
-                        # Start New Block
-                        created = get_col(row, ['Created At'])
-                        try: start_dt = pd.to_datetime(created)
-                        except: continue
-                        
-                        group = str(get_col(row, ['Group']))
-                        strat = get_strategy(group, name)
-                        
-                        # FUZZY MATCH PnL and DEBIT to handle column name vars
-                        pnl = clean_num(get_col(row, ['Total Return $', 'Total Return']))
-                        debit = abs(clean_num(get_col(row, ['Net Debit', 'Debit', 'Credit'])))
-                        
-                        # Greeks
-                        theta = clean_num(get_col(row, ['Theta']))
-                        delta = clean_num(get_col(row, ['Delta']))
-                        gamma = clean_num(get_col(row, ['Gamma']))
-                        vega = clean_num(get_col(row, ['Vega']))
-                        
-                        lot_size = 1
-                        if strat == '130/160':
-                            if debit > 11000: lot_size = 3
-                            elif debit > 6000: lot_size = 2
-                        elif strat == '160/190':
-                            if debit > 8000: lot_size = 2
-                        elif strat == 'M200':
-                            if debit > 12000: lot_size = 2
-                        elif strat == 'SMSF':
-                            if debit > 12000: lot_size = 2
-
-                        trade_id = generate_id(name, strat, start_dt)
-                        status = "Active" if file_type == "Active" else "Expired"
-                        
-                        exit_dt = None
-                        try:
-                            raw_exp = get_col(row, ['Expiration'])
-                            if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
-                                exit_dt = pd.to_datetime(raw_exp)
-                        except: pass
-
-                        days_held = 1
-                        if exit_dt and file_type == "History":
-                            days_held = (exit_dt - start_dt).days
-                        else:
-                            days_held = (datetime.now() - start_dt).days
-                        if days_held < 1: days_held = 1
-
-                        current_trade = {
-                            'id': trade_id, 'name': name, 'strat': strat, 'status': status,
-                            'start_dt': start_dt.date(), 'exit_dt': exit_dt.date() if exit_dt else None,
-                            'days_held': days_held, 'debit': debit, 'lot_size': lot_size, 'pnl': pnl,
-                            'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
-                            'call_pnl': 0.0, 'put_pnl': 0.0, 'is_new': False
-                        }
+                    # Start New Block
+                    created = row.get('Created At', '')
+                    try: start_dt = pd.to_datetime(created)
+                    except: continue
                     
-                    # --- LEG ROW (Child) ---
-                    elif name.startswith('.') and current_trade:
+                    group = str(row.get('Group', ''))
+                    strat = get_strategy(group, name)
+                    # For Strategy Rows: 'Total Return $' is the PnL
+                    pnl = clean_num(row.get('Total Return $', 0))
+                    debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                    
+                    # Greeks
+                    theta = clean_num(row.get('Theta', 0))
+                    delta = clean_num(row.get('Delta', 0))
+                    gamma = clean_num(row.get('Gamma', 0))
+                    vega = clean_num(row.get('Vega', 0))
+                    
+                    lot_size = 1
+                    if strat == '130/160':
+                        if debit > 11000: lot_size = 3
+                        elif debit > 6000: lot_size = 2
+                    elif strat == '160/190':
+                        if debit > 8000: lot_size = 2
+                    elif strat == 'M200':
+                        if debit > 12000: lot_size = 2
+                    elif strat == 'SMSF':
+                        if debit > 12000: lot_size = 2
+
+                    trade_id = generate_id(name, strat, start_dt)
+                    status = "Active" if file_type == "Active" else "Expired"
+                    
+                    exit_dt = None
+                    try:
+                        raw_exp = row.get('Expiration')
+                        if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
+                            exit_dt = pd.to_datetime(raw_exp)
+                    except: pass
+
+                    days_held = 1
+                    if exit_dt and file_type == "History":
+                        days_held = (exit_dt - start_dt).days
+                    else:
+                        days_held = (datetime.now() - start_dt).days
+                    if days_held < 1: days_held = 1
+
+                    current_trade = {
+                        'id': trade_id, 'name': name, 'strat': strat, 'status': status,
+                        'start_dt': start_dt.date(), 'exit_dt': exit_dt.date() if exit_dt else None,
+                        'days_held': days_held, 'debit': debit, 'lot_size': lot_size, 'pnl': pnl,
+                        'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
+                        'call_pnl': 0.0, 'put_pnl': 0.0, 'is_new': False
+                    }
+                
+                # --- LEG ROW (Child) ---
+                # Starts with '.' indicating it belongs to the active strategy block
+                elif name.startswith('.') and current_trade:
+                    try:
                         # --- COLUMN MAPPING FIX FOR LEGS ---
-                        # Use fuzzy matching on the INDEX positions implicitly by name from strategy row
+                        # Strategy Header: Name | Total Return % | Total Return $ | Created At    | Expiration
+                        # Leg Data:        Sym  | Quantity       | Entry Price    | Current Price | Close Price
                         
-                        qty = clean_num(get_col(row, ['Total Return %'])) 
-                        entry_price = clean_num(get_col(row, ['Total Return $']))
+                        qty = clean_num(row.get('Total Return %', 0))  # Column 2: Quantity
+                        entry_price = clean_num(row.get('Total Return $', 0)) # Column 3: Entry Price
                         
-                        raw_current = get_col(row, ['Created At'])
-                        raw_close = get_col(row, ['Expiration'])
+                        raw_current = row.get('Created At') # Column 4: Current Price (Active)
+                        raw_close = row.get('Expiration')   # Column 5: Close Price (History/Active fallback)
                         
                         curr = clean_num(raw_current)
                         close = clean_num(raw_close)
                         
+                        # Robust Price Selection
+                        # Active Files: Often 'Created At' (Current) is empty, but 'Expiration' (Close) has the mark.
                         price_to_use = 0.0
+                        
                         if file_type == "Active":
+                            # Prioritize Close column if Current is empty/zero, as imports often put mark in Close col
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
+                            else: price_to_use = 0.0 # Warning: Missing Price
                         else: # History
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
                         
+                        # Multiplier Check (SPX=100, /ES=50)
                         mult = get_multiplier(name)
+
+                        # Calculation: (Exit - Entry) * Qty * Multiplier
+                        # Works for Long (Qty > 0): Exit > Entry = Profit
+                        # Works for Short (Qty < 0): Entry > Exit = Profit (e.g. (10 - 15) * -1 = 5)
                         leg_pnl = (price_to_use - entry_price) * qty * mult
                         
                         leg_type = identify_leg_type(name)
@@ -359,11 +358,14 @@ def sync_data(file_list, file_type):
                         elif leg_type == 'P':
                             current_trade['put_pnl'] += leg_pnl
                             legs_processed += 1
-                except Exception as e:
-                    pass
+                            
+                    except Exception as e:
+                        # Fail silently on single leg errors to preserve the trade block
+                        pass
 
             # Process final block
             if current_trade:
+                # Normalization for final block
                 calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                 real_total = current_trade['pnl']
                 if calc_total != 0 and real_total != 0:
@@ -375,8 +377,6 @@ def sync_data(file_list, file_type):
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
 
-            if count_new > 0 or count_update > 0:
-                changes_made = True
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated, {legs_processed} Legs Processed")
             
         except Exception as e:
@@ -388,15 +388,9 @@ def sync_data(file_list, file_type):
             placeholders = ','.join('?' for _ in missing_ids)
             c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
             log.append(f"⚠️ Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
-            changes_made = True
 
     conn.commit()
     conn.close()
-    
-    # Mark DB as changed
-    if changes_made:
-        st.session_state['db_changed'] = True
-        
     return log
 
 def process_trade_block(cursor, t, file_type, found_ids):
@@ -457,8 +451,6 @@ def update_journal(edited_df):
             c.execute("UPDATE trades SET notes=?, tags=?, parent_id=? WHERE id=?", (notes, tags, pid, t_id))
             count += 1
         conn.commit()
-        if count > 0:
-            st.session_state['db_changed'] = True
         return count
     except Exception as e: return 0
     finally: conn.close()
@@ -569,18 +561,11 @@ init_db()
 
 # --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
-
-# --- UNSAVED CHANGES WARNING ---
-if st.session_state.get('db_changed', False):
-    st.sidebar.error("⚠️ UNSAVED CHANGES")
-    st.sidebar.markdown("**You have processed new files or edited the journal. Please download the DB below to save your work.**")
-
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         st.cache_data.clear()
-        st.session_state['db_changed'] = False
         st.success("Restored.")
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
@@ -601,11 +586,8 @@ with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
 
 st.sidebar.markdown("⬇️ *finally...*")
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
-    if os.path.exists(DB_NAME):
-        with open(DB_NAME, "rb") as f:
-            st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
-    else:
-        st.warning("No database file found.")
+    with open(DB_NAME, "rb") as f:
+        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
@@ -628,7 +610,6 @@ with st.sidebar.expander("🛠️ Maintenance"):
         conn.close()
         init_db()
         st.cache_data.clear()
-        st.session_state['db_changed'] = False
         st.success("Wiped & Reset.")
         st.rerun()
 
@@ -984,10 +965,10 @@ with tab3:
         
         st.divider()
         
-        an1, an2, an3, an4, an5, an6, an7, an8, an9, an10, an11, an12 = st.tabs([
+        an1, an2, an3, an4, an5, an6, an7, an8, an9, an10, an11 = st.tabs([
             "🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", 
             "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab", "⚙️ Velocity", 
-            "🎯 Compliance", "🧱 Gamma Wall", "🏛️ Structure Perf.", "📜 History Log"
+            "🎯 Compliance", "🧱 Gamma Wall", "🏛️ Structure Perf."
         ])
 
         with an1:
@@ -1232,48 +1213,22 @@ with tab3:
             st.caption("Which side of your trades is driving profitability?")
             
             if not df.empty and ('Call P&L' in df.columns):
-                # Separate Active and Closed for clearer analysis
-                active_struct = df[df['Status'] == 'Active'].groupby('Strategy').agg({'Call P&L': 'sum', 'Put P&L': 'sum'}).reset_index()
-                closed_struct = df[df['Status'] == 'Expired'].groupby('Strategy').agg({'Call P&L': 'sum', 'Put P&L': 'sum'}).reset_index()
+                # Aggregate for active + closed
+                struct_agg = df.groupby('Strategy').agg({'Call P&L': 'sum', 'Put P&L': 'sum'}).reset_index()
                 
-                c1, c2 = st.columns(2)
+                # Melt for easy plotting
+                melted = struct_agg.melt(id_vars='Strategy', value_vars=['Call P&L', 'Put P&L'], var_name='Type', value_name='P&L')
                 
-                with c1:
-                    st.caption("🔹 Unrealized (Active Trades)")
-                    if not active_struct.empty:
-                        melted = active_struct.melt(id_vars='Strategy', value_vars=['Call P&L', 'Put P&L'], var_name='Type', value_name='P&L')
-                        fig = px.bar(melted, x='Strategy', y='P&L', color='Type', barmode='group',
-                                     color_discrete_map={'Call P&L': '#EF553B', 'Put P&L': '#00CC96'})
-                        st.plotly_chart(fig, use_container_width=True)
-                    else: st.info("No active data.")
-
-                with c2:
-                    st.caption("🔸 Realized (Closed Trades)")
-                    if not closed_struct.empty:
-                        melted = closed_struct.melt(id_vars='Strategy', value_vars=['Call P&L', 'Put P&L'], var_name='Type', value_name='P&L')
-                        fig = px.bar(melted, x='Strategy', y='P&L', color='Type', barmode='group',
-                                     color_discrete_map={'Call P&L': '#EF553B', 'Put P&L': '#00CC96'})
-                        st.plotly_chart(fig, use_container_width=True)
-                    else: st.info("No closed data.")
-
+                fig = px.bar(melted, x='Strategy', y='P&L', color='Type', barmode='group',
+                             title="Net P&L Contribution by Leg Type (All Time)",
+                             color_discrete_map={'Call P&L': '#EF553B', 'Put P&L': '#00CC96'})
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.dataframe(struct_agg.style.format({'Call P&L': "${:,.0f}", 'Put P&L': "${:,.0f}"})
+                             .map(lambda x: 'color: green; font-weight: bold' if x > 0 else 'color: red; font-weight: bold', subset=['Call P&L', 'Put P&L']), 
+                             use_container_width=True)
             else:
                 st.info("Sync your files to populate structure data.")
-
-        with an12:
-            st.markdown("##### 📜 Closed Trade History (Detailed)")
-            if not expired_sub.empty:
-                hist_cols = ['Name', 'Strategy', 'Entry Date', 'Exit Date', 'P&L', 'Call P&L', 'Put P&L', 'ROI', 'Days Held']
-                
-                st.dataframe(
-                    expired_sub[hist_cols].style.format({
-                        'P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 'Put P&L': "${:,.0f}", 
-                        'ROI': "{:.1f}%", 'Entry Date': "{:%Y-%m-%d}", 'Exit Date': "{:%Y-%m-%d}"
-                    })
-                    .map(lambda x: 'color: green; font-weight: bold' if x > 0 else 'color: red; font-weight: bold', subset=['P&L', 'Call P&L', 'Put P&L', 'ROI']),
-                    use_container_width=True
-                )
-            else:
-                st.info("No history data found.")
 
 
 # 4. RULE BOOK
@@ -1321,4 +1276,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v94.0 | Feature: 'Unsaved Changes' Safety Guard")
+    st.caption("Allantis Trade Guardian v91.0 | Fixed PnL Normalization & Sync Logic")
