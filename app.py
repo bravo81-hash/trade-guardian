@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import text, create_engine, inspect
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import OperationalError, ArgumentError
 import re
 from datetime import datetime
 
@@ -12,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("☁️ RUNNING VERSION: v102.0 (Fix: SSL Mode & Port Toggling)")
+st.info("☁️ RUNNING VERSION: v103.0 (Tool: Connection String Analyzer)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -21,86 +22,116 @@ st.sidebar.markdown("### ☁️ Database Setup")
 
 with st.sidebar.expander("🔧 DB Connection Settings", expanded=True):
     manual_db_url = st.text_input(
-        "Manual Connection String (Optional)", 
+        "Manual Connection String", 
         type="password", 
-        help="Paste your Supabase URL here to override secrets."
+        help="Paste your Supabase URL (Transaction Pooler / Port 6543) here."
     )
     
-    use_pooler = st.checkbox("Use Transaction Pooler (Port 6543)", value=False, help="Check if direct connection (5432) fails.")
+    use_pooler_toggle = st.checkbox("Force Port 6543", value=True, help="Swaps 5432 to 6543 automatically.")
 
-# --- DATABASE CONNECTION LOGIC ---
+# --- CONNECTION STRING LOGIC ---
 def get_final_db_url():
-    """Determines the best URL to use (Manual > Secrets)."""
     url = ""
+    source = "None"
     
-    # Priority 1: Manual Input
+    # 1. Manual Input
     if manual_db_url.strip():
         url = manual_db_url.strip()
+        source = "Manual Input"
     
-    # Priority 2: Secrets
+    # 2. Secrets
     else:
         try:
             if "supabase" in st.secrets["connections"]:
                 url = st.secrets["connections"]["supabase"]["url"]
+                source = "Secrets (Supabase)"
             elif "postgres" in st.secrets["connections"]:
                 url = st.secrets["connections"]["postgres"]["url"]
+                source = "Secrets (Postgres)"
             else:
                 url = st.secrets["database"]["url"]
+                source = "Secrets (Generic)"
         except:
             pass 
 
-    if not url: return None
+    if not url: return None, "Missing"
 
-    # --- URL SANITIZATION & FIXES ---
-    
-    # 1. Driver Fix (Streamlit needs postgresql+psycopg2)
+    # --- SANITIZATION ---
+    # Driver Fix
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+psycopg2://")
     elif url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg2://")
     
-    # 2. Port Fix (Toggle)
-    if use_pooler:
-        if ":5432" in url: url = url.replace(":5432", ":6543")
-    else:
-        if ":6543" in url: url = url.replace(":6543", ":5432")
+    # Port Fix
+    if use_pooler_toggle and ":5432" in url and "supabase" in url:
+        url = url.replace(":5432", ":6543")
 
-    # 3. SSL Fix (Critical for Supabase)
+    # SSL Fix
     if "sslmode" not in url:
-        if "?" in url:
-            url += "&sslmode=require"
-        else:
-            url += "?sslmode=require"
+        sep = "&" if "?" in url else "?"
+        url += f"{sep}sslmode=require"
             
-    return url
+    return url, source
 
-# Initialize Connection
+# --- DIAGNOSTICS TAB ---
+with st.sidebar.expander("🕵️ Connection Analyzer", expanded=False):
+    db_url, src = get_final_db_url()
+    st.write(f"**Source:** {src}")
+    
+    if st.button("Analyze Connection String"):
+        if not db_url:
+            st.error("No URL found.")
+        else:
+            try:
+                # Parse URL without connecting
+                u = make_url(db_url)
+                st.markdown(f"""
+                **Parsed Successfully:**
+                * **Driver:** `{u.drivername}`
+                * **User:** `{u.username}`
+                * **Host:** `{u.host}` (Should be `...pooler.supabase.com`)
+                * **Port:** `{u.port}` (Should be `6543`)
+                * **Database:** `{u.database}`
+                * **Password Detected:** {"✅ Yes" if u.password else "❌ No"}
+                """)
+                
+                if u.password and any(c in u.password for c in ['@', ':', '/']):
+                    st.error("⚠️ **Warning:** Your password contains special characters (`@`, `:`, `/`). This often breaks the connection string parser. Please reset your database password to be alphanumeric only.")
+                
+            except ArgumentError:
+                st.error("❌ **Invalid URL Format.** The connection string could not be parsed. Check for typos.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+# --- INIT CONNECTION ---
 conn = None
-db_url = get_final_db_url()
-
 if db_url:
     try:
-        # ttl=0 disables caching of the connection object
-        conn = st.connection("supabase", type="sql", url=db_url, ttl=0)
+        # Create engine
+        engine = create_engine(db_url, pool_pre_ping=True)
+        conn = st.connection("supabase", type="sql", engine=engine)
     except Exception as e:
-        st.error(f"⚠️ Connection Init Error: {str(e)}")
-else:
-    st.warning("⚠️ No Database URL found. Please check secrets.toml or paste URL in sidebar.")
+        st.error(f"⚠️ Init Error: {str(e)}")
 
 def run_query(query_str, params=None):
-    """Helper to run queries safely with parameters and commit."""
     if not conn: return
     try:
-        with conn.session as s:
-            if params:
-                s.execute(text(query_str), params)
-            else:
-                s.execute(text(query_str))
-            s.commit()
+        with engine.connect() as connection:
+            trans = connection.begin()
+            try:
+                if params:
+                    connection.execute(text(query_str), params)
+                else:
+                    connection.execute(text(query_str))
+                trans.commit()
+            except:
+                trans.rollback()
+                raise
     except OperationalError as e:
-        st.error("🚨 **Database Connection Failed!**")
-        st.markdown(f"**Error:** `{str(e)}`")
-        st.warning("Try toggling 'Use Transaction Pooler' in the sidebar.")
+        st.error("🚨 **Authentication Failed**")
+        st.error(f"Message: {e.orig}")
+        st.info("💡 **Tip:** Go to Supabase -> Settings -> Database -> Reset Password. Use only letters and numbers.")
         st.stop()
     except Exception as e:
         st.error(f"Database Error: {str(e)}")
@@ -249,7 +280,7 @@ def sync_data(file_list, file_type):
     db_active_ids = set()
     if file_type == "Active":
         try:
-            current_active = conn.query("SELECT id FROM trades WHERE status = 'Active'", ttl=0)
+            current_active = pd.read_sql("SELECT id FROM trades WHERE status = 'Active'", engine)
             db_active_ids = set(current_active['id'].tolist())
         except: pass
     
@@ -403,10 +434,10 @@ def process_trade_block(t, file_type, found_ids):
     if file_type == "Active":
         found_ids.add(t['id'])
     
-    existing = conn.query("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id", 
-                          params={"id": t['id']}, ttl=0)
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = :id"), {"id": t['id']}).fetchone()
     
-    if existing.empty:
+    if not result:
         t['is_new'] = True
         run_query('''INSERT INTO trades 
             (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, 
@@ -418,20 +449,22 @@ def process_trade_block(t, file_type, found_ids):
             ''', t)
     else:
         t['is_new'] = False
-        row = existing.iloc[0]
-        old_status = row['status']
+        row_theta = result[1]
+        row_delta = result[2]
+        row_gamma = result[3]
+        row_vega = result[4]
         
-        t['theta'] = t['theta'] if t['theta'] != 0 else row['theta']
-        t['delta'] = t['delta'] if t['delta'] != 0 else row['delta']
-        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row['gamma']
-        t['vega']  = t['vega']  if t['vega']  != 0 else row['vega']
+        t['theta'] = t['theta'] if t['theta'] != 0 else row_theta
+        t['delta'] = t['delta'] if t['delta'] != 0 else row_delta
+        t['gamma'] = t['gamma'] if t['gamma'] != 0 else row_gamma
+        t['vega']  = t['vega']  if t['vega']  != 0 else row_vega
 
         if file_type == "History":
             run_query('''UPDATE trades SET 
                 pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, status=:status, 
                 exit_date=:exit_dt, days_held=:days_held, theta=:theta, delta=:delta, gamma=:gamma, vega=:vega 
                 WHERE id=:id''', t)
-        elif old_status in ["Active", "Missing"]: 
+        elif result[0] in ["Active", "Missing"]: 
             run_query('''UPDATE trades SET 
                 pnl=:pnl, pnl_calls=:call_pnl, pnl_puts=:put_pnl, days_held=:days_held, 
                 theta=:theta, delta=:delta, gamma=:gamma, vega=:vega, status='Active', exit_date=:exit_dt
@@ -439,9 +472,10 @@ def process_trade_block(t, file_type, found_ids):
             
     if file_type == "Active":
         today = datetime.now().date()
-        snap_check = conn.query("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date", 
-                                params={"id": t['id'], "date": today}, ttl=0)
-        if snap_check.empty:
+        with engine.connect() as conn:
+            snap = conn.execute(text("SELECT id FROM snapshots WHERE trade_id=:id AND snapshot_date=:date"), {"id": t['id'], "date": today}).fetchone()
+        
+        if not snap:
             run_query("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (:id, :date, :pnl, :days_held)",
                       {"id": t['id'], "date": today, "pnl": t['pnl'], "days_held": t['days_held']})
 
@@ -466,8 +500,8 @@ def load_data():
     if not conn: return pd.DataFrame()
     try:
         init_db()
-        df = conn.query("SELECT * FROM trades", ttl=0)
-        snaps = conn.query("SELECT trade_id, pnl FROM snapshots", ttl=0)
+        df = pd.read_sql("SELECT * FROM trades", engine)
+        snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", engine)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
             vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
@@ -1244,4 +1278,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v101.0 | Fix: Manual Connection Override & IPv6 Workaround")
+    st.caption("Allantis Trade Guardian v103.0 | Tool: Connection String Analyzer")
