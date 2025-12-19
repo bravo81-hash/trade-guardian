@@ -12,12 +12,8 @@ from datetime import datetime
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
-# --- SESSION STATE INITIALIZATION ---
-if 'db_changed' not in st.session_state:
-    st.session_state['db_changed'] = False
-
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v97.0 (Fix: Active Trade Pricing Priority & Safety Zeroing)")
+st.info("✅ RUNNING VERSION: v93.0 (Fix: Auto-Schema Repair & Fuzzy Column Matching)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -104,7 +100,7 @@ def get_strategy(group_name, trade_name=""):
 
 def clean_num(x):
     """Robust number cleaner that handles '$', ',', spaces, and accounting style '(100)'."""
-    if pd.isna(x) or str(x).strip() in ["", "-", "—"]:
+    if pd.isna(x) or str(x).strip() == "":
         return 0.0
     s = str(x).replace('$', '').replace(',', '').strip()
     # Handle accounting format (123.45) -> -123.45
@@ -158,6 +154,7 @@ def identify_leg_type(ticker):
     # Matches P or C followed by numbers (strike)
     # Updated regex to support decimals in strike price (e.g. 4100.5)
     # Handles .SPXW prefix as well
+    # Looks for a pattern like: Date(6digits) -> C/P -> Strike
     match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
     if match:
         return match.group(1) # Returns 'P' or 'C'
@@ -203,7 +200,7 @@ def read_file_safely(file):
 
 # --- SYNC ENGINE (Deep Scan Version - Fixed) ---
 def sync_data(file_list, file_type):
-    # 1. FORCE MIGRATION
+    # 1. FORCE MIGRATION (Fixes "Missing Column" errors after DB restore)
     migrate_db()
     
     log = []
@@ -220,9 +217,6 @@ def sync_data(file_list, file_type):
         except: pass
     
     file_found_ids = set()
-    
-    # TRACK CHANGES
-    changes_made = False
 
     for file in file_list:
         count_new = 0
@@ -259,25 +253,15 @@ def sync_data(file_list, file_type):
                     if not name.startswith('.'):
                         # Save previous block if exists
                         if current_trade:
-                            # --- SAFE NORMALIZATION LOGIC ---
+                            # Normalization
                             calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                             real_total = current_trade['pnl']
-                            
-                            # DEFAULT: Zero out breakdown if logic fails
-                            final_call = 0.0
-                            final_put = 0.0
-                            
                             if calc_total != 0 and real_total != 0:
+                                # Only normalize if directions match to avoid flipping signs
+                                # or assume logic is sound for components
                                 factor = real_total / calc_total
-                                same_sign = (real_total > 0 and calc_total > 0) or (real_total < 0 and calc_total < 0)
-                                reasonable = 0.1 <= abs(factor) <= 10.0
-                                
-                                if same_sign and reasonable:
-                                    final_call = current_trade['call_pnl'] * factor
-                                    final_put = current_trade['put_pnl'] * factor
-                            
-                            current_trade['call_pnl'] = final_call
-                            current_trade['put_pnl'] = final_put
+                                current_trade['call_pnl'] *= factor
+                                current_trade['put_pnl'] *= factor
 
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
@@ -292,13 +276,8 @@ def sync_data(file_list, file_type):
                         group = str(get_col(row, ['Group']))
                         strat = get_strategy(group, name)
                         
-                        # FIX 1: Strict PnL Column Targeting
-                        pnl = clean_num(get_col(row, ['Total Return $']))
-                        if pnl == 0 and 'Total Return' in row.index:
-                             val = row['Total Return']
-                             if abs(clean_num(val)) > 1.0: 
-                                 pnl = clean_num(val)
-
+                        # FUZZY MATCH PnL and DEBIT to handle column name vars
+                        pnl = clean_num(get_col(row, ['Total Return $', 'Total Return']))
                         debit = abs(clean_num(get_col(row, ['Net Debit', 'Debit', 'Credit'])))
                         
                         # Greeks
@@ -345,74 +324,58 @@ def sync_data(file_list, file_type):
                     
                     # --- LEG ROW (Child) ---
                     elif name.startswith('.') and current_trade:
-                        # FIX: USE POSITIONAL INDEXING FOR OPTIONSTRAT LEGS
-                        try:
-                            # 1 is Quantity, 2 is Entry
-                            qty = clean_num(row.iloc[1]) 
-                            entry_price = clean_num(row.iloc[2])
-                            
-                            # 3 is Current, 4 is Expiration/Close
-                            curr = clean_num(row.iloc[3])
-                            close = clean_num(row.iloc[4])
-                            
-                            price_to_use = 0.0
-                            
-                            # FIX 2: Correct Priority for Active vs History
-                            # Active = Prioritize CURRENT (Live Mark)
-                            # History = Prioritize CLOSE (Settlement)
-                            if file_type == "Active":
-                                if curr != 0: price_to_use = curr
-                                elif close != 0: price_to_use = close
-                            else: # History
-                                if close != 0: price_to_use = close
-                                elif curr != 0: price_to_use = curr
-                            
-                            # ZERO VALUE GUARD (CONDITIONAL - ACTIVE ONLY):
-                            if file_type == "Active" and price_to_use == 0.0 and entry_price != 0:
-                                price_to_use = entry_price
-
-                            mult = get_multiplier(name)
-                            leg_pnl = (price_to_use - entry_price) * qty * mult
-                            
-                            leg_type = identify_leg_type(name)
-                            if leg_type == 'C':
-                                current_trade['call_pnl'] += leg_pnl
-                                legs_processed += 1
-                            elif leg_type == 'P':
-                                current_trade['put_pnl'] += leg_pnl
-                                legs_processed += 1
-                        except Exception as e:
-                            pass
-
+                        # --- COLUMN MAPPING FIX FOR LEGS ---
+                        # Use fuzzy matching on the INDEX positions implicitly by name from strategy row
+                        # Total Return % -> Quantity
+                        # Total Return $ -> Entry Price
+                        # Created At -> Current Price
+                        # Expiration -> Close Price
+                        
+                        qty = clean_num(get_col(row, ['Total Return %'])) 
+                        entry_price = clean_num(get_col(row, ['Total Return $']))
+                        
+                        raw_current = get_col(row, ['Created At'])
+                        raw_close = get_col(row, ['Expiration'])
+                        
+                        curr = clean_num(raw_current)
+                        close = clean_num(raw_close)
+                        
+                        price_to_use = 0.0
+                        if file_type == "Active":
+                            if close != 0: price_to_use = close
+                            elif curr != 0: price_to_use = curr
+                        else: # History
+                            if close != 0: price_to_use = close
+                            elif curr != 0: price_to_use = curr
+                        
+                        mult = get_multiplier(name)
+                        leg_pnl = (price_to_use - entry_price) * qty * mult
+                        
+                        leg_type = identify_leg_type(name)
+                        if leg_type == 'C':
+                            current_trade['call_pnl'] += leg_pnl
+                            legs_processed += 1
+                        elif leg_type == 'P':
+                            current_trade['put_pnl'] += leg_pnl
+                            legs_processed += 1
                 except Exception as e:
+                    # Log error for specific row but don't stop the whole file
+                    # print(f"Row Error: {e}") 
                     pass
 
             # Process final block
             if current_trade:
                 calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                 real_total = current_trade['pnl']
-                
-                final_call = 0.0
-                final_put = 0.0
-                
                 if calc_total != 0 and real_total != 0:
                     factor = real_total / calc_total
-                    same_sign = (real_total > 0 and calc_total > 0) or (real_total < 0 and calc_total < 0)
-                    reasonable = 0.1 <= abs(factor) <= 10.0
-                    
-                    if same_sign and reasonable:
-                        final_call = current_trade['call_pnl'] * factor
-                        final_put = current_trade['put_pnl'] * factor
-                
-                current_trade['call_pnl'] = final_call
-                current_trade['put_pnl'] = final_put
+                    current_trade['call_pnl'] *= factor
+                    current_trade['put_pnl'] *= factor
                 
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
 
-            if count_new > 0 or count_update > 0:
-                changes_made = True
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated, {legs_processed} Legs Processed")
             
         except Exception as e:
@@ -424,15 +387,9 @@ def sync_data(file_list, file_type):
             placeholders = ','.join('?' for _ in missing_ids)
             c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
             log.append(f"⚠️ Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
-            changes_made = True
 
     conn.commit()
     conn.close()
-    
-    # Mark DB as changed
-    if changes_made:
-        st.session_state['db_changed'] = True
-        
     return log
 
 def process_trade_block(cursor, t, file_type, found_ids):
@@ -493,8 +450,6 @@ def update_journal(edited_df):
             c.execute("UPDATE trades SET notes=?, tags=?, parent_id=? WHERE id=?", (notes, tags, pid, t_id))
             count += 1
         conn.commit()
-        if count > 0:
-            st.session_state['db_changed'] = True
         return count
     except Exception as e: return 0
     finally: conn.close()
@@ -605,18 +560,11 @@ init_db()
 
 # --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
-
-# --- UNSAVED CHANGES WARNING ---
-if st.session_state.get('db_changed', False):
-    st.sidebar.error("⚠️ UNSAVED CHANGES")
-    st.sidebar.markdown("**You have processed new files or edited the journal. Please download the DB below to save your work.**")
-
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         st.cache_data.clear()
-        st.session_state['db_changed'] = False
         st.success("Restored.")
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
@@ -637,11 +585,8 @@ with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
 
 st.sidebar.markdown("⬇️ *finally...*")
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
-    if os.path.exists(DB_NAME):
-        with open(DB_NAME, "rb") as f:
-            st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
-    else:
-        st.warning("No database file found.")
+    with open(DB_NAME, "rb") as f:
+        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
@@ -664,7 +609,6 @@ with st.sidebar.expander("🛠️ Maintenance"):
         conn.close()
         init_db()
         st.cache_data.clear()
-        st.session_state['db_changed'] = False
         st.success("Wiped & Reset.")
         st.rerun()
 
@@ -911,7 +855,7 @@ with tab1:
                             .map(yield_color, subset=['Daily Yield %'])
                             .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
                             .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
-                            .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
+                            .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1),
                             use_container_width=True
                         )
                     else: st.info("No active trades.")
@@ -1357,4 +1301,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v97.0 | Feature: 'Active Pricing Priority' Active")
+    st.caption("Allantis Trade Guardian v93.0 | Fix: Auto-Schema Repair & Fuzzy Column Matching")
