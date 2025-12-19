@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v95.3 (Fix: Safe Normalization - Prevents P&L Distortion)")
+st.info("✅ RUNNING VERSION: v95.4 (Fix: Strict P&L Integrity - Suppresses Bad Leg Data)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -259,28 +259,30 @@ def sync_data(file_list, file_type):
                     if not name.startswith('.'):
                         # Save previous block if exists
                         if current_trade:
-                            # --- SAFE NORMALIZATION LOGIC ---
+                            # --- REFINED NORMALIZATION LOGIC ---
                             calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                             real_total = current_trade['pnl']
                             
-                            # Only normalize if the values are reasonably close.
-                            # If they are wildly different, it implies the factor would be huge or negative (inverting signs),
-                            # which corrupts the data. In that case, we keep the RAW leg calculations.
+                            # If calc_total is significantly divergent (e.g. data errors in leg entry prices),
+                            # do NOT try to normalize or show misleading values. 
+                            # Instead, set breakdowns to 0 to keep the display clean.
+                            # We trust Real Total (from file) as the absolute truth.
                             
-                            should_normalize = False
-                            if calc_total != 0:
-                                factor = real_total / calc_total
-                                # Check 1: Sign Flipping Guard (If real is + and calc is -, DO NOT normalize)
-                                # Check 2: Magnitude Guard (0.8x to 1.2x is acceptable drift, beyond that is suspicious)
-                                if (real_total * calc_total > 0) and (0.8 <= abs(factor) <= 1.2):
-                                    should_normalize = True
-                            
-                            if should_normalize:
-                                current_trade['call_pnl'] *= factor
-                                current_trade['put_pnl'] *= factor
+                            if calc_total == 0 or real_total == 0:
+                                current_trade['call_pnl'] = 0
+                                current_trade['put_pnl'] = 0
                             else:
-                                # Keep raw values. Do not distort.
-                                pass 
+                                factor = real_total / calc_total
+                                # Strict Tolerance: 0.5x to 2.0x.
+                                # If calculated PnL is 100k and real is -75, this factor is huge/negative.
+                                # We reject it and zero out the breakdown.
+                                if 0.5 <= abs(factor) <= 2.0:
+                                    current_trade['call_pnl'] *= factor
+                                    current_trade['put_pnl'] *= factor
+                                else:
+                                    # Fallback: Zero out breakdown to avoid "Inaccurate" huge numbers
+                                    current_trade['call_pnl'] = 0
+                                    current_trade['put_pnl'] = 0
 
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
@@ -391,15 +393,17 @@ def sync_data(file_list, file_type):
                 calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                 real_total = current_trade['pnl']
                 
-                should_normalize = False
-                if calc_total != 0:
+                if calc_total == 0 or real_total == 0:
+                    current_trade['call_pnl'] = 0
+                    current_trade['put_pnl'] = 0
+                else:
                     factor = real_total / calc_total
-                    if (real_total * calc_total > 0) and (0.8 <= abs(factor) <= 1.2):
-                        should_normalize = True
-                
-                if should_normalize:
-                    current_trade['call_pnl'] *= factor
-                    current_trade['put_pnl'] *= factor
+                    if 0.5 <= abs(factor) <= 2.0:
+                        current_trade['call_pnl'] *= factor
+                        current_trade['put_pnl'] *= factor
+                    else:
+                        current_trade['call_pnl'] = 0
+                        current_trade['put_pnl'] = 0
                 
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
@@ -1351,4 +1355,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v95.3 | Feature: 'Safe Normalization' Active")
+    st.caption("Allantis Trade Guardian v95.4 | Feature: 'Strict P&L Integrity' Active")
