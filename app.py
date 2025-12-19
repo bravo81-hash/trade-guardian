@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v95.2 (Fix: History Zero-Value Logic)")
+st.info("✅ RUNNING VERSION: v95.3 (Fix: Safe Normalization - Prevents P&L Distortion)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -263,18 +263,24 @@ def sync_data(file_list, file_type):
                             calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                             real_total = current_trade['pnl']
                             
-                            if calc_total != 0 and real_total != 0:
+                            # Only normalize if the values are reasonably close.
+                            # If they are wildly different, it implies the factor would be huge or negative (inverting signs),
+                            # which corrupts the data. In that case, we keep the RAW leg calculations.
+                            
+                            should_normalize = False
+                            if calc_total != 0:
                                 factor = real_total / calc_total
-                                # SAFETY CLAMP: Only apply factor if it's reasonable (0.25x to 4.0x)
-                                # If the factor is huge (e.g. 50x), it means data was corrupted by zero-values.
-                                # In that case, DO NOT apply it, to preserve sanity of breakdown.
-                                if 0.25 <= abs(factor) <= 4.0:
-                                    current_trade['call_pnl'] *= factor
-                                    current_trade['put_pnl'] *= factor
-                                else:
-                                    # Fallback: Just trust the Real PnL for the total, 
-                                    # but leave the breakdown rough to avoid "sinister" inversions.
-                                    pass 
+                                # Check 1: Sign Flipping Guard (If real is + and calc is -, DO NOT normalize)
+                                # Check 2: Magnitude Guard (0.8x to 1.2x is acceptable drift, beyond that is suspicious)
+                                if (real_total * calc_total > 0) and (0.8 <= abs(factor) <= 1.2):
+                                    should_normalize = True
+                            
+                            if should_normalize:
+                                current_trade['call_pnl'] *= factor
+                                current_trade['put_pnl'] *= factor
+                            else:
+                                # Keep raw values. Do not distort.
+                                pass 
 
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
@@ -384,12 +390,16 @@ def sync_data(file_list, file_type):
             if current_trade:
                 calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                 real_total = current_trade['pnl']
-                if calc_total != 0 and real_total != 0:
+                
+                should_normalize = False
+                if calc_total != 0:
                     factor = real_total / calc_total
-                    # SAFETY CLAMP
-                    if 0.25 <= abs(factor) <= 4.0:
-                        current_trade['call_pnl'] *= factor
-                        current_trade['put_pnl'] *= factor
+                    if (real_total * calc_total > 0) and (0.8 <= abs(factor) <= 1.2):
+                        should_normalize = True
+                
+                if should_normalize:
+                    current_trade['call_pnl'] *= factor
+                    current_trade['put_pnl'] *= factor
                 
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
@@ -1341,4 +1351,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v95.2 | Feature: 'Zero Value Guard' Active")
+    st.caption("Allantis Trade Guardian v95.3 | Feature: 'Safe Normalization' Active")
