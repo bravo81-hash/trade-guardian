@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v95.4 (Fix: Strict P&L Integrity - Suppresses Bad Leg Data)")
+st.info("✅ RUNNING VERSION: v96.0 (Fix: Solved 'Total Return %' vs '$' Column Mismatch)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -263,26 +263,23 @@ def sync_data(file_list, file_type):
                             calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                             real_total = current_trade['pnl']
                             
-                            # If calc_total is significantly divergent (e.g. data errors in leg entry prices),
-                            # do NOT try to normalize or show misleading values. 
-                            # Instead, set breakdowns to 0 to keep the display clean.
-                            # We trust Real Total (from file) as the absolute truth.
-                            
-                            if calc_total == 0 or real_total == 0:
-                                current_trade['call_pnl'] = 0
-                                current_trade['put_pnl'] = 0
-                            else:
+                            # Only normalize if it seems safe (don't invert signs, don't multiply by 1000x)
+                            # If unsafe, we KEEP THE RAW CALCULATION rather than zeroing it out.
+                            if calc_total != 0 and real_total != 0:
                                 factor = real_total / calc_total
-                                # Strict Tolerance: 0.5x to 2.0x.
-                                # If calculated PnL is 100k and real is -75, this factor is huge/negative.
-                                # We reject it and zero out the breakdown.
-                                if 0.5 <= abs(factor) <= 2.0:
+                                
+                                # Sign Check: Real and Calc must be same sign (Profit/Loss direction matches)
+                                same_sign = (real_total > 0 and calc_total > 0) or (real_total < 0 and calc_total < 0)
+                                # Magnitude Check: Factor between 0.1x and 10x (Relaxed from 2.0x to allow for spread width issues)
+                                reasonable = 0.1 <= abs(factor) <= 10.0
+                                
+                                if same_sign and reasonable:
                                     current_trade['call_pnl'] *= factor
                                     current_trade['put_pnl'] *= factor
                                 else:
-                                    # Fallback: Zero out breakdown to avoid "Inaccurate" huge numbers
-                                    current_trade['call_pnl'] = 0
-                                    current_trade['put_pnl'] = 0
+                                    # Logic: If normalization fails, the raw leg sums are likely more descriptive 
+                                    # than a forced value. We leave them as-is.
+                                    pass
 
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
@@ -297,8 +294,15 @@ def sync_data(file_list, file_type):
                         group = str(get_col(row, ['Group']))
                         strat = get_strategy(group, name)
                         
-                        # FUZZY MATCH PnL and DEBIT to handle column name vars
-                        pnl = clean_num(get_col(row, ['Total Return $', 'Total Return']))
+                        # FIX 1: Strict PnL Column Targeting
+                        # We must strictly look for '$' to avoid grabbing 'Total Return %' which appears first in CSV
+                        pnl = clean_num(get_col(row, ['Total Return $']))
+                        if pnl == 0 and 'Total Return' in row.index: # Last resort fallback
+                             val = row['Total Return']
+                             # Ensure we aren't grabbing a decimal < 1 (likely %) unless it's a tiny loss
+                             if abs(clean_num(val)) > 1.0: 
+                                 pnl = clean_num(val)
+
                         debit = abs(clean_num(get_col(row, ['Net Debit', 'Debit', 'Credit'])))
                         
                         # Greeks
@@ -346,8 +350,6 @@ def sync_data(file_list, file_type):
                     # --- LEG ROW (Child) ---
                     elif name.startswith('.') and current_trade:
                         # FIX: USE POSITIONAL INDEXING FOR OPTIONSTRAT LEGS
-                        # OptionStrat leg rows are consistently ordered relative to the row start
-                        # usually: [Ticker, Quantity, Entry Price, Current Price, Close Price/Expiration]
                         try:
                             # 1 is Quantity, 2 is Entry
                             qty = clean_num(row.iloc[1]) 
@@ -365,9 +367,9 @@ def sync_data(file_list, file_type):
                                 if close != 0: price_to_use = close
                                 elif curr != 0: price_to_use = curr
                             
-                            # ZERO VALUE GUARD (CONDITIONAL):
-                            # ONLY apply to ACTIVE trades. In History, 0.0 is valid (Expired Worthless).
-                            # If we apply this to History, we erase profits from short legs that expired.
+                            # ZERO VALUE GUARD (CONDITIONAL - ACTIVE ONLY):
+                            # In Active trades, 0.0 usually means missing data (not expiration).
+                            # We use Entry Price (Breakeven) to prevent massive ghost profits/losses.
                             if file_type == "Active" and price_to_use == 0.0 and entry_price != 0:
                                 price_to_use = entry_price
 
@@ -382,7 +384,6 @@ def sync_data(file_list, file_type):
                                 current_trade['put_pnl'] += leg_pnl
                                 legs_processed += 1
                         except Exception as e:
-                            # Fail silently on a bad leg row rather than crashing the whole file
                             pass
 
                 except Exception as e:
@@ -393,17 +394,14 @@ def sync_data(file_list, file_type):
                 calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                 real_total = current_trade['pnl']
                 
-                if calc_total == 0 or real_total == 0:
-                    current_trade['call_pnl'] = 0
-                    current_trade['put_pnl'] = 0
-                else:
+                if calc_total != 0 and real_total != 0:
                     factor = real_total / calc_total
-                    if 0.5 <= abs(factor) <= 2.0:
+                    same_sign = (real_total > 0 and calc_total > 0) or (real_total < 0 and calc_total < 0)
+                    reasonable = 0.1 <= abs(factor) <= 10.0
+                    
+                    if same_sign and reasonable:
                         current_trade['call_pnl'] *= factor
                         current_trade['put_pnl'] *= factor
-                    else:
-                        current_trade['call_pnl'] = 0
-                        current_trade['put_pnl'] = 0
                 
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
@@ -1355,4 +1353,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v95.4 | Feature: 'Strict P&L Integrity' Active")
+    st.caption("Allantis Trade Guardian v96.0 | Feature: 'Strict Column Targeting' Active")
