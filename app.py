@@ -6,24 +6,26 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
 import os
+import re
 from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v90.0 (Deep Dive: P&L Attribution & Root Cause)")
+st.info("✅ RUNNING VERSION: v90.1 (Deep Dive: P&L Attribution & Root Cause)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE ENGINE ---
-DB_NAME = "trade_guardian_v5.db"
+# Keeping the name consistent with your upload to ensure seamless restore
+DB_NAME = "trade_guardian_v4.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # TRADES TABLE (Updated Schema)
+    # TRADES TABLE (Updated Schema to support Attribution)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -64,7 +66,7 @@ def init_db():
 def migrate_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Migration for v4 -> v5 features
+    # Migration for v4 -> v5 features (Idempotent)
     try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
     except: pass 
     try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
@@ -129,7 +131,8 @@ def extract_ticker(name):
 def read_and_parse_optionstrat(file):
     """
     Stateful parser to handle Parent rows (Trades) and Child rows (Legs).
-    Calculates Call vs Put P&L attribution.
+    Calculates Call vs Put P&L attribution accurately.
+    Safely handles missing columns in History/Closed files.
     """
     try:
         # 1. Read Raw Data
@@ -138,17 +141,26 @@ def read_and_parse_optionstrat(file):
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
         else:
-            df_raw = pd.read_csv(file, header=None)
+            # CSV Handling
+            try:
+                # Try reading with default settings first
+                df_raw = pd.read_csv(file, header=None)
+            except:
+                # Fallback to byte reading if needed
+                file.seek(0)
+                df_raw = pd.read_csv(file, header=None)
         
         # 2. Find Header Row
         header_idx = -1
+        # Scan first 20 rows for the "Name" column
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
             if "Name" in row_str and "Total Return" in row_str:
                 header_idx = i
                 break
         
-        if header_idx == -1: return []
+        if header_idx == -1: 
+            return []
 
         # 3. Create Clean DataFrame with proper columns
         df = df_raw.iloc[header_idx+1:].copy()
@@ -158,6 +170,12 @@ def read_and_parse_optionstrat(file):
         parsed_trades = []
         current_trade = None
         
+        # Helper to safely get value from row even if column is missing
+        def get_val(r, col_name, default=0):
+            if col_name in df.columns:
+                return clean_num(r[col_name])
+            return default
+
         # 4. Iterate Rows to parse Parent/Child structure
         for i, row in df.iterrows():
             col0 = str(row.iloc[0]).strip() # Name / Symbol
@@ -167,15 +185,16 @@ def read_and_parse_optionstrat(file):
                 continue
 
             # --- CASE A: PARENT ROW (The Trade) ---
-            # Parent rows usually have a date in 'Created At' (Col 3 usually) and don't start with '.'
-            # Or we check if it's NOT a leg (Legs start with '.')
+            # Parent rows don't start with '.' (Legs do)
             if not col0.startswith('.'):
                 # Save previous trade if exists
                 if current_trade: parsed_trades.append(current_trade)
                 
                 # Initialize New Trade
                 created_at = row.get('Created At')
-                try: start_dt = pd.to_datetime(created_at)
+                try: 
+                    start_dt = pd.to_datetime(created_at)
+                    if pd.isna(start_dt): continue
                 except: continue # Not a valid trade row
                 
                 name = col0
@@ -183,8 +202,8 @@ def read_and_parse_optionstrat(file):
                 strat = get_strategy(group, name)
                 
                 # Basic PnL / Debit from Parent Row
-                pnl = clean_num(row.get('Total Return $', 0))
-                debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                pnl = get_val(row, 'Total Return $')
+                debit = abs(get_val(row, 'Net Debit/Credit'))
                 
                 # Lot Sizing Logic
                 lot_size = 1
@@ -198,11 +217,11 @@ def read_and_parse_optionstrat(file):
                 elif strat == 'SMSF':
                     if debit > 12000: lot_size = 2
 
-                # Greeks (Parent Level)
-                theta = clean_num(row.get('Theta', 0))
-                delta = clean_num(row.get('Delta', 0))
-                gamma = clean_num(row.get('Gamma', 0))
-                vega = clean_num(row.get('Vega', 0))
+                # Greeks (Parent Level) - Safe Get
+                theta = get_val(row, 'Theta')
+                delta = get_val(row, 'Delta')
+                gamma = get_val(row, 'Gamma')
+                vega = get_val(row, 'Vega')
 
                 # Expiration
                 exit_dt = None
@@ -231,12 +250,13 @@ def read_and_parse_optionstrat(file):
             # --- CASE B: LEG ROW (The Option) ---
             elif col0.startswith('.') and current_trade is not None:
                 try:
-                    # Parse Leg Data using positional indices because column names map to Parent
-                    # Col 0: Symbol (.SPX...)
-                    # Col 1: Quantity (mapped to 'Total Return %' in header)
-                    # Col 2: Entry Price (mapped to 'Total Return $' in header)
-                    # Col 3: Current Price (mapped to 'Created At' in header)
-                    # Col 4: Close Price (mapped to 'Expiration' in header)
+                    # Parse Leg Data using positional indices to be robust against header naming changes
+                    # Standard OptionStrat Layout for Leg Rows:
+                    # Col 0: Symbol
+                    # Col 1: Quantity
+                    # Col 2: Entry Price
+                    # Col 3: Current Price
+                    # Col 4: Close Price
                     
                     symbol = col0
                     qty = clean_num(row.iloc[1])
@@ -254,17 +274,16 @@ def read_and_parse_optionstrat(file):
                     leg_pnl = (exit_price - entry) * qty * multiplier
                     
                     # Determine Call vs Put
-                    # Symbols usually: .SPX...C... or .SPX...P...
-                    # Simple heuristic: Look for 'C' or 'P' after the date digits
-                    # Example: .SPX260618P6450 -> 'P'
-                    type_score = 0
-                    if 'C' in symbol and 'P' not in symbol: is_call = True
-                    elif 'P' in symbol and 'C' not in symbol: is_call = False
+                    # Regex looks for P or C preceded by 6 digits (the date)
+                    # e.g. .SPX260618P6450 -> Match 'P'
+                    match = re.search(r'\d{6}([CP])', symbol)
+                    is_call = False
+                    if match:
+                        type_char = match.group(1)
+                        is_call = (type_char == 'C')
                     else:
-                        # Regex or harder parsing could go here, but simple check:
-                        # Usually the format is TickerYYMMDDTStrike
-                        # Let's assume standard format matches
-                        is_call = 'C' in symbol.split('.')[-1] if '.' in symbol else 'C' in symbol
+                        # Fallback heuristic
+                        is_call = 'C' in symbol and 'P' not in symbol
 
                     if is_call:
                         current_trade['call_pnl_raw'] += leg_pnl
@@ -281,6 +300,7 @@ def read_and_parse_optionstrat(file):
         return parsed_trades
 
     except Exception as e:
+        st.error(f"Error Parsing File {file.name}: {e}")
         return []
 
 # --- SYNC ENGINE (UPDATED) ---
@@ -323,24 +343,12 @@ def sync_data(file_list, file_type):
                 if days_held < 1: days_held = 1
                 
                 # --- P&L ATTRIBUTION LOGIC ---
-                # The raw leg sums might not perfectly match the 'Total Return $' from the broker/tool due to fees or mid-market pricing.
-                # We normalize them to match the official P&L.
-                official_pnl = t['pnl']
-                raw_total = t['call_pnl_raw'] + t['put_pnl_raw']
+                # We use raw leg calculations to determine the split.
+                # Note: Leg P&L might differ slightly from Broker P&L due to fees/mid-prices.
+                # We trust the relative split from legs.
                 
-                if raw_total != 0:
-                    call_ratio = t['call_pnl_raw'] / abs(raw_total) if abs(raw_total) > 0 else 0
-                    put_ratio = t['put_pnl_raw'] / abs(raw_total) if abs(raw_total) > 0 else 0
-                    # We can't just multiply ratio by official pnl because signs matter.
-                    # Simple approach: If signs align, use raw. If not, just store raw for directionality.
-                    # Let's store the RAW values calculated from legs, as they offer the true "Split".
-                    # Scaling them exactly to official PnL is tricky if leg data is partial.
-                    # Let's trust the calculated ones for the Split display, but use Official PnL for the main metrics.
-                    call_pnl = t['call_pnl_raw']
-                    put_pnl = t['put_pnl_raw']
-                else:
-                    call_pnl = 0
-                    put_pnl = 0
+                call_pnl = t['call_pnl_raw']
+                put_pnl = t['put_pnl_raw']
 
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
@@ -426,8 +434,10 @@ def get_pnl_drivers(df):
     
     try:
         corr_matrix = df[valid_cols].corr()
-        pnl_drivers = corr_matrix['P&L'].drop('P&L').sort_values(ascending=False).to_frame(name='Correlation')
-        return pnl_drivers
+        if 'P&L' in corr_matrix.columns:
+            pnl_drivers = corr_matrix['P&L'].drop('P&L').sort_values(ascending=False).to_frame(name='Correlation')
+            return pnl_drivers
+        return None
     except: return None
 
 # --- DATA LOADER ---
@@ -449,10 +459,12 @@ def load_data():
             df['P&L Vol'] = 0.0
 
     except Exception as e:
+        # st.error(f"Database Error: {e}") # Uncomment to debug
         return pd.DataFrame()
     finally: conn.close()
     
     if not df.empty:
+        # Standardize Columns
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -466,15 +478,19 @@ def load_data():
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
         
-        df['Entry Date'] = pd.to_datetime(df['Entry Date'])
-        df['Exit Date'] = pd.to_datetime(df['Exit Date'])
+        # Type Conversion with safeguards
+        df['Entry Date'] = pd.to_datetime(df['Entry Date'], errors='coerce')
+        df['Exit Date'] = pd.to_datetime(df['Exit Date'], errors='coerce')
         df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
         df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
         df['Call P&L'] = pd.to_numeric(df['Call P&L'], errors='coerce').fillna(0)
         df['Put P&L'] = pd.to_numeric(df['Put P&L'], errors='coerce').fillna(0)
         df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
-        df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
+        # Derived Metrics
+        # Prevent division by zero if lot_size is missing/zero
+        df['lot_size'] = pd.to_numeric(df['lot_size'], errors='coerce').fillna(1).replace(0, 1)
+        df['Debit/Lot'] = df['Debit'] / df['lot_size']
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         
@@ -554,7 +570,7 @@ with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
 st.sidebar.markdown("⬇️ *finally...*")
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
-        st.download_button("💾 Save Database File", f, "trade_guardian_v5.db", "application/x-sqlite3")
+        st.download_button("💾 Save Database File", f, DB_NAME, "application/x-sqlite3")
 
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
@@ -562,6 +578,13 @@ with st.sidebar.expander("🛠️ Maintenance"):
         conn.execute("VACUUM")
         conn.close()
         st.success("Optimized.")
+    if st.button("🔥 Purge Old Snapshots (>90d)"):
+        conn = get_db_connection()
+        cutoff = (datetime.now() - pd.Timedelta(days=90)).date()
+        conn.execute("DELETE FROM snapshots WHERE snapshot_date < ?", (cutoff,))
+        conn.commit()
+        conn.close()
+        st.success("Purged.")
     if st.button("🧨 Hard Reset (Delete All Data)"):
         conn = get_db_connection()
         conn.execute("DROP TABLE IF EXISTS trades")
@@ -999,10 +1022,15 @@ with tab3:
                     strat_trades = df[df['Strategy'] == strat]
                     if strat_trades.empty: continue
                     total = len(strat_trades)
-                    strat_trades['DayOfWeek'] = strat_trades['Entry Date'].dt.dayofweek
-                    valid_days = rules.get('target_days', [])
-                    on_time = strat_trades[strat_trades['DayOfWeek'].isin(valid_days)]
-                    day_score = (len(on_time) / total) * 100
+                    # Check for valid dates before property access
+                    if pd.api.types.is_datetime64_any_dtype(strat_trades['Entry Date']):
+                         strat_trades['DayOfWeek'] = strat_trades['Entry Date'].dt.dayofweek
+                         valid_days = rules.get('target_days', [])
+                         on_time = strat_trades[strat_trades['DayOfWeek'].isin(valid_days)]
+                         day_score = (len(on_time) / total) * 100
+                    else:
+                         day_score = 0
+                         
                     min_d, max_d = rules.get('target_debit_min', 0), rules.get('target_debit_max', 999999)
                     in_range = strat_trades[strat_trades['Debit/Lot'].between(min_d, max_d)]
                     cost_score = (len(in_range) / total) * 100
@@ -1052,6 +1080,43 @@ with tab4:
     st.markdown("""
     # 📖 The Trader's Constitution
     *Refined by Data Audit & Behavioral Analysis*
-    ... (Your rules here)
+
+    ### 1. 130/160 Strategy (Income Discipline)
+    * **Role:** Income Engine. Extracts time decay (Theta).
+    * **Entry:** Monday/Tuesday (Best liquidity/IV fit).
+    * **Debit Target:** `$3,500 - $4,500` per lot.
+        * *Stop Rule:* Never pay > `$4,800` per lot.
+    * **Management:** **Time Limit Rule.**
+        * Kill if trade is **25 days old** and P&L is flat/negative.
+        * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
+    * **Efficiency Check:** ROI-focused. Requires high velocity.
+    
+    ### 2. 160/190 Strategy (Patience Training)
+    * **Role:** Compounder. Expectancy focused.
+    * **Entry:** Friday (Captures weekend decay start).
+    * **Debit Target:** `~$5,200` per lot.
+    * **Sizing:** Trade **1 Lot**.
+    * **Exit:** Hold for **40-50 Days**. 
+    * **Golden Rule:** **Do not touch in first 30 days.** Early interference statistically worsens outcomes.
+    
+    ### 3. M200 Strategy (Emotional Mastery)
+    * **Role:** Whale. Variance-tolerant capital deployment.
+    * **Entry:** Wednesday.
+    * **Debit Target:** `$7,500 - $8,500` per lot.
+    * **The "Dip Valley":**
+        * P&L often looks worst between Day 15–40. This is structural.
+        * **Management:** Check at **Day 14**.
+            * Check **Greeks & VIX**, not just P&L.
+            * If Red/Flat: **HOLD.** Do not panic exit in the Valley. Wait for volatility to revert.
+            
+    ### 4. SMSF Strategy (Wealth Builder)
+    * **Role:** Long-term Growth.
+    * **Structure:** Multi-trade portfolio strategy.
+    
+    ---
+    ### 🛡️ Universal Execution Gates
+    1.  **Volatility Gate:** Check VIX before entry. Ideal: 14–22. Skip if VIX exploded >10% in last 48h.
+    2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
+    3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v90.0 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v90.1 | Deep Analytics")
