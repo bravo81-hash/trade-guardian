@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v96.0 (Fix: Solved 'Total Return %' vs '$' Column Mismatch)")
+st.info("✅ RUNNING VERSION: v97.0 (Fix: Active Trade Pricing Priority & Safety Zeroing)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -259,27 +259,25 @@ def sync_data(file_list, file_type):
                     if not name.startswith('.'):
                         # Save previous block if exists
                         if current_trade:
-                            # --- REFINED NORMALIZATION LOGIC ---
+                            # --- SAFE NORMALIZATION LOGIC ---
                             calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                             real_total = current_trade['pnl']
                             
-                            # Only normalize if it seems safe (don't invert signs, don't multiply by 1000x)
-                            # If unsafe, we KEEP THE RAW CALCULATION rather than zeroing it out.
+                            # DEFAULT: Zero out breakdown if logic fails
+                            final_call = 0.0
+                            final_put = 0.0
+                            
                             if calc_total != 0 and real_total != 0:
                                 factor = real_total / calc_total
-                                
-                                # Sign Check: Real and Calc must be same sign (Profit/Loss direction matches)
                                 same_sign = (real_total > 0 and calc_total > 0) or (real_total < 0 and calc_total < 0)
-                                # Magnitude Check: Factor between 0.1x and 10x (Relaxed from 2.0x to allow for spread width issues)
                                 reasonable = 0.1 <= abs(factor) <= 10.0
                                 
                                 if same_sign and reasonable:
-                                    current_trade['call_pnl'] *= factor
-                                    current_trade['put_pnl'] *= factor
-                                else:
-                                    # Logic: If normalization fails, the raw leg sums are likely more descriptive 
-                                    # than a forced value. We leave them as-is.
-                                    pass
+                                    final_call = current_trade['call_pnl'] * factor
+                                    final_put = current_trade['put_pnl'] * factor
+                            
+                            current_trade['call_pnl'] = final_call
+                            current_trade['put_pnl'] = final_put
 
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
@@ -295,11 +293,9 @@ def sync_data(file_list, file_type):
                         strat = get_strategy(group, name)
                         
                         # FIX 1: Strict PnL Column Targeting
-                        # We must strictly look for '$' to avoid grabbing 'Total Return %' which appears first in CSV
                         pnl = clean_num(get_col(row, ['Total Return $']))
-                        if pnl == 0 and 'Total Return' in row.index: # Last resort fallback
+                        if pnl == 0 and 'Total Return' in row.index:
                              val = row['Total Return']
-                             # Ensure we aren't grabbing a decimal < 1 (likely %) unless it's a tiny loss
                              if abs(clean_num(val)) > 1.0: 
                                  pnl = clean_num(val)
 
@@ -360,16 +356,18 @@ def sync_data(file_list, file_type):
                             close = clean_num(row.iloc[4])
                             
                             price_to_use = 0.0
+                            
+                            # FIX 2: Correct Priority for Active vs History
+                            # Active = Prioritize CURRENT (Live Mark)
+                            # History = Prioritize CLOSE (Settlement)
                             if file_type == "Active":
-                                if close != 0: price_to_use = close
-                                elif curr != 0: price_to_use = curr
+                                if curr != 0: price_to_use = curr
+                                elif close != 0: price_to_use = close
                             else: # History
                                 if close != 0: price_to_use = close
                                 elif curr != 0: price_to_use = curr
                             
                             # ZERO VALUE GUARD (CONDITIONAL - ACTIVE ONLY):
-                            # In Active trades, 0.0 usually means missing data (not expiration).
-                            # We use Entry Price (Breakeven) to prevent massive ghost profits/losses.
                             if file_type == "Active" and price_to_use == 0.0 and entry_price != 0:
                                 price_to_use = entry_price
 
@@ -394,14 +392,20 @@ def sync_data(file_list, file_type):
                 calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                 real_total = current_trade['pnl']
                 
+                final_call = 0.0
+                final_put = 0.0
+                
                 if calc_total != 0 and real_total != 0:
                     factor = real_total / calc_total
                     same_sign = (real_total > 0 and calc_total > 0) or (real_total < 0 and calc_total < 0)
                     reasonable = 0.1 <= abs(factor) <= 10.0
                     
                     if same_sign and reasonable:
-                        current_trade['call_pnl'] *= factor
-                        current_trade['put_pnl'] *= factor
+                        final_call = current_trade['call_pnl'] * factor
+                        final_put = current_trade['put_pnl'] * factor
+                
+                current_trade['call_pnl'] = final_call
+                current_trade['put_pnl'] = final_put
                 
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
@@ -1353,4 +1357,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v96.0 | Feature: 'Strict Column Targeting' Active")
+    st.caption("Allantis Trade Guardian v97.0 | Feature: 'Active Pricing Priority' Active")
