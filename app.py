@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v96.0 (Fixes: ID Duplication, 'Symbol' Row Filter, PnL Math)")
+st.info("✅ RUNNING VERSION: v96.1 (Fix: Restored Contract Multipliers for Accurate PnL)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -255,7 +255,7 @@ def sync_data(file_list, file_type):
                     name_val = get_col(row, ['Name', 'Symbol'])
                     name = str(name_val).strip()
                     
-                    # --- FIX v96.0: STRICT FILTERING for OptionStrat Header Rows ---
+                    # --- FILTER: STRICT FILTERING for OptionStrat Header Rows ---
                     # Skips rows that are just repeating headers or empty
                     if name in ['nan', '', 'Symbol', 'Name', '0', '0.0']: continue
                     
@@ -348,18 +348,12 @@ def sync_data(file_list, file_type):
                             if close != 0: price_to_use = close
                             elif curr != 0: price_to_use = curr
                         
-                        # --- MATH FIX (Retained from v95.2) ---
-                        # OptionStrat exports 'Entry Price' and 'Current Price' as TOTAL VALUES for the leg position.
-                        # They are NOT per-share prices. 
-                        # DO NOT Multiply by 100. DO NOT Multiply by Qty Magnitude.
+                        mult = get_multiplier(name)
                         
-                        direction = 1 if qty >= 0 else -1
-                        
-                        # If Long (Qty > 0): PnL = CurrentValue - EntryCost
-                        # If Short (Qty < 0): PnL = EntryCredit - CurrentValue (Debit to close)
-                        # This simplifies to: (Current - Entry) * Direction
-                        
-                        leg_pnl = (price_to_use - entry_price) * direction
+                        # --- FIX v96.1: RESTORED MULTIPLIER MATH ---
+                        # PnL = (Price - Entry) * Qty * Multiplier
+                        # Handles both Long (Qty > 0) and Short (Qty < 0) correctly.
+                        leg_pnl = (price_to_use - entry_price) * qty * mult
                         
                         leg_type = identify_leg_type(name)
                         if leg_type == 'C':
@@ -1324,4 +1318,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v96.0 | Features: ID Fix, Symbol Row Filter, Math Patch")
+    st.caption("Allantis Trade Guardian v96.1 | Features: ID Fix, Row Filter, Math Fixed (Mult Restored)")
