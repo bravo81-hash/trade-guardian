@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v90.1 (Deep Dive: P&L Attribution & Root Cause)")
+st.info("✅ RUNNING VERSION: v90.2 (Fix: Removed Dependency Error)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1056,7 +1056,18 @@ with tab3:
                     st.markdown("#### 🔢 Correlation Coefficients")
                     drivers = get_pnl_drivers(active_trades)
                     if drivers is not None:
-                        st.dataframe(drivers.style.background_gradient(cmap='RdBu', vmin=-1, vmax=1).format("{:.2f}"))
+                        # Fix: Use native Streamlit column_config instead of pandas styling which requires matplotlib
+                        st.dataframe(
+                            drivers,
+                            column_config={
+                                "Correlation": st.column_config.NumberColumn(
+                                    "Correlation",
+                                    format="%.2f",
+                                    help="Values close to 1.0 or -1.0 indicate strong drivers."
+                                )
+                            },
+                            use_container_width=True
+                        )
                     else:
                         st.warning("Not enough data points yet.")
                 
@@ -1119,4 +1130,4 @@ with tab4:
     2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v90.1 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v90.2 | Deep Analytics")
