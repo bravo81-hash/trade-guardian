@@ -6,14 +6,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
 import os
-import re
 from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v93.0 (Fix: Auto-Schema Repair & Fuzzy Column Matching)")
+st.info("✅ RUNNING VERSION: v88.0 (Closed Trade Analytics)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -36,8 +35,6 @@ def init_db():
                     debit REAL,
                     lot_size INTEGER,
                     pnl REAL,
-                    pnl_calls REAL,
-                    pnl_puts REAL,
                     theta REAL,
                     delta REAL,
                     gamma REAL,
@@ -65,14 +62,9 @@ def init_db():
 def migrate_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Add new columns if they don't exist (Safe to run multiple times)
     try: c.execute("ALTER TABLE trades ADD COLUMN tags TEXT")
     except: pass 
     try: c.execute("ALTER TABLE trades ADD COLUMN parent_id TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE trades ADD COLUMN pnl_calls REAL")
-    except: pass
-    try: c.execute("ALTER TABLE trades ADD COLUMN pnl_puts REAL")
     except: pass
     conn.commit()
     conn.close()
@@ -99,19 +91,11 @@ def get_strategy(group_name, trade_name=""):
     return "Other"
 
 def clean_num(x):
-    """Robust number cleaner that handles '$', ',', spaces, and accounting style '(100)'."""
-    if pd.isna(x) or str(x).strip() == "":
-        return 0.0
-    s = str(x).replace('$', '').replace(',', '').strip()
-    # Handle accounting format (123.45) -> -123.45
-    if s.startswith('(') and s.endswith(')'):
-        s = '-' + s[1:-1]
     try:
-        val = float(s)
+        val = float(str(x).replace('$', '').replace(',', ''))
         if np.isnan(val): return 0.0
         return val
-    except:
-        return 0.0
+    except: return 0.0
 
 def safe_fmt(val, fmt_str):
     try:
@@ -134,37 +118,10 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-def get_multiplier(ticker):
-    """Returns contract multiplier. Default 100 for SPX/Equities."""
-    t = str(ticker).upper()
-    if "/MES" in t: return 5
-    if "/ES" in t: return 50
-    return 100
-
-def get_col(row, candidates):
-    """Fuzzy match column names to handle spaces or slight variations."""
-    for col in row.index:
-        for cand in candidates:
-            if cand.lower() in col.lower():
-                return row[col]
-    return 0
-
-# --- DEEP SCAN PARSER ---
-def identify_leg_type(ticker):
-    # Matches P or C followed by numbers (strike)
-    # Updated regex to support decimals in strike price (e.g. 4100.5)
-    # Handles .SPXW prefix as well
-    # Looks for a pattern like: Date(6digits) -> C/P -> Strike
-    match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
-    if match:
-        return match.group(1) # Returns 'P' or 'C'
-    return None
-
 # --- SMART FILE READER ---
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
-            # Read header=None first to find the real header row safely
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
@@ -181,7 +138,6 @@ def read_file_safely(file):
             return pd.read_csv(file, skiprows=header_row)
 
         header_idx = -1
-        # Scan first 20 rows for the main header
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
             if "Name" in row_str and "Total Return" in row_str:
@@ -198,11 +154,8 @@ def read_file_safely(file):
     except Exception as e:
         return None
 
-# --- SYNC ENGINE (Deep Scan Version - Fixed) ---
+# --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
-    # 1. FORCE MIGRATION (Fixes "Missing Column" errors after DB restore)
-    migrate_db()
-    
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
     
@@ -221,162 +174,113 @@ def sync_data(file_list, file_type):
     for file in file_list:
         count_new = 0
         count_update = 0
-        legs_processed = 0
         
         try:
             df = read_file_safely(file)
             if df is None or df.empty:
                 log.append(f"⚠️ {file.name}: Skipped (Empty/Invalid)")
                 continue
-            
-            # CRITICAL: Clean column names to remove accidental whitespace
-            df.columns = df.columns.str.strip()
 
-            # Relaxed column check
-            has_name = any('name' in c.lower() for c in df.columns)
-            if not has_name:
-                log.append(f"⚠️ {file.name}: Missing 'Name' column.")
+            required_cols = ['Name', 'Total Return $', 'Net Debit/Credit']
+            missing = [col for col in required_cols if col not in df.columns]
+            if missing:
+                log.append(f"⚠️ {file.name}: Missing columns {missing}.")
                 continue
 
-            # BLOCK PROCESSING LOGIC
-            current_trade = None
-            
-            # Iterate through all rows including legs
             for _, row in df.iterrows():
-                try:
-                    # STRIP WHITESPACE to catch .SPX legs properly
-                    name_val = get_col(row, ['Name', 'Symbol'])
-                    name = str(name_val).strip()
-                    if name in ['nan', '', 'Symbol', '0', '0.0']: continue
-                    
-                    # --- STRATEGY ROW (Parent) ---
-                    if not name.startswith('.'):
-                        # Save previous block if exists
-                        if current_trade:
-                            # Normalization
-                            calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
-                            real_total = current_trade['pnl']
-                            if calc_total != 0 and real_total != 0:
-                                # Only normalize if directions match to avoid flipping signs
-                                # or assume logic is sound for components
-                                factor = real_total / calc_total
-                                current_trade['call_pnl'] *= factor
-                                current_trade['put_pnl'] *= factor
-
-                            process_trade_block(c, current_trade, file_type, file_found_ids)
-                            if current_trade['is_new']: count_new += 1
-                            else: count_update += 1
-                            current_trade = None
-                        
-                        # Start New Block
-                        created = get_col(row, ['Created At'])
-                        try: start_dt = pd.to_datetime(created)
-                        except: continue
-                        
-                        group = str(get_col(row, ['Group']))
-                        strat = get_strategy(group, name)
-                        
-                        # FUZZY MATCH PnL and DEBIT to handle column name vars
-                        pnl = clean_num(get_col(row, ['Total Return $', 'Total Return']))
-                        debit = abs(clean_num(get_col(row, ['Net Debit', 'Debit', 'Credit'])))
-                        
-                        # Greeks
-                        theta = clean_num(get_col(row, ['Theta']))
-                        delta = clean_num(get_col(row, ['Delta']))
-                        gamma = clean_num(get_col(row, ['Gamma']))
-                        vega = clean_num(get_col(row, ['Vega']))
-                        
-                        lot_size = 1
-                        if strat == '130/160':
-                            if debit > 11000: lot_size = 3
-                            elif debit > 6000: lot_size = 2
-                        elif strat == '160/190':
-                            if debit > 8000: lot_size = 2
-                        elif strat == 'M200':
-                            if debit > 12000: lot_size = 2
-                        elif strat == 'SMSF':
-                            if debit > 12000: lot_size = 2
-
-                        trade_id = generate_id(name, strat, start_dt)
-                        status = "Active" if file_type == "Active" else "Expired"
-                        
-                        exit_dt = None
-                        try:
-                            raw_exp = get_col(row, ['Expiration'])
-                            if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
-                                exit_dt = pd.to_datetime(raw_exp)
-                        except: pass
-
-                        days_held = 1
-                        if exit_dt and file_type == "History":
-                            days_held = (exit_dt - start_dt).days
-                        else:
-                            days_held = (datetime.now() - start_dt).days
-                        if days_held < 1: days_held = 1
-
-                        current_trade = {
-                            'id': trade_id, 'name': name, 'strat': strat, 'status': status,
-                            'start_dt': start_dt.date(), 'exit_dt': exit_dt.date() if exit_dt else None,
-                            'days_held': days_held, 'debit': debit, 'lot_size': lot_size, 'pnl': pnl,
-                            'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
-                            'call_pnl': 0.0, 'put_pnl': 0.0, 'is_new': False
-                        }
-                    
-                    # --- LEG ROW (Child) ---
-                    elif name.startswith('.') and current_trade:
-                        # --- COLUMN MAPPING FIX FOR LEGS ---
-                        # Use fuzzy matching on the INDEX positions implicitly by name from strategy row
-                        # Total Return % -> Quantity
-                        # Total Return $ -> Entry Price
-                        # Created At -> Current Price
-                        # Expiration -> Close Price
-                        
-                        qty = clean_num(get_col(row, ['Total Return %'])) 
-                        entry_price = clean_num(get_col(row, ['Total Return $']))
-                        
-                        raw_current = get_col(row, ['Created At'])
-                        raw_close = get_col(row, ['Expiration'])
-                        
-                        curr = clean_num(raw_current)
-                        close = clean_num(raw_close)
-                        
-                        price_to_use = 0.0
-                        if file_type == "Active":
-                            if close != 0: price_to_use = close
-                            elif curr != 0: price_to_use = curr
-                        else: # History
-                            if close != 0: price_to_use = close
-                            elif curr != 0: price_to_use = curr
-                        
-                        mult = get_multiplier(name)
-                        leg_pnl = (price_to_use - entry_price) * qty * mult
-                        
-                        leg_type = identify_leg_type(name)
-                        if leg_type == 'C':
-                            current_trade['call_pnl'] += leg_pnl
-                            legs_processed += 1
-                        elif leg_type == 'P':
-                            current_trade['put_pnl'] += leg_pnl
-                            legs_processed += 1
-                except Exception as e:
-                    # Log error for specific row but don't stop the whole file
-                    # print(f"Row Error: {e}") 
-                    pass
-
-            # Process final block
-            if current_trade:
-                calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
-                real_total = current_trade['pnl']
-                if calc_total != 0 and real_total != 0:
-                    factor = real_total / calc_total
-                    current_trade['call_pnl'] *= factor
-                    current_trade['put_pnl'] *= factor
+                name = str(row.get('Name', ''))
+                if name.startswith('.') or name in ['nan', '', 'Symbol']: continue
                 
-                process_trade_block(c, current_trade, file_type, file_found_ids)
-                if current_trade['is_new']: count_new += 1
-                else: count_update += 1
+                created = row.get('Created At', '')
+                try: start_dt = pd.to_datetime(created)
+                except: continue
+                
+                group = str(row.get('Group', ''))
+                strat = get_strategy(group, name)
+                
+                pnl = clean_num(row.get('Total Return $', 0))
+                debit = abs(clean_num(row.get('Net Debit/Credit', 0)))
+                
+                # Greeks - Handle carefully
+                theta = clean_num(row.get('Theta', 0))
+                delta = clean_num(row.get('Delta', 0))
+                gamma = clean_num(row.get('Gamma', 0))
+                vega = clean_num(row.get('Vega', 0))
+                
+                lot_size = 1
+                if strat == '130/160':
+                    if debit > 11000: lot_size = 3
+                    elif debit > 6000: lot_size = 2
+                elif strat == '160/190':
+                    if debit > 8000: lot_size = 2
+                elif strat == 'M200':
+                    if debit > 12000: lot_size = 2
+                elif strat == 'SMSF':
+                    if debit > 12000: lot_size = 2
 
-            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated, {legs_processed} Legs Processed")
+                trade_id = generate_id(name, strat, start_dt)
+                status = "Active" if file_type == "Active" else "Expired"
+                
+                exit_dt = None
+                try:
+                    raw_exp = row.get('Expiration')
+                    if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
+                        exit_dt = pd.to_datetime(raw_exp)
+                except: pass
+
+                days_held = 1
+                if exit_dt and file_type == "History":
+                      days_held = (exit_dt - start_dt).days
+                else:
+                      days_held = (datetime.now() - start_dt).days
+                
+                if days_held < 1: days_held = 1
+                
+                if file_type == "Active":
+                    file_found_ids.add(trade_id)
+                
+                c.execute("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = ?", (trade_id,))
+                existing = c.fetchone()
+                
+                if existing is None:
+                    c.execute('''INSERT INTO trades 
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (trade_id, name, strat, status, start_dt.date(), 
+                         exit_dt.date() if exit_dt else None, 
+                         days_held, debit, lot_size, pnl, theta, delta, gamma, vega, "", "", ""))
+                    count_new += 1
+                else:
+                    old_status, old_theta, old_delta, old_gamma, old_vega = existing
+                    
+                    final_theta = theta if theta != 0 else old_theta
+                    final_delta = delta if delta != 0 else old_delta
+                    final_gamma = gamma if gamma != 0 else old_gamma
+                    final_vega = vega if vega != 0 else old_vega
+
+                    if file_type == "History":
+                        c.execute('''UPDATE trades SET 
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
+                            WHERE id=?''', 
+                            (pnl, status, exit_dt.date() if exit_dt else None, days_held, 
+                             final_theta, final_delta, final_gamma, final_vega, trade_id))
+                        count_update += 1
+                    elif old_status in ["Active", "Missing"]: 
+                        c.execute('''UPDATE trades SET 
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', exit_date=?
+                            WHERE id=?''', 
+                            (pnl, days_held, final_theta, final_delta, final_gamma, final_vega, 
+                             exit_dt.date() if exit_dt else None, trade_id))
+                        count_update += 1
+                        
+                if file_type == "Active":
+                    today = datetime.now().date()
+                    c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
+                    if not c.fetchone():
+                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (?,?,?,?)",
+                                  (trade_id, today, pnl, days_held))
+
+            log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
             
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
@@ -391,51 +295,6 @@ def sync_data(file_list, file_type):
     conn.commit()
     conn.close()
     return log
-
-def process_trade_block(cursor, t, file_type, found_ids):
-    if file_type == "Active":
-        found_ids.add(t['id'])
-    
-    cursor.execute("SELECT status, theta, delta, gamma, vega FROM trades WHERE id = ?", (t['id'],))
-    existing = cursor.fetchone()
-    
-    if existing is None:
-        t['is_new'] = True
-        cursor.execute('''INSERT INTO trades 
-            (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, 
-             pnl_calls, pnl_puts, theta, delta, gamma, vega, notes, tags, parent_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (t['id'], t['name'], t['strat'], t['status'], t['start_dt'], t['exit_dt'], 
-             t['days_held'], t['debit'], t['lot_size'], t['pnl'], t['call_pnl'], t['put_pnl'],
-             t['theta'], t['delta'], t['gamma'], t['vega'], "", "", ""))
-    else:
-        t['is_new'] = False
-        old_status, old_theta, old_delta, old_gamma, old_vega = existing
-        
-        final_theta = t['theta'] if t['theta'] != 0 else old_theta
-        final_delta = t['delta'] if t['delta'] != 0 else old_delta
-        final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
-        final_vega = t['vega'] if t['vega'] != 0 else old_vega
-
-        if file_type == "History":
-            cursor.execute('''UPDATE trades SET 
-                pnl=?, pnl_calls=?, pnl_puts=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=? 
-                WHERE id=?''', 
-                (t['pnl'], t['call_pnl'], t['put_pnl'], t['status'], t['exit_dt'], t['days_held'], 
-                 final_theta, final_delta, final_gamma, final_vega, t['id']))
-        elif old_status in ["Active", "Missing"]: 
-            cursor.execute('''UPDATE trades SET 
-                pnl=?, pnl_calls=?, pnl_puts=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, status='Active', exit_date=?
-                WHERE id=?''', 
-                (t['pnl'], t['call_pnl'], t['put_pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, 
-                 t['exit_dt'], t['id']))
-            
-    if file_type == "Active":
-        today = datetime.now().date()
-        cursor.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (t['id'], today))
-        if not cursor.fetchone():
-            cursor.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (?,?,?,?)",
-                      (t['id'], today, t['pnl'], t['days_held']))
 
 def update_journal(edited_df):
     conn = get_db_connection()
@@ -482,11 +341,10 @@ def load_data():
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
             'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes',
-            'tags': 'Tags', 'parent_id': 'Parent ID',
-            'pnl_calls': 'Call P&L', 'pnl_puts': 'Put P&L'
+            'tags': 'Tags', 'parent_id': 'Parent ID'
         })
         
-        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Call P&L', 'Put P&L']
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID']
         for col in required_cols:
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
@@ -495,8 +353,6 @@ def load_data():
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
         df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
         df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
-        df['Call P&L'] = pd.to_numeric(df['Call P&L'], errors='coerce').fillna(0)
-        df['Put P&L'] = pd.to_numeric(df['Put P&L'], errors='coerce').fillna(0)
         df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
@@ -697,7 +553,7 @@ with tab1:
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
                 st.caption("Edit 'Notes', 'Tags' or 'Parent ID' (for Linking).")
-                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'Call P&L', 'Put P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
+                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
@@ -706,8 +562,6 @@ with tab1:
                     "Theta/Cap %": st.column_config.NumberColumn("Θ/Cap", format="%.2f%%", disabled=True),
                     "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True, help="Ratio of P&L to Total Theta Potential. >1.0 is excellent."),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
-                    "Call P&L": st.column_config.NumberColumn("Call P&L", format="$%d", disabled=True),
-                    "Put P&L": st.column_config.NumberColumn("Put P&L", format="$%d", disabled=True),
                     "P&L Vol": st.column_config.NumberColumn("Sleep Well (Vol)", format="$%d", disabled=True, help="Standard Deviation of Daily P&L. Lower is better."),
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
@@ -746,8 +600,7 @@ with tab1:
                     r3.metric("Capital at Risk", f"${total_cap:,.0f}")
 
                 strat_agg = active_df.groupby('Strategy').agg({
-                    'P&L': 'sum', 'Call P&L': 'sum', 'Put P&L': 'sum', 
-                    'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
                     'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean' 
                 }).reset_index()
                 
@@ -756,9 +609,7 @@ with tab1:
                 
                 total_row = pd.DataFrame({
                     'Strategy': ['TOTAL'], 
-                    'P&L': [strat_agg['P&L'].sum()], 
-                    'Call P&L': [strat_agg['Call P&L'].sum()], 'Put P&L': [strat_agg['Put P&L'].sum()],
-                    'Debit': [strat_agg['Debit'].sum()],
+                    'P&L': [strat_agg['P&L'].sum()], 'Debit': [strat_agg['Debit'].sum()],
                     'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
                     'Name': [strat_agg['Name'].sum()], 
                     'Daily Yield %': [active_df['Daily Yield %'].mean()],
@@ -769,8 +620,8 @@ with tab1:
                 })
                 final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
                 
-                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'P&L Vol', 'Target %', 'P&L', 'Call P&L', 'Put P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
-                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Θ Eff', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Call P&L', 'Put P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
+                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'P&L Vol', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Θ Eff', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
                 
                 def highlight_trend(val):
                     return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
@@ -782,8 +633,6 @@ with tab1:
                     display_agg.style
                     .format({
                         'Total P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
-                        'Call P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
-                        'Put P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
                         'Total Debit': lambda x: safe_fmt(x, "${:,.0f}"), 
                         'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
                         'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
@@ -800,7 +649,7 @@ with tab1:
 
             # STRATEGY TAB RENDERER
             # --- ADDED Theta Eff and P&L Vol to columns here ---
-            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Call P&L', 'Put P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -823,9 +672,7 @@ with tab1:
                             'Ann. ROI': [subset['Ann. ROI'].mean()],
                             'Theta Eff.': [subset['Theta Eff.'].mean()],
                             'P&L Vol': [subset['P&L Vol'].mean()],
-                            'P&L': [subset['P&L'].sum()], 
-                            'Call P&L': [subset['Call P&L'].sum()], 'Put P&L': [subset['Put P&L'].sum()],
-                            'Debit': [subset['Debit'].sum()],
+                            'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
                             'Days Held': [subset['Days Held'].mean()],
                             'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
                             'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()], 'Notes': ['']
@@ -843,7 +690,7 @@ with tab1:
                             display_df.style
                             .format({
                                 'Theta/Cap %': "{:.2f}%", 
-                                'P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 'Put P&L': "${:,.0f}", 'Debit': "${:,.0f}", 
+                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 
                                 'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 
                                 'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}",
                                 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 
@@ -851,7 +698,7 @@ with tab1:
                             })
                             .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
                             .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else ('color: #842029; font-weight: bold' if 'F' in str(v) else 'color: #d97706; font-weight: bold'), subset=['Grade'])
-                            .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L', 'Call P&L', 'Put P&L'])
+                            .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
                             .map(yield_color, subset=['Daily Yield %'])
                             .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
                             .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
@@ -964,10 +811,10 @@ with tab3:
         
         st.divider()
         
-        an1, an2, an3, an4, an5, an6, an7, an8, an9, an10, an11, an12 = st.tabs([
+        an1, an2, an3, an4, an5, an6, an7, an8, an9, an10 = st.tabs([
             "🌊 Equity", "🎯 Expectancy", "🔥 Heatmaps", "🏷️ Tickers", 
             "⚠️ Risk", "🧬 Lifecycle", "🧮 Greeks Lab", "⚙️ Velocity", 
-            "🎯 Compliance", "🧱 Gamma Wall", "🏛️ Structure Perf.", "📜 History Log"
+            "🎯 Compliance", "🧱 Gamma Wall"
         ])
 
         with an1:
@@ -1017,8 +864,6 @@ with tab3:
                         'Win Rate': wr,
                         'Profit Factor': pf,
                         'Total P&L': grp['P&L'].sum(),
-                        'Call P&L': grp['Call P&L'].sum(),
-                        'Put P&L': grp['Put P&L'].sum(),
                         'Avg Ann. ROI': grp['Ann. ROI'].mean(),
                         'Avg Days': grp['Days Held'].mean()
                     })
@@ -1029,12 +874,10 @@ with tab3:
                         'Win Rate': "{:.1f}%",
                         'Profit Factor': "{:.2f}",
                         'Total P&L': "${:,.0f}",
-                        'Call P&L': "${:,.0f}",
-                        'Put P&L': "${:,.0f}",
                         'Avg Ann. ROI': "{:.1f}%",
                         'Avg Days': "{:.0f}"
                     })
-                    .map(lambda x: 'color: green; font-weight: bold' if x > 0 else 'color: red; font-weight: bold', subset=['Total P&L', 'Call P&L', 'Put P&L', 'Avg Ann. ROI']),
+                    .map(lambda x: 'color: green; font-weight: bold' if x > 0 else 'color: red; font-weight: bold', subset=['Total P&L', 'Avg Ann. ROI']),
                     use_container_width=True,
                     hide_index=True
                 )
@@ -1207,54 +1050,6 @@ with tab3:
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No active trades.")
 
-        with an11:
-            st.markdown("##### 🏛️ Structure Performance (Call vs Put)")
-            st.caption("Which side of your trades is driving profitability?")
-            
-            if not df.empty and ('Call P&L' in df.columns):
-                # Separate Active and Closed for clearer analysis
-                active_struct = df[df['Status'] == 'Active'].groupby('Strategy').agg({'Call P&L': 'sum', 'Put P&L': 'sum'}).reset_index()
-                closed_struct = df[df['Status'] == 'Expired'].groupby('Strategy').agg({'Call P&L': 'sum', 'Put P&L': 'sum'}).reset_index()
-                
-                c1, c2 = st.columns(2)
-                
-                with c1:
-                    st.caption("🔹 Unrealized (Active Trades)")
-                    if not active_struct.empty:
-                        melted = active_struct.melt(id_vars='Strategy', value_vars=['Call P&L', 'Put P&L'], var_name='Type', value_name='P&L')
-                        fig = px.bar(melted, x='Strategy', y='P&L', color='Type', barmode='group',
-                                     color_discrete_map={'Call P&L': '#EF553B', 'Put P&L': '#00CC96'})
-                        st.plotly_chart(fig, use_container_width=True)
-                    else: st.info("No active data.")
-
-                with c2:
-                    st.caption("🔸 Realized (Closed Trades)")
-                    if not closed_struct.empty:
-                        melted = closed_struct.melt(id_vars='Strategy', value_vars=['Call P&L', 'Put P&L'], var_name='Type', value_name='P&L')
-                        fig = px.bar(melted, x='Strategy', y='P&L', color='Type', barmode='group',
-                                     color_discrete_map={'Call P&L': '#EF553B', 'Put P&L': '#00CC96'})
-                        st.plotly_chart(fig, use_container_width=True)
-                    else: st.info("No closed data.")
-
-            else:
-                st.info("Sync your files to populate structure data.")
-
-        with an12:
-            st.markdown("##### 📜 Closed Trade History (Detailed)")
-            if not expired_sub.empty:
-                hist_cols = ['Name', 'Strategy', 'Entry Date', 'Exit Date', 'P&L', 'Call P&L', 'Put P&L', 'ROI', 'Days Held']
-                
-                st.dataframe(
-                    expired_sub[hist_cols].style.format({
-                        'P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 'Put P&L': "${:,.0f}", 
-                        'ROI': "{:.1f}%", 'Entry Date': "{:%Y-%m-%d}", 'Exit Date': "{:%Y-%m-%d}"
-                    })
-                    .map(lambda x: 'color: green; font-weight: bold' if x > 0 else 'color: red; font-weight: bold', subset=['P&L', 'Call P&L', 'Put P&L', 'ROI']),
-                    use_container_width=True
-                )
-            else:
-                st.info("No history data found.")
-
 
 # 4. RULE BOOK
 with tab4:
@@ -1301,4 +1096,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v93.0 | Fix: Auto-Schema Repair & Fuzzy Column Matching")
+    st.caption("Allantis Trade Guardian v88.0 | Closed Trade Analytics")
