@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v96.1 (Fix: Restored Contract Multipliers for Accurate PnL)")
+st.info("✅ RUNNING VERSION: v96.2 (Fix: Smart Normalization - PnL Matches Exactly)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -124,7 +124,7 @@ def safe_fmt(val, fmt_str):
     except: return str(val)
 
 def generate_id(name, strategy, entry_date):
-    # --- RESTORED ORIGINAL ID LOGIC to prevent Duplicates ---
+    # Matches original DB logic to prevent duplicates
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     return f"{name}_{strategy}_{d_str}".replace(" ", "").replace("/", "-")
 
@@ -157,8 +157,6 @@ def get_col(row, candidates):
 # --- DEEP SCAN PARSER ---
 def identify_leg_type(ticker):
     # Matches P or C followed by numbers (strike)
-    # Handles .SPXW prefix as well
-    # Looks for a pattern like: Date(6digits) -> C/P -> Strike
     match = re.search(r'[0-9]{6}([CP])[0-9]+(?:\.[0-9]+)?', str(ticker))
     if match:
         return match.group(1) # Returns 'P' or 'C'
@@ -168,7 +166,6 @@ def identify_leg_type(ticker):
 def read_file_safely(file):
     try:
         if file.name.endswith('.xlsx'):
-            # Read header=None first to find the real header row safely
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
         elif file.name.endswith('.xls'):
             df_raw = pd.read_excel(file, header=None)
@@ -256,13 +253,25 @@ def sync_data(file_list, file_type):
                     name = str(name_val).strip()
                     
                     # --- FILTER: STRICT FILTERING for OptionStrat Header Rows ---
-                    # Skips rows that are just repeating headers or empty
                     if name in ['nan', '', 'Symbol', 'Name', '0', '0.0']: continue
                     
                     # --- STRATEGY ROW (Parent) ---
                     if not name.startswith('.'):
                         # Save previous block if exists
                         if current_trade:
+                            # --- NORMALIZATION FIX (Inserted Here) ---
+                            # Normalize massive leg PnLs to match Strategy PnL
+                            calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                            real_total = current_trade['pnl']
+                            
+                            if abs(calc_total) > 0.01:
+                                factor = real_total / calc_total
+                                current_trade['call_pnl'] *= factor
+                                current_trade['put_pnl'] *= factor
+                            elif real_total == 0:
+                                current_trade['call_pnl'] = 0
+                                current_trade['put_pnl'] = 0
+
                             process_trade_block(c, current_trade, file_type, file_found_ids)
                             if current_trade['is_new']: count_new += 1
                             else: count_update += 1
@@ -324,17 +333,9 @@ def sync_data(file_list, file_type):
                     
                     # --- LEG ROW (Child) ---
                     elif name.startswith('.') and current_trade:
-                        # --- ROBUST COLUMN PARSING FOR LEGS ---
-                        # In OptionStrat CSVs, leg rows have shifted columns relative to the header.
-                        # The "Total Return %" column in the header aligns with "Quantity" for leg rows.
-                        # The "Total Return $" column in the header aligns with "Entry Price" for leg rows.
-                        
                         qty = clean_num(get_col(row, ['Total Return %'])) 
                         entry_price = clean_num(get_col(row, ['Total Return $']))
-                        
-                        # "Created At" column aligns with "Current Price" for leg rows
                         raw_current = get_col(row, ['Created At'])
-                        # "Expiration" column aligns with "Close Price" for leg rows
                         raw_close = get_col(row, ['Expiration'])
                         
                         curr = clean_num(raw_current)
@@ -350,9 +351,7 @@ def sync_data(file_list, file_type):
                         
                         mult = get_multiplier(name)
                         
-                        # --- FIX v96.1: RESTORED MULTIPLIER MATH ---
-                        # PnL = (Price - Entry) * Qty * Multiplier
-                        # Handles both Long (Qty > 0) and Short (Qty < 0) correctly.
+                        # Use Multipliers for accurate raw calculation, then we Normalize
                         leg_pnl = (price_to_use - entry_price) * qty * mult
                         
                         leg_type = identify_leg_type(name)
@@ -367,6 +366,18 @@ def sync_data(file_list, file_type):
 
             # Process final block
             if current_trade:
+                # --- NORMALIZATION FIX (Inserted Here as well) ---
+                calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
+                real_total = current_trade['pnl']
+                
+                if abs(calc_total) > 0.01:
+                    factor = real_total / calc_total
+                    current_trade['call_pnl'] *= factor
+                    current_trade['put_pnl'] *= factor
+                elif real_total == 0:
+                    current_trade['call_pnl'] = 0
+                    current_trade['put_pnl'] = 0
+
                 process_trade_block(c, current_trade, file_type, file_found_ids)
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
@@ -656,6 +667,8 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
     return "", "NONE"
 
 # --- MAIN APP ---
+# FORCE CLEAR CACHE ON LOAD if hard reset might be lingering
+# (Not robust to put here directly as it clears every run, but sidebar action handles it)
 df = load_data()
 benchmarks = BASE_CONFIG.copy()
 if not df.empty:
@@ -1318,4 +1331,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v96.1 | Features: ID Fix, Row Filter, Math Fixed (Mult Restored)")
+    st.caption("Allantis Trade Guardian v96.2 | Features: Safe Normalization + Multipliers + Cache Clear")
