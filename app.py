@@ -12,12 +12,8 @@ from datetime import datetime
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
-# --- SESSION STATE INITIALIZATION ---
-if 'db_changed' not in st.session_state:
-    st.session_state['db_changed'] = False
-
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v94.0 (Feature: 'Unsaved Changes' Safety Guard)")
+st.info("✅ RUNNING VERSION: v93.0 (Fix: Auto-Schema Repair & Fuzzy Column Matching)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -204,7 +200,7 @@ def read_file_safely(file):
 
 # --- SYNC ENGINE (Deep Scan Version - Fixed) ---
 def sync_data(file_list, file_type):
-    # 1. FORCE MIGRATION
+    # 1. FORCE MIGRATION (Fixes "Missing Column" errors after DB restore)
     migrate_db()
     
     log = []
@@ -221,9 +217,6 @@ def sync_data(file_list, file_type):
         except: pass
     
     file_found_ids = set()
-    
-    # TRACK CHANGES
-    changes_made = False
 
     for file in file_list:
         count_new = 0
@@ -264,6 +257,8 @@ def sync_data(file_list, file_type):
                             calc_total = current_trade['call_pnl'] + current_trade['put_pnl']
                             real_total = current_trade['pnl']
                             if calc_total != 0 and real_total != 0:
+                                # Only normalize if directions match to avoid flipping signs
+                                # or assume logic is sound for components
                                 factor = real_total / calc_total
                                 current_trade['call_pnl'] *= factor
                                 current_trade['put_pnl'] *= factor
@@ -331,6 +326,10 @@ def sync_data(file_list, file_type):
                     elif name.startswith('.') and current_trade:
                         # --- COLUMN MAPPING FIX FOR LEGS ---
                         # Use fuzzy matching on the INDEX positions implicitly by name from strategy row
+                        # Total Return % -> Quantity
+                        # Total Return $ -> Entry Price
+                        # Created At -> Current Price
+                        # Expiration -> Close Price
                         
                         qty = clean_num(get_col(row, ['Total Return %'])) 
                         entry_price = clean_num(get_col(row, ['Total Return $']))
@@ -360,6 +359,8 @@ def sync_data(file_list, file_type):
                             current_trade['put_pnl'] += leg_pnl
                             legs_processed += 1
                 except Exception as e:
+                    # Log error for specific row but don't stop the whole file
+                    # print(f"Row Error: {e}") 
                     pass
 
             # Process final block
@@ -375,8 +376,6 @@ def sync_data(file_list, file_type):
                 if current_trade['is_new']: count_new += 1
                 else: count_update += 1
 
-            if count_new > 0 or count_update > 0:
-                changes_made = True
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated, {legs_processed} Legs Processed")
             
         except Exception as e:
@@ -388,15 +387,9 @@ def sync_data(file_list, file_type):
             placeholders = ','.join('?' for _ in missing_ids)
             c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
             log.append(f"⚠️ Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
-            changes_made = True
 
     conn.commit()
     conn.close()
-    
-    # Mark DB as changed
-    if changes_made:
-        st.session_state['db_changed'] = True
-        
     return log
 
 def process_trade_block(cursor, t, file_type, found_ids):
@@ -457,8 +450,6 @@ def update_journal(edited_df):
             c.execute("UPDATE trades SET notes=?, tags=?, parent_id=? WHERE id=?", (notes, tags, pid, t_id))
             count += 1
         conn.commit()
-        if count > 0:
-            st.session_state['db_changed'] = True
         return count
     except Exception as e: return 0
     finally: conn.close()
@@ -569,18 +560,11 @@ init_db()
 
 # --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
-
-# --- UNSAVED CHANGES WARNING ---
-if st.session_state.get('db_changed', False):
-    st.sidebar.error("⚠️ UNSAVED CHANGES")
-    st.sidebar.markdown("**You have processed new files or edited the journal. Please download the DB below to save your work.**")
-
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         st.cache_data.clear()
-        st.session_state['db_changed'] = False
         st.success("Restored.")
         if 'restored' not in st.session_state:
             st.session_state['restored'] = True
@@ -601,11 +585,8 @@ with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
 
 st.sidebar.markdown("⬇️ *finally...*")
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
-    if os.path.exists(DB_NAME):
-        with open(DB_NAME, "rb") as f:
-            st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
-    else:
-        st.warning("No database file found.")
+    with open(DB_NAME, "rb") as f:
+        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
@@ -628,7 +609,6 @@ with st.sidebar.expander("🛠️ Maintenance"):
         conn.close()
         init_db()
         st.cache_data.clear()
-        st.session_state['db_changed'] = False
         st.success("Wiped & Reset.")
         st.rerun()
 
@@ -1321,4 +1301,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v94.0 | Feature: 'Unsaved Changes' Safety Guard")
+    st.caption("Allantis Trade Guardian v93.0 | Fix: Auto-Schema Repair & Fuzzy Column Matching")
