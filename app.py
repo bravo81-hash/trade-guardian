@@ -17,7 +17,7 @@ if 'db_changed' not in st.session_state:
     st.session_state['db_changed'] = False
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v95.1 (Fix: OptionStrat Leg Alignment & Zero-Value Guards)")
+st.info("✅ RUNNING VERSION: v95.2 (Fix: History Zero-Value Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -357,11 +357,10 @@ def sync_data(file_list, file_type):
                                 if close != 0: price_to_use = close
                                 elif curr != 0: price_to_use = curr
                             
-                            # ZERO VALUE GUARD: 
-                            # If price is 0.0 on an Active trade, it likely means data missing.
-                            # Using 0.0 creates massive fake profits on short legs.
-                            # Fallback: Use Entry Price (assume breakeven) to neutralize leg.
-                            if price_to_use == 0.0 and entry_price != 0:
+                            # ZERO VALUE GUARD (CONDITIONAL):
+                            # ONLY apply to ACTIVE trades. In History, 0.0 is valid (Expired Worthless).
+                            # If we apply this to History, we erase profits from short legs that expired.
+                            if file_type == "Active" and price_to_use == 0.0 and entry_price != 0:
                                 price_to_use = entry_price
 
                             mult = get_multiplier(name)
@@ -1342,4 +1341,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v95.1 | Feature: 'Zero Value Guard' Active")
+    st.caption("Allantis Trade Guardian v95.2 | Feature: 'Zero Value Guard' Active")
