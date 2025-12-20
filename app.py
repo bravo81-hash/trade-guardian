@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v90.4 (Fix: Robust Graphs & Fallback Trendline)")
+st.info("✅ RUNNING VERSION: v91.0 (Fix: P&L Attribution & File Parsing Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -97,8 +97,10 @@ def get_strategy(group_name, trade_name=""):
 
 def clean_num(x):
     try:
-        if pd.isna(x) or str(x).strip() == '': return 0.0
-        val = float(str(x).replace('$', '').replace(',', '').replace('%', ''))
+        s = str(x).strip()
+        if not s or s.lower() == 'nan' or s == '-': return 0.0
+        # Remove currency symbols and commas
+        val = float(s.replace('$', '').replace(',', '').replace('%', ''))
         return val
     except: return 0.0
 
@@ -124,8 +126,13 @@ def extract_ticker(name):
     except: return "UNKNOWN"
 
 # --- SMART FILE READER & PARSER ---
-def read_and_parse_optionstrat(file):
+def read_and_parse_optionstrat(file, file_type="Active"):
+    """
+    Parses OptionStrat files with specific logic for Active vs History files.
+    Calculates Call vs Put P&L attribution.
+    """
     try:
+        # 1. Read Raw Data
         if file.name.endswith('.xlsx'):
             df_raw = pd.read_excel(file, header=None, engine='openpyxl')
         elif file.name.endswith('.xls'):
@@ -137,6 +144,7 @@ def read_and_parse_optionstrat(file):
                 file.seek(0)
                 df_raw = pd.read_csv(file, header=None)
         
+        # 2. Find Header Row
         header_idx = -1
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join(row.astype(str).values)
@@ -146,6 +154,7 @@ def read_and_parse_optionstrat(file):
         
         if header_idx == -1: return []
 
+        # 3. Process Data Frame
         df = df_raw.iloc[header_idx+1:].copy()
         df.columns = df_raw.iloc[header_idx]
         df.reset_index(drop=True, inplace=True)
@@ -160,11 +169,15 @@ def read_and_parse_optionstrat(file):
 
         for i, row in df.iterrows():
             col0 = str(row.iloc[0]).strip()
+            
+            # Skip empty rows or the secondary header row "Symbol, Quantity..."
             if col0 in ['nan', '', 'Symbol', 'Name']: continue
 
+            # --- CASE A: PARENT ROW ---
             if not col0.startswith('.'):
                 if current_trade: parsed_trades.append(current_trade)
                 
+                # Check if it's a valid parent row (must have a date)
                 created_at = row.get('Created At')
                 try: 
                     start_dt = pd.to_datetime(created_at)
@@ -179,6 +192,7 @@ def read_and_parse_optionstrat(file):
                 debit = abs(get_val(row, 'Net Debit/Credit'))
                 
                 lot_size = 1
+                # Simplified lot logic based on debit thresholds
                 if strat == '130/160':
                     if debit > 11000: lot_size = 3
                     elif debit > 6000: lot_size = 2
@@ -208,24 +222,50 @@ def read_and_parse_optionstrat(file):
                     'call_pnl_raw': 0.0, 'put_pnl_raw': 0.0
                 }
 
+            # --- CASE B: LEG ROW ---
             elif col0.startswith('.') and current_trade is not None:
                 try:
                     symbol = col0
+                    # Column mapping based on standard OptionStrat CSV layout
+                    # Col 1: Quantity (Signed: + Long, - Short)
                     qty = clean_num(row.iloc[1])
+                    
+                    # Col 2: Entry Price
                     entry = clean_num(row.iloc[2])
+                    
+                    # Col 3: Current Price (Active)
                     current = clean_num(row.iloc[3])
+                    
+                    # Col 4: Close Price (History)
                     close = clean_num(row.iloc[4])
                     
-                    exit_price = close if close > 0 else current
+                    # PRICE SELECTION LOGIC
+                    # If file_type is Active, prefer Current Price.
+                    # If file_type is History, prefer Close Price.
+                    exit_price = 0.0
+                    
+                    if file_type == "Active":
+                        exit_price = current if current > 0 else 0.0
+                    else: # History
+                        # For expired trades, Close is usually populated. 
+                        # If Close is 0/empty, it might be expired worthless (0.0).
+                        # Or if Close is missing but Current is there, use Current.
+                        if close > 0: exit_price = close
+                        elif current > 0: exit_price = current
+                        else: exit_price = 0.0 # Expired Worthless
+                    
                     multiplier = 100 
                     leg_pnl = (exit_price - entry) * qty * multiplier
                     
+                    # Determine Call vs Put
+                    # Regex looks for P or C preceded by 6 digits (the date)
                     match = re.search(r'\d{6}([CP])', symbol)
                     is_call = False
                     if match:
                         type_char = match.group(1)
                         is_call = (type_char == 'C')
                     else:
+                        # Fallback: simple string check
                         is_call = 'C' in symbol and 'P' not in symbol
 
                     if is_call: current_trade['call_pnl_raw'] += leg_pnl
@@ -262,7 +302,8 @@ def sync_data(file_list, file_type):
         count_update = 0
         
         try:
-            trades_data = read_and_parse_optionstrat(file)
+            # Pass the file_type to the parser for better price selection
+            trades_data = read_and_parse_optionstrat(file, file_type)
             
             if not trades_data:
                 log.append(f"⚠️ {file.name}: Skipped (No valid trades found)")
@@ -355,6 +396,7 @@ def get_pnl_drivers(df):
     if df.empty: return None
     cols = ['P&L', 'Delta', 'Theta', 'Vega', 'Gamma', 'Days Held']
     valid_cols = [c for c in cols if c in df.columns]
+    # Need some data to calculate correlation
     if len(df) < 3: return None
     try:
         corr_matrix = df[valid_cols].corr()
@@ -1069,4 +1111,4 @@ with tab4:
     2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v90.4 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v91.0 | Deep Analytics")
