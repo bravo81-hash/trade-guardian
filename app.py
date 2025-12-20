@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v90.2 (Fix: Removed Dependency Error)")
+st.info("✅ RUNNING VERSION: v90.3 (Fix: Trendline Dependency Removed)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1074,7 +1074,8 @@ with tab3:
                 with c2:
                     st.markdown("#### 📉 Visual Driver Analysis")
                     drv_sel = st.selectbox("Compare P&L against:", ['Vega', 'Delta', 'Theta', 'Gamma'], index=0)
-                    fig_drv = px.scatter(active_trades, x=drv_sel, y='P&L', color='Strategy', size='Debit', hover_data=['Name'], title=f"Impact of {drv_sel} on P&L (Active)", trendline="ols")
+                    # Fixed: Removed trendline="ols" as it requires statsmodels which is not in environment
+                    fig_drv = px.scatter(active_trades, x=drv_sel, y='P&L', color='Strategy', size='Debit', hover_data=['Name'], title=f"Impact of {drv_sel} on P&L (Active)")
                     st.plotly_chart(fig_drv, use_container_width=True)
                     
                 st.divider()
@@ -1130,4 +1131,4 @@ with tab4:
     2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v90.2 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v90.3 | Deep Analytics")
