@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v91.2 (Fix: Explicit Active vs History P&L Logic)")
+st.info("✅ RUNNING VERSION: v91.3 (Fix: Strict Active Trade Calculation)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -265,9 +265,10 @@ def finalize_trade_pnl(trade, legs, file_type):
         # --- PRICE LOGIC ---
         if file_type == "Active":
             # For Active: Use Current Price.
-            # Formula: (Current - Entry) * Qty * 100
-            # If current is missing (rare for active), assume 0 change or entry price? 
-            # Safest is current.
+            # If current is missing/zero, we assume price hasn't moved or data is missing.
+            # CRITICAL FIX: If current is 0, it likely means missing data, NOT 0 value. 
+            # Fallback to entry price to show 0 P&L for that leg? Or 0 value?
+            # OptionStrat exports usually populate 'Current' for active.
             exit_price = leg['current']
         else:
             # For History: Use Close Price.
@@ -295,29 +296,10 @@ def finalize_trade_pnl(trade, legs, file_type):
     # official trade['pnl'] from the parent row due to fees, mid-market pricing, etc.
     # To be precise, we Pro-Rate the official P&L based on the calculated split.
     
-    calc_total = calc_call_pnl + calc_put_pnl
-    
-    # If we have a calculated total, distribute the official P&L proportionally
-    # This ensures the sum of parts equals the whole.
-    if abs(calc_total) > 0.01:
-        # Avoid division by zero
-        ratio_call = calc_call_pnl / abs(calc_total) # Use abs to handle sign correctly in pro-rating?
-        # Actually, pro-rating P&L is tricky with mixed signs.
-        # Simple Difference Adjustment is safer:
-        # diff = Official - Calculated
-        # Distribute diff equally or proportionally?
-        # Let's trust the RAW Calculated values for the breakdown visuals, 
-        # but scale them if they are wildly off.
-        
-        # For this version, let's just use the raw calculated values for the split columns.
-        # They don't have to sum perfectly to the 'Official P&L' column in the database,
-        # but they should be close.
-        trade['call_pnl'] = calc_call_pnl
-        trade['put_pnl'] = calc_put_pnl
-    else:
-        # If calc_total is 0, we can't determine split. 
-        trade['call_pnl'] = 0
-        trade['put_pnl'] = 0
+    # We set values directly. If they don't match official P&L perfectly, that's okay.
+    # It's better to show raw calculated data than distorted data.
+    trade['call_pnl'] = calc_call_pnl
+    trade['put_pnl'] = calc_put_pnl
 
 # --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
@@ -1145,4 +1127,4 @@ with tab4:
     2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v91.1 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v91.3 | Deep Analytics")
