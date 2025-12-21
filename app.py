@@ -14,7 +14,7 @@ from openpyxl import load_workbook
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v99.0 (Excel Hyperlink Extraction Patch)")
+st.info("✅ RUNNING VERSION: v99.1 (Hyperlinks in Strategy Performance)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -155,7 +155,6 @@ def parse_optionstrat_file(file, file_type):
                 df_raw = pd.read_excel(file, header=header_row)
                 
                 # --- HYPERLINK EXTRACTION PATCH ---
-                # Pandas reads the text "Open", we need openpyxl to get the URL
                 if 'Link' in df_raw.columns:
                     try:
                         file.seek(0)
@@ -163,7 +162,6 @@ def parse_optionstrat_file(file, file_type):
                         sheet = wb.active
                         
                         # Map pandas header row to Excel row (1-based)
-                        # Excel Header Row = header_row + 1
                         excel_header_row = header_row + 1
                         link_col_idx = None
                         
@@ -192,14 +190,13 @@ def parse_optionstrat_file(file, file_type):
                                             url = parts[1]
                                     except: pass
                                 
-                                # Fallback to existing value if no url found, or empty string
+                                # Fallback to existing value if no url found
                                 links.append(url if url else "")
                             
                             # Assign extracted URLs back to dataframe
                             df_raw['Link'] = links
                             
                     except Exception as e:
-                        # Fail silently on link extraction if structure is too complex
                         pass
 
             except Exception:
@@ -235,7 +232,7 @@ def parse_optionstrat_file(file, file_type):
             
             # Extract Link (Now potentially holding the real URL)
             link = str(trade_data.get('Link', ''))
-            if link == 'nan' or link == 'Open': link = "" # Clean up failed extractions
+            if link == 'nan' or link == 'Open': link = "" 
             
             pnl = clean_num(trade_data.get('Total Return $', 0))
             debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
@@ -791,7 +788,8 @@ with tab1:
                 )
 
             # STRATEGY TAB RENDERER
-            cols = ['Name', 'Action', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            # --- ADDED 'Link' to columns ---
+            cols = ['Name', 'Link', 'Action', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -808,7 +806,7 @@ with tab1:
                     
                     if not subset.empty:
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL'], 'Action': ['-'], 'Grade': ['-'],
+                            'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Grade': ['-'],
                             'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'Ann. ROI': [subset['Ann. ROI'].mean()],
@@ -845,7 +843,10 @@ with tab1:
                             .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
                             .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
-                            use_container_width=True
+                            use_container_width=True,
+                            column_config={
+                                "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️")
+                            }
                         )
                     else: st.info("No active trades.")
 
@@ -1147,4 +1148,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v99.0 | Excel Hyperlink Extraction Patch")
+    st.caption("Allantis Trade Guardian v99.1 | Hyperlinks in Strategy Performance")
