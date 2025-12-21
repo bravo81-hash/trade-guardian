@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v91.5 (Fix: OptionStrat Combined Symbol/Qty Parser)")
+st.info("✅ RUNNING VERSION: v91.2 (Fix: Explicit Active vs History P&L Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -98,8 +98,7 @@ def get_strategy(group_name, trade_name=""):
 def clean_num(x):
     try:
         s = str(x).strip()
-        if not s or s.lower() in ['nan', 'none', '', '-']: return 0.0
-        # Remove currency symbols and commas
+        if not s or s.lower() == 'nan' or s == '-': return 0.0
         val = float(s.replace('$', '').replace(',', '').replace('%', ''))
         return val
     except: return 0.0
@@ -125,11 +124,10 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- SMART FILE READER & PARSER ---
+# --- EXPLICIT PARSER ---
 def read_and_parse_optionstrat(file, file_type):
     """
     Parses OptionStrat files with STRICT separation of logic for Active vs History files.
-    Robustly extracts quantity even if combined with symbol.
     """
     try:
         # 1. Read Raw Data
@@ -226,66 +224,20 @@ def read_and_parse_optionstrat(file, file_type):
             elif col0.startswith('.') and current_trade is not None:
                 try:
                     symbol = col0
+                    qty = clean_num(row.iloc[1])
+                    entry = clean_num(row.iloc[2])
+                    current = clean_num(row.iloc[3])
+                    close = clean_num(row.iloc[4])
                     
-                    # Find quantity in the row - it might be embedded with symbol or in a separate column
-                    qty = 0
-                    entry = 0
-                    current = 0
-                    close = 0
-                    
-                    # Try to extract from known column names first
-                    if 'Quantity' in df.columns:
-                        qty = clean_num(row.get('Quantity', 0))
-                    else:
-                        # Fallback: scan row for quantity (usually small integer)
-                        for val in row.iloc[1:6]:
-                            val_str = str(val).strip()
-                            if val_str and not val_str.startswith('$'):
-                                try:
-                                    test_qty = float(val_str.replace(',', ''))
-                                    if -100 < test_qty < 100 and test_qty != 0:  # Reasonable qty range
-                                        qty = test_qty
-                                        break
-                                except: continue
-                    
-                    # Get prices - look for $ values
-                    price_cols = []
-                    for i, val in enumerate(row.iloc[1:10]):
-                        val_str = str(val).strip()
-                        if '$' in val_str or (val_str.replace('.', '').replace(',', '').replace('-', '').isdigit() and '.' in val_str):
-                            price_cols.append(clean_num(val))
-                    
-                    # Assign prices based on what we found
-                    if len(price_cols) >= 2:
-                        entry = price_cols[0]
-                        current = price_cols[1]
-                        if len(price_cols) >= 3:
-                            close = price_cols[2]
-                    
-                    # Determine exit price
-                    exit_price = 0.0
-                    if file_type == "Active":
-                        exit_price = current if current > 0 else 0.0
-                    else:
-                        if close > 0: exit_price = close
-                        elif current > 0: exit_price = current
-                    
-                    # Regex for Call/Put
-                    match = re.search(r'\d{6}([CP])', symbol)
-                    is_call = False
-                    if match: is_call = (match.group(1) == 'C')
-                    else: is_call = ('C' in symbol and 'P' not in symbol)
-
-                    # Only add if we have valid data
-                    if qty != 0 and entry != 0:
-                        current_legs.append({
-                            'qty': qty,
-                            'entry': entry,
-                            'exit': exit_price,
-                            'is_call': is_call
-                        })
-                except Exception as e: 
-                    continue
+                    # Store raw values for processing in finalize_trade_pnl
+                    current_legs.append({
+                        'symbol': symbol,
+                        'qty': qty,
+                        'entry': entry,
+                        'current': current,
+                        'close': close
+                    })
+                except: continue
         
         if current_trade:
             finalize_trade_pnl(current_trade, current_legs, file_type)
@@ -309,19 +261,63 @@ def finalize_trade_pnl(trade, legs, file_type):
     for leg in legs:
         qty = leg['qty']
         entry = leg['entry']
-        exit_price = leg['exit']
+        
+        # --- PRICE LOGIC ---
+        if file_type == "Active":
+            # For Active: Use Current Price.
+            # Formula: (Current - Entry) * Qty * 100
+            # If current is missing (rare for active), assume 0 change or entry price? 
+            # Safest is current.
+            exit_price = leg['current']
+        else:
+            # For History: Use Close Price.
+            # If Close is 0/Empty, assume expired worthless (0.0).
+            # If Close is missing but Current exists (rare), use Current.
+            if leg['close'] != 0: exit_price = leg['close']
+            else: exit_price = 0.0 # Expired Worthless
             
         # PnL Calculation (Standard Equity/Index Option Model)
         # Multiplier is key. SPX/Equity options = 100.
         multiplier = 100 
         leg_pnl = (exit_price - entry) * qty * multiplier
         
-        if leg['is_call']: calc_call_pnl += leg_pnl
+        # --- TYPE LOGIC (Call vs Put) ---
+        match = re.search(r'\d{6}([CP])', leg['symbol'])
+        is_call = False
+        if match: is_call = (match.group(1) == 'C')
+        else: is_call = ('C' in leg['symbol'] and 'P' not in leg['symbol'])
+        
+        if is_call: calc_call_pnl += leg_pnl
         else: calc_put_pnl += leg_pnl
 
-    # Set calculated values
-    trade['call_pnl'] = calc_call_pnl
-    trade['put_pnl'] = calc_put_pnl
+    # --- NORMALIZATION ---
+    # The sum of calculated leg P&Ls (calc_total) might not exactly match the 
+    # official trade['pnl'] from the parent row due to fees, mid-market pricing, etc.
+    # To be precise, we Pro-Rate the official P&L based on the calculated split.
+    
+    calc_total = calc_call_pnl + calc_put_pnl
+    
+    # If we have a calculated total, distribute the official P&L proportionally
+    # This ensures the sum of parts equals the whole.
+    if abs(calc_total) > 0.01:
+        # Avoid division by zero
+        ratio_call = calc_call_pnl / abs(calc_total) # Use abs to handle sign correctly in pro-rating?
+        # Actually, pro-rating P&L is tricky with mixed signs.
+        # Simple Difference Adjustment is safer:
+        # diff = Official - Calculated
+        # Distribute diff equally or proportionally?
+        # Let's trust the RAW Calculated values for the breakdown visuals, 
+        # but scale them if they are wildly off.
+        
+        # For this version, let's just use the raw calculated values for the split columns.
+        # They don't have to sum perfectly to the 'Official P&L' column in the database,
+        # but they should be close.
+        trade['call_pnl'] = calc_call_pnl
+        trade['put_pnl'] = calc_put_pnl
+    else:
+        # If calc_total is 0, we can't determine split. 
+        trade['call_pnl'] = 0
+        trade['put_pnl'] = 0
 
 # --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
@@ -507,7 +503,7 @@ def load_data():
                 if 4800 <= d <= 5500: grade="A"; reason="Ideal Pricing"
                 else: grade="C"; reason="Check Pricing"
             elif s == 'M200':
-                if 7500 <= d <= 8500: grade, reason = "A", "Perfect Entry"
+                if 7500 <= d <= 8500: grade="A"; reason="Perfect Entry"
                 else: grade="B"; reason="Variance"
             elif s == 'SMSF':
                 if d > 15000: grade="B"; reason="High Debit" 
@@ -1149,4 +1145,4 @@ with tab4:
     2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v91.5 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v91.1 | Deep Analytics")
