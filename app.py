@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v95.0 (Active Greeks Lab & Leg Attribution)")
+st.info("✅ RUNNING VERSION: v96.0 (Robust Excel Parser & Greeks)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -127,8 +127,38 @@ def extract_ticker(name):
 # --- SMART FILE PARSER ---
 def parse_optionstrat_file(file, file_type):
     try:
+        # --- EXCEL HANDLING ---
         if file.name.endswith(('.xlsx', '.xls')):
-            df_raw = pd.read_excel(file) 
+            # OptionStrat Excel exports often have metadata in top rows.
+            # We must scan for the real header row containing "Name" and "Total Return".
+            try:
+                df_temp = pd.read_excel(file, header=None)
+                header_row = 0
+                for i, row in df_temp.head(30).iterrows():
+                    # Convert row to list of strings to search
+                    row_vals = [str(v).strip() for v in row.values]
+                    # Check for key columns
+                    if "Name" in row_vals and "Total Return $" in row_vals:
+                        header_row = i
+                        break
+                
+                # Reload with the correct header
+                file.seek(0)
+                df_raw = pd.read_excel(file, header=header_row)
+            except Exception as e:
+                # Fallback mechanism if it's actually a CSV named .xlsx
+                file.seek(0)
+                content = file.getvalue().decode("utf-8", errors='ignore')
+                lines = content.split('\n')
+                header_row = 0
+                for i, line in enumerate(lines[:30]):
+                    if "Name" in line and "Total Return" in line:
+                        header_row = i
+                        break
+                file.seek(0)
+                df_raw = pd.read_csv(file, skiprows=header_row)
+
+        # --- CSV HANDLING ---
         else:
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
@@ -199,23 +229,14 @@ def parse_optionstrat_file(file, file_type):
                     if not sym.startswith('.'): continue
                     
                     try:
-                        # POSITION-BASED MAPPING (Critical for jagged CSVs)
-                        # OptionStrat Export Structure for Leg Rows:
-                        # Col 0: Symbol
-                        # Col 1: Quantity (Aligned with 'Total Return %' in header)
-                        # Col 2: Entry Price (Aligned with 'Total Return $' in header)
-                        # Col 4: Close Price (Aligned with 'Expiration' in header) - CRITICAL
-                        
+                        # POSITION-BASED MAPPING
+                        # Col 1: Quantity
+                        # Col 2: Entry Price
+                        # Col 4: Close Price
                         qty = clean_num(leg.iloc[1])
                         entry = clean_num(leg.iloc[2])
+                        close_price = clean_num(leg.iloc[4])
                         
-                        # Handle expiration close price. If empty, it's 0 (expired worthless).
-                        close_price_raw = leg.iloc[4] 
-                        close_price = clean_num(close_price_raw)
-                        
-                        # PnL Formula: (Close - Entry) * Qty * 100
-                        # Works for Long (Qty > 0): (Close - Entry) -> Profit if Close > Entry
-                        # Works for Short (Qty < 0): (Close - Entry) * -1 -> (Entry - Close) -> Profit if Entry > Close
                         leg_pnl = (close_price - entry) * qty * 100
                         
                         if 'P' in sym and 'C' not in sym: put_pnl += leg_pnl
@@ -223,8 +244,7 @@ def parse_optionstrat_file(file, file_type):
                         elif re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
                         elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
                             
-                    except Exception as e:
-                        pass
+                    except Exception as e: pass
             
             t_id = generate_id(name, strat, start_dt)
             
@@ -237,13 +257,14 @@ def parse_optionstrat_file(file, file_type):
             }
 
         cols = df_raw.columns
-        if 'Name' not in cols or 'Total Return $' not in cols:
+        # Flexible check for key columns (partial match)
+        col_names = [str(c) for c in cols]
+        if 'Name' not in col_names or 'Total Return $' not in col_names:
             return []
 
         for index, row in df_raw.iterrows():
             name_val = str(row['Name'])
             
-            # Identify Parent
             if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
                 if current_trade is not None:
                     res = finalize_trade(current_trade, current_legs, file_type)
@@ -251,11 +272,9 @@ def parse_optionstrat_file(file, file_type):
                 current_trade = row
                 current_legs = []
             
-            # Identify Leg
             elif name_val.startswith('.'):
                 current_legs.append(row)
         
-        # Flush last trade
         if current_trade is not None:
              res = finalize_trade(current_trade, current_legs, file_type)
              if res: parsed_trades.append(res)
@@ -291,7 +310,7 @@ def sync_data(file_list, file_type):
             trades_data = parse_optionstrat_file(file, file_type)
             
             if not trades_data:
-                log.append(f"⚠️ {file.name}: Skipped (No valid trades found)")
+                log.append(f"⚠️ {file.name}: Skipped (No valid trades found - Check Header)")
                 continue
 
             for t in trades_data:
@@ -318,6 +337,7 @@ def sync_data(file_list, file_type):
                     
                     old_put = old_put if old_put else 0.0
                     old_call = old_call if old_call else 0.0
+                    old_iv = old_iv if old_iv else 0.0
 
                     final_theta = t['theta'] if t['theta'] != 0 else old_theta
                     final_delta = t['delta'] if t['delta'] != 0 else old_delta
@@ -894,9 +914,13 @@ with tab3:
                     st.plotly_chart(fig_delta, use_container_width=True)
                 with g2:
                      if 'IV' in active_trades.columns:
-                        fig_iv = px.scatter(active_trades, x='IV', y='Vega', size='Debit', color='Strategy',
-                                            title="IV vs Vega Exposure", hover_data=['Name'])
-                        st.plotly_chart(fig_iv, use_container_width=True)
+                        # Check if data exists
+                        if active_trades['IV'].sum() == 0:
+                            st.warning("⚠️ IV data is all zeros. Did you re-sync your active files?")
+                        else:
+                            fig_iv = px.scatter(active_trades, x='IV', y='Vega', size='Debit', color='Strategy',
+                                                title="IV vs Vega Exposure", hover_data=['Name'])
+                            st.plotly_chart(fig_iv, use_container_width=True)
                 
                 st.divider()
                 st.markdown("##### 3. Capital Velocity (Lazy vs. Fast Money)")
@@ -1066,4 +1090,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v95.0 | Active Greeks Lab & Leg Attribution")
+    st.caption("Allantis Trade Guardian v96.0 | Robust Excel Parser & Greeks")
