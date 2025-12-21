@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v91.4 (Fix: Adaptive P&L Solver with Correct Formula)")
+st.info("✅ RUNNING VERSION: v91.5 (Fix: OptionStrat Combined Symbol/Qty Parser)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -98,7 +98,8 @@ def get_strategy(group_name, trade_name=""):
 def clean_num(x):
     try:
         s = str(x).strip()
-        if not s or s.lower() == 'nan' or s == '-': return 0.0
+        if not s or s.lower() in ['nan', 'none', '', '-']: return 0.0
+        # Remove currency symbols and commas
         val = float(s.replace('$', '').replace(',', '').replace('%', ''))
         return val
     except: return 0.0
@@ -124,11 +125,11 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- ADAPTIVE PARSER (SOLVER) ---
-def read_and_parse_optionstrat(file, file_type="Active"):
+# --- SMART FILE READER & PARSER ---
+def read_and_parse_optionstrat(file, file_type):
     """
-    Advanced parser that solves for the correct P&L formula by comparing 
-    leg sums to the official parent P&L.
+    Parses OptionStrat files with STRICT separation of logic for Active vs History files.
+    Robustly extracts quantity even if combined with symbol.
     """
     try:
         # 1. Read Raw Data
@@ -159,7 +160,7 @@ def read_and_parse_optionstrat(file, file_type="Active"):
         
         parsed_trades = []
         current_trade = None
-        current_legs = [] # Buffer to hold legs until we close the trade
+        current_legs = [] 
         
         def get_val(r, col_name, default=0):
             if col_name in df.columns:
@@ -173,12 +174,10 @@ def read_and_parse_optionstrat(file, file_type="Active"):
 
             # PARENT ROW
             if not col0.startswith('.'):
-                # Process Previous Trade before starting new one
                 if current_trade: 
-                    solve_and_finalize_trade(current_trade, current_legs)
+                    finalize_trade_pnl(current_trade, current_legs, file_type)
                     parsed_trades.append(current_trade)
                 
-                # New Trade Init
                 created_at = row.get('Created At')
                 try: 
                     start_dt = pd.to_datetime(created_at)
@@ -219,7 +218,7 @@ def read_and_parse_optionstrat(file, file_type="Active"):
                     'name': name, 'strategy': strat, 'start_dt': start_dt, 'exit_dt': exit_dt,
                     'debit': debit, 'lot_size': lot_size, 'pnl': pnl,
                     'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
-                    'call_pnl': 0.0, 'put_pnl': 0.0 # Will be filled by solver
+                    'call_pnl': 0.0, 'put_pnl': 0.0 
                 }
                 current_legs = []
 
@@ -227,11 +226,43 @@ def read_and_parse_optionstrat(file, file_type="Active"):
             elif col0.startswith('.') and current_trade is not None:
                 try:
                     symbol = col0
-                    qty = clean_num(row.iloc[1])
-                    entry = clean_num(row.iloc[2])
-                    current = clean_num(row.iloc[3])
-                    close = clean_num(row.iloc[4])
                     
+                    # Find quantity in the row - it might be embedded with symbol or in a separate column
+                    qty = 0
+                    entry = 0
+                    current = 0
+                    close = 0
+                    
+                    # Try to extract from known column names first
+                    if 'Quantity' in df.columns:
+                        qty = clean_num(row.get('Quantity', 0))
+                    else:
+                        # Fallback: scan row for quantity (usually small integer)
+                        for val in row.iloc[1:6]:
+                            val_str = str(val).strip()
+                            if val_str and not val_str.startswith('$'):
+                                try:
+                                    test_qty = float(val_str.replace(',', ''))
+                                    if -100 < test_qty < 100 and test_qty != 0:  # Reasonable qty range
+                                        qty = test_qty
+                                        break
+                                except: continue
+                    
+                    # Get prices - look for $ values
+                    price_cols = []
+                    for i, val in enumerate(row.iloc[1:10]):
+                        val_str = str(val).strip()
+                        if '$' in val_str or (val_str.replace('.', '').replace(',', '').replace('-', '').isdigit() and '.' in val_str):
+                            price_cols.append(clean_num(val))
+                    
+                    # Assign prices based on what we found
+                    if len(price_cols) >= 2:
+                        entry = price_cols[0]
+                        current = price_cols[1]
+                        if len(price_cols) >= 3:
+                            close = price_cols[2]
+                    
+                    # Determine exit price
                     exit_price = 0.0
                     if file_type == "Active":
                         exit_price = current if current > 0 else 0.0
@@ -245,17 +276,19 @@ def read_and_parse_optionstrat(file, file_type="Active"):
                     if match: is_call = (match.group(1) == 'C')
                     else: is_call = ('C' in symbol and 'P' not in symbol)
 
-                    current_legs.append({
-                        'qty': qty,
-                        'entry': entry,
-                        'exit': exit_price,
-                        'is_call': is_call
-                    })
-                except: continue
+                    # Only add if we have valid data
+                    if qty != 0 and entry != 0:
+                        current_legs.append({
+                            'qty': qty,
+                            'entry': entry,
+                            'exit': exit_price,
+                            'is_call': is_call
+                        })
+                except Exception as e: 
+                    continue
         
-        # Finalize last trade
         if current_trade:
-            solve_and_finalize_trade(current_trade, current_legs)
+            finalize_trade_pnl(current_trade, current_legs, file_type)
             parsed_trades.append(current_trade)
         
         return parsed_trades
@@ -264,59 +297,31 @@ def read_and_parse_optionstrat(file, file_type="Active"):
         st.error(f"Error Parsing File {file.name}: {e}")
         return []
 
-def solve_and_finalize_trade(trade, legs):
+def finalize_trade_pnl(trade, legs, file_type):
     """
-    Solves for the best P&L calculation method and attributes P&L to Calls vs Puts.
+    Calculates split P&L based on file type logic.
     """
     if not legs: return
 
-    # Methods to test
-    # 1. Standard: (Exit - Entry) * Qty * 100
-    # 2. No Mult: (Exit - Entry) * Qty
-    # 3. Total Val: (Exit - Entry) * Sign(Qty) [Assuming price cols are total value]
-    
-    results = {'A': {'call':0, 'put':0, 'diff':0}, 'B': {'call':0, 'put':0, 'diff':0}, 'C': {'call':0, 'put':0, 'diff':0}}
-    
-    target_pnl = trade['pnl']
+    calc_call_pnl = 0.0
+    calc_put_pnl = 0.0
     
     for leg in legs:
-        q, en, ex = leg['qty'], leg['entry'], leg['exit']
-        # Method A
-        p_a = (ex - en) * q * 100
-        # Method B
-        p_b = (ex - en) * q
-        # Method C
-        sign = 1 if q > 0 else -1
-        p_c = (ex - en) * sign # Profit if value went up and we are long, or down and we are short
+        qty = leg['qty']
+        entry = leg['entry']
+        exit_price = leg['exit']
+            
+        # PnL Calculation (Standard Equity/Index Option Model)
+        # Multiplier is key. SPX/Equity options = 100.
+        multiplier = 100 
+        leg_pnl = (exit_price - entry) * qty * multiplier
         
-        if leg['is_call']:
-            results['A']['call'] += p_a
-            results['B']['call'] += p_b
-            results['C']['call'] += p_c
-        else:
-            results['A']['put'] += p_a
-            results['B']['put'] += p_b
-            results['C']['put'] += p_c
+        if leg['is_call']: calc_call_pnl += leg_pnl
+        else: calc_put_pnl += leg_pnl
 
-    # Calculate Totals and Errors
-    results['A']['total'] = results['A']['call'] + results['A']['put']
-    results['B']['total'] = results['B']['call'] + results['B']['put']
-    results['C']['total'] = results['C']['call'] + results['C']['put']
-    
-    results['A']['err'] = abs(results['A']['total'] - target_pnl)
-    results['B']['err'] = abs(results['B']['total'] - target_pnl)
-    results['C']['err'] = abs(results['C']['total'] - target_pnl)
-    
-    # Pick Best Method (lowest error)
-    best = min(results, key=lambda k: results[k]['err'])
-    
-    # Assign attribution
-    # If the error is still HUGE (e.g. > 200% of P&L), then maybe legs are just missing (rolled).
-    # In that case, we can't attribute accurately.
-    # But we try our best.
-    
-    trade['call_pnl'] = results[best]['call']
-    trade['put_pnl'] = results[best]['put']
+    # Set calculated values
+    trade['call_pnl'] = calc_call_pnl
+    trade['put_pnl'] = calc_put_pnl
 
 # --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
@@ -1144,4 +1149,4 @@ with tab4:
     2.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
-    st.caption("Allantis Trade Guardian v91.4 | Deep Analytics")
+    st.caption("Allantis Trade Guardian v91.5 | Deep Analytics")
