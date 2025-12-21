@@ -8,12 +8,13 @@ import sqlite3
 import os
 import re
 from datetime import datetime
+from openpyxl import load_workbook
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v98.1 (Hyperlink Feature Added)")
+st.info("✅ RUNNING VERSION: v99.0 (Excel Hyperlink Extraction Patch)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -142,7 +143,7 @@ def parse_optionstrat_file(file, file_type):
         # --- EXCEL HANDLING ---
         if file.name.endswith(('.xlsx', '.xls')):
             try:
-                # First try reading as pure Excel
+                # First try reading as pure Excel to find header
                 df_temp = pd.read_excel(file, header=None)
                 header_row = 0
                 for i, row in df_temp.head(30).iterrows():
@@ -152,9 +153,57 @@ def parse_optionstrat_file(file, file_type):
                         break
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
+                
+                # --- HYPERLINK EXTRACTION PATCH ---
+                # Pandas reads the text "Open", we need openpyxl to get the URL
+                if 'Link' in df_raw.columns:
+                    try:
+                        file.seek(0)
+                        wb = load_workbook(file, data_only=False)
+                        sheet = wb.active
+                        
+                        # Map pandas header row to Excel row (1-based)
+                        # Excel Header Row = header_row + 1
+                        excel_header_row = header_row + 1
+                        link_col_idx = None
+                        
+                        # Find the Link column index
+                        for cell in sheet[excel_header_row]:
+                            if str(cell.value).strip() == "Link":
+                                link_col_idx = cell.col_idx
+                                break
+                        
+                        if link_col_idx:
+                            links = []
+                            # Iterate rows matching df_raw
+                            for i in range(len(df_raw)):
+                                # Data starts after header
+                                excel_row_idx = excel_header_row + 1 + i
+                                cell = sheet.cell(row=excel_row_idx, column=link_col_idx)
+                                
+                                url = ""
+                                if cell.hyperlink:
+                                    url = cell.hyperlink.target
+                                elif cell.value and str(cell.value).startswith('=HYPERLINK'):
+                                    try:
+                                        # Extract from formula: =HYPERLINK("https://...", "Open")
+                                        parts = str(cell.value).split('"')
+                                        if len(parts) > 1:
+                                            url = parts[1]
+                                    except: pass
+                                
+                                # Fallback to existing value if no url found, or empty string
+                                links.append(url if url else "")
+                            
+                            # Assign extracted URLs back to dataframe
+                            df_raw['Link'] = links
+                            
+                    except Exception as e:
+                        # Fail silently on link extraction if structure is too complex
+                        pass
+
             except Exception:
-                # Fallback: Sometimes CSVs are named .xlsx
-                pass
+                pass # Fallback to CSV handling
 
         # --- CSV HANDLING (Fallback or Default) ---
         if df_raw is None:
@@ -184,9 +233,9 @@ def parse_optionstrat_file(file, file_type):
             group = str(trade_data.get('Group', ''))
             strat = get_strategy(group, name)
             
-            # Extract Link
+            # Extract Link (Now potentially holding the real URL)
             link = str(trade_data.get('Link', ''))
-            if link == 'nan': link = ""
+            if link == 'nan' or link == 'Open': link = "" # Clean up failed extractions
             
             pnl = clean_num(trade_data.get('Total Return $', 0))
             debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
@@ -227,13 +276,11 @@ def parse_optionstrat_file(file, file_type):
             
             if f_type == "History":
                 for leg in legs:
-                    # Defensive check if leg row is valid
                     if len(leg) < 5: continue
                     sym = str(leg.iloc[0]) 
                     if not sym.startswith('.'): continue
                     
                     try:
-                        # Position based mapping
                         qty = clean_num(leg.iloc[1])
                         entry = clean_num(leg.iloc[2])
                         close_price = clean_num(leg.iloc[4])
@@ -348,6 +395,7 @@ def sync_data(file_list, file_type):
                     
                     final_put = t['put_pnl'] if t['put_pnl'] != 0 else old_put
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
+                    # Update link if we have a valid new one, otherwise keep old
                     final_link = t['link'] if t['link'] != "" else old_link
 
                     if file_type == "History":
@@ -442,10 +490,9 @@ def load_data():
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
         
-        # --- AGGRESSIVE DATA SCRUBBING (Fixes TypeError) ---
+        # --- AGGRESSIVE DATA SCRUBBING ---
         numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
         for c in numeric_cols:
-            # Force everything to numeric, turn errors to NaN, then fill with 0.0
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
@@ -636,7 +683,9 @@ with tab1:
                         sig = row['Signal_Type']
                         color = {"SUCCESS":"green", "ERROR":"red", "WARNING":"orange", "INFO":"blue"}.get(sig, "grey")
                         # HYPERLINK FEATURE
-                        name_display = f"[{row['Name']}]({row['Link']})" if row['Link'] else row['Name']
+                        # Check if link is valid URL (starts with http)
+                        is_valid_link = str(row['Link']).startswith('http')
+                        name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
                         st.markdown(f"**{name_display}**: :{color}[{row['Action']}] | *{row['Strategy']}*")
                 with t2:
                     csv_todo = todo_df[['Name', 'Action', 'P&L', 'Days Held']].to_csv(index=False).encode('utf-8')
@@ -1098,4 +1147,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v98.1 | Hyperlink Feature Added")
+    st.caption("Allantis Trade Guardian v99.0 | Excel Hyperlink Extraction Patch")
