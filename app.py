@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v98.0 (Aggressive Data Cleaner Patch)")
+st.info("✅ RUNNING VERSION: v98.1 (Hyperlink Feature Added)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -45,7 +45,8 @@ def init_db():
                     parent_id TEXT,
                     put_pnl REAL,
                     call_pnl REAL,
-                    iv REAL
+                    iv REAL,
+                    link TEXT
                 )''')
     
     # SNAPSHOTS TABLE
@@ -66,7 +67,15 @@ def init_db():
 def migrate_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    cols = [('tags', 'TEXT'), ('parent_id', 'TEXT'), ('put_pnl', 'REAL'), ('call_pnl', 'REAL'), ('iv', 'REAL')]
+    # Add new columns if they don't exist
+    cols = [
+        ('tags', 'TEXT'), 
+        ('parent_id', 'TEXT'), 
+        ('put_pnl', 'REAL'), 
+        ('call_pnl', 'REAL'), 
+        ('iv', 'REAL'),
+        ('link', 'TEXT')
+    ]
     for col_name, col_type in cols:
         try: c.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
         except: pass
@@ -175,6 +184,10 @@ def parse_optionstrat_file(file, file_type):
             group = str(trade_data.get('Group', ''))
             strat = get_strategy(group, name)
             
+            # Extract Link
+            link = str(trade_data.get('Link', ''))
+            if link == 'nan': link = ""
+            
             pnl = clean_num(trade_data.get('Total Return $', 0))
             debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
             
@@ -241,7 +254,7 @@ def parse_optionstrat_file(file, file_type):
                 'exit_dt': exit_dt, 'days_held': days_held, 'debit': debit,
                 'lot_size': lot_size, 'pnl': pnl, 
                 'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
-                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl
+                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link
             }
 
         cols = df_raw.columns
@@ -305,26 +318,27 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                c.execute("SELECT status, theta, delta, gamma, vega, put_pnl, call_pnl, iv FROM trades WHERE id = ?", (trade_id,))
+                c.execute("SELECT status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
                 status = "Active" if file_type == "Active" else "Expired"
                 
                 if existing is None:
                     c.execute('''INSERT INTO trades 
-                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id, put_pnl, call_pnl, iv)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id, put_pnl, call_pnl, iv, link)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (trade_id, t['name'], t['strategy'], status, t['start_dt'].date(), 
                          t['exit_dt'].date() if t['exit_dt'] else None, 
                          t['days_held'], t['debit'], t['lot_size'], t['pnl'], 
-                         t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv']))
+                         t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link']))
                     count_new += 1
                 else:
-                    old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv = existing
+                    old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv, old_link = existing
                     
                     old_put = old_put if old_put else 0.0
                     old_call = old_call if old_call else 0.0
                     old_iv = old_iv if old_iv else 0.0
+                    old_link = old_link if old_link else ""
 
                     final_theta = t['theta'] if t['theta'] != 0 else old_theta
                     final_delta = t['delta'] if t['delta'] != 0 else old_delta
@@ -334,20 +348,21 @@ def sync_data(file_list, file_type):
                     
                     final_put = t['put_pnl'] if t['put_pnl'] != 0 else old_put
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
+                    final_link = t['link'] if t['link'] != "" else old_link
 
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?
                             WHERE id=?''', 
                             (t['pnl'], status, t['exit_dt'].date() if t['exit_dt'] else None, t['days_held'], 
-                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, trade_id))
+                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, trade_id))
                         count_update += 1
                     
                     elif old_status in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, status='Active', exit_date=?
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?
                             WHERE id=?''', 
-                            (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, 
+                            (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, final_link, 
                              t['exit_dt'].date() if t['exit_dt'] else None, trade_id))
                         count_update += 1
                         
@@ -419,13 +434,13 @@ def load_data():
             'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes',
             'tags': 'Tags', 'parent_id': 'Parent ID', 
-            'put_pnl': 'Put P&L', 'call_pnl': 'Call P&L', 'iv': 'IV'
+            'put_pnl': 'Put P&L', 'call_pnl': 'Call P&L', 'iv': 'IV', 'link': 'Link'
         })
         
-        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV']
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link']
         for col in required_cols:
             if col not in df.columns:
-                df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
+                df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
         
         # --- AGGRESSIVE DATA SCRUBBING (Fixes TypeError) ---
         numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
@@ -620,7 +635,9 @@ with tab1:
                     for _, row in todo_df.iterrows():
                         sig = row['Signal_Type']
                         color = {"SUCCESS":"green", "ERROR":"red", "WARNING":"orange", "INFO":"blue"}.get(sig, "grey")
-                        st.markdown(f"**{row['Name']}**: :{color}[{row['Action']}] | *{row['Strategy']}*")
+                        # HYPERLINK FEATURE
+                        name_display = f"[{row['Name']}]({row['Link']})" if row['Link'] else row['Name']
+                        st.markdown(f"**{name_display}**: :{color}[{row['Action']}] | *{row['Strategy']}*")
                 with t2:
                     csv_todo = todo_df[['Name', 'Action', 'P&L', 'Days Held']].to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Queue", csv_todo, "todo_list.csv", "text/csv")
@@ -629,10 +646,11 @@ with tab1:
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
                 st.caption("Edit 'Notes', 'Tags' or 'Parent ID' (for Linking).")
-                display_cols = ['id', 'Name', 'Strategy', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
+                    "Link": st.column_config.LinkColumn("OS Link", display_text="Open 🔗"),
                     "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
                     "Theta/Cap %": st.column_config.NumberColumn("Θ/Cap", format="%.2f%%", disabled=True),
@@ -1080,4 +1098,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v98.0 | Aggressive Data Cleaner Patch")
+    st.caption("Allantis Trade Guardian v98.1 | Hyperlink Feature Added")
