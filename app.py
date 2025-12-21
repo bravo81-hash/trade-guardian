@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v96.0 (Robust Excel Parser & Greeks)")
+st.info("✅ RUNNING VERSION: v97.0 (Type-Safe Analytics Patch)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -129,24 +129,17 @@ def parse_optionstrat_file(file, file_type):
     try:
         # --- EXCEL HANDLING ---
         if file.name.endswith(('.xlsx', '.xls')):
-            # OptionStrat Excel exports often have metadata in top rows.
-            # We must scan for the real header row containing "Name" and "Total Return".
             try:
                 df_temp = pd.read_excel(file, header=None)
                 header_row = 0
                 for i, row in df_temp.head(30).iterrows():
-                    # Convert row to list of strings to search
                     row_vals = [str(v).strip() for v in row.values]
-                    # Check for key columns
                     if "Name" in row_vals and "Total Return $" in row_vals:
                         header_row = i
                         break
-                
-                # Reload with the correct header
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
             except Exception as e:
-                # Fallback mechanism if it's actually a CSV named .xlsx
                 file.seek(0)
                 content = file.getvalue().decode("utf-8", errors='ignore')
                 lines = content.split('\n')
@@ -219,20 +212,15 @@ def parse_optionstrat_file(file, file_type):
             elif strat == 'SMSF':
                 if debit > 12000: lot_size = 2
 
-            # --- ROBUST LEG PNL CALCULATION ---
             put_pnl = 0.0
             call_pnl = 0.0
             
             if f_type == "History":
                 for leg in legs:
-                    sym = str(leg.iloc[0]) # Name / Symbol
+                    sym = str(leg.iloc[0]) 
                     if not sym.startswith('.'): continue
                     
                     try:
-                        # POSITION-BASED MAPPING
-                        # Col 1: Quantity
-                        # Col 2: Entry Price
-                        # Col 4: Close Price
                         qty = clean_num(leg.iloc[1])
                         entry = clean_num(leg.iloc[2])
                         close_price = clean_num(leg.iloc[4])
@@ -257,7 +245,6 @@ def parse_optionstrat_file(file, file_type):
             }
 
         cols = df_raw.columns
-        # Flexible check for key columns (partial match)
         col_names = [str(c) for c in cols]
         if 'Name' not in col_names or 'Total Return $' not in col_names:
             return []
@@ -440,11 +427,13 @@ def load_data():
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
         
+        # --- TYPE ENFORCEMENT (CRITICAL FIX) ---
+        numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
+        for c in numeric_cols:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
+
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
-        df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
-        df['P&L'] = pd.to_numeric(df['P&L'], errors='coerce').fillna(0)
-        df['Days Held'] = pd.to_numeric(df['Days Held'], errors='coerce').fillna(1)
         
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
@@ -962,7 +951,7 @@ with tab3:
                         'Put P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 
                         'P&L': "${:,.0f}", 'Calc Sum': "${:,.0f}", 'Diff': "${:,.0f}"
                     })
-                    .map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Put P&L', 'Call P&L', 'P&L']),
+                    .map(lambda x: 'color: green' if isinstance(x, (int, float)) and x > 0 else ('color: red' if isinstance(x, (int, float)) and x < 0 else ''), subset=['Put P&L', 'Call P&L', 'P&L']),
                     use_container_width=True
                 )
                 st.caption("Note: 'P&L' is the Broker Total (includes fees/slippage). 'Calc Sum' is the raw sum of leg price changes. Small 'Diff' is normal (fees). Large 'Diff' means leg parsing issue.")
@@ -1090,4 +1079,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v96.0 | Robust Excel Parser & Greeks")
+    st.caption("Allantis Trade Guardian v97.0 | Type-Safe Analytics Patch")
