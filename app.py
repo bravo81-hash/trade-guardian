@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v97.0 (Type-Safe Analytics Patch)")
+st.info("✅ RUNNING VERSION: v98.0 (Aggressive Data Cleaner Patch)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -97,7 +97,9 @@ def get_strategy(group_name, trade_name=""):
 def clean_num(x):
     try:
         if pd.isna(x) or str(x).strip() == "": return 0.0
-        val = float(str(x).replace('$', '').replace(',', '').replace('%', ''))
+        # Remove common currency symbols and commas
+        val_str = str(x).replace('$', '').replace(',', '').replace('%', '').strip()
+        val = float(val_str)
         if np.isnan(val): return 0.0
         return val
     except: return 0.0
@@ -127,9 +129,11 @@ def extract_ticker(name):
 # --- SMART FILE PARSER ---
 def parse_optionstrat_file(file, file_type):
     try:
+        df_raw = None
         # --- EXCEL HANDLING ---
         if file.name.endswith(('.xlsx', '.xls')):
             try:
+                # First try reading as pure Excel
                 df_temp = pd.read_excel(file, header=None)
                 header_row = 0
                 for i, row in df_temp.head(30).iterrows():
@@ -139,21 +143,14 @@ def parse_optionstrat_file(file, file_type):
                         break
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
-            except Exception as e:
-                file.seek(0)
-                content = file.getvalue().decode("utf-8", errors='ignore')
-                lines = content.split('\n')
-                header_row = 0
-                for i, line in enumerate(lines[:30]):
-                    if "Name" in line and "Total Return" in line:
-                        header_row = i
-                        break
-                file.seek(0)
-                df_raw = pd.read_csv(file, skiprows=header_row)
+            except Exception:
+                # Fallback: Sometimes CSVs are named .xlsx
+                pass
 
-        # --- CSV HANDLING ---
-        else:
-            content = file.getvalue().decode("utf-8")
+        # --- CSV HANDLING (Fallback or Default) ---
+        if df_raw is None:
+            file.seek(0)
+            content = file.getvalue().decode("utf-8", errors='ignore')
             lines = content.split('\n')
             header_row = 0
             for i, line in enumerate(lines[:30]):
@@ -217,10 +214,13 @@ def parse_optionstrat_file(file, file_type):
             
             if f_type == "History":
                 for leg in legs:
+                    # Defensive check if leg row is valid
+                    if len(leg) < 5: continue
                     sym = str(leg.iloc[0]) 
                     if not sym.startswith('.'): continue
                     
                     try:
+                        # Position based mapping
                         qty = clean_num(leg.iloc[1])
                         entry = clean_num(leg.iloc[2])
                         close_price = clean_num(leg.iloc[4])
@@ -297,7 +297,7 @@ def sync_data(file_list, file_type):
             trades_data = parse_optionstrat_file(file, file_type)
             
             if not trades_data:
-                log.append(f"⚠️ {file.name}: Skipped (No valid trades found - Check Header)")
+                log.append(f"⚠️ {file.name}: Skipped (No valid trades found)")
                 continue
 
             for t in trades_data:
@@ -427,9 +427,10 @@ def load_data():
             if col not in df.columns:
                 df[col] = "" if col in ['Notes', 'Tags', 'Parent ID'] else 0.0
         
-        # --- TYPE ENFORCEMENT (CRITICAL FIX) ---
+        # --- AGGRESSIVE DATA SCRUBBING (Fixes TypeError) ---
         numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
         for c in numeric_cols:
+            # Force everything to numeric, turn errors to NaN, then fill with 0.0
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
@@ -1079,4 +1080,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v97.0 | Type-Safe Analytics Patch")
+    st.caption("Allantis Trade Guardian v98.0 | Aggressive Data Cleaner Patch")
