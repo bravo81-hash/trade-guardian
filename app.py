@@ -14,7 +14,7 @@ from openpyxl import load_workbook
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v99.1 (Hyperlinks in Strategy Performance)")
+st.info("✅ RUNNING VERSION: v100.0 (Smart Dashboard & Collapsible Queue)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -68,7 +68,6 @@ def init_db():
 def migrate_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Add new columns if they don't exist
     cols = [
         ('tags', 'TEXT'), 
         ('parent_id', 'TEXT'), 
@@ -107,7 +106,6 @@ def get_strategy(group_name, trade_name=""):
 def clean_num(x):
     try:
         if pd.isna(x) or str(x).strip() == "": return 0.0
-        # Remove common currency symbols and commas
         val_str = str(x).replace('$', '').replace(',', '').replace('%', '').strip()
         val = float(val_str)
         if np.isnan(val): return 0.0
@@ -140,10 +138,8 @@ def extract_ticker(name):
 def parse_optionstrat_file(file, file_type):
     try:
         df_raw = None
-        # --- EXCEL HANDLING ---
         if file.name.endswith(('.xlsx', '.xls')):
             try:
-                # First try reading as pure Excel to find header
                 df_temp = pd.read_excel(file, header=None)
                 header_row = 0
                 for i, row in df_temp.head(30).iterrows():
@@ -154,55 +150,34 @@ def parse_optionstrat_file(file, file_type):
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
                 
-                # --- HYPERLINK EXTRACTION PATCH ---
                 if 'Link' in df_raw.columns:
                     try:
                         file.seek(0)
                         wb = load_workbook(file, data_only=False)
                         sheet = wb.active
-                        
-                        # Map pandas header row to Excel row (1-based)
                         excel_header_row = header_row + 1
                         link_col_idx = None
-                        
-                        # Find the Link column index
                         for cell in sheet[excel_header_row]:
                             if str(cell.value).strip() == "Link":
                                 link_col_idx = cell.col_idx
                                 break
-                        
                         if link_col_idx:
                             links = []
-                            # Iterate rows matching df_raw
                             for i in range(len(df_raw)):
-                                # Data starts after header
                                 excel_row_idx = excel_header_row + 1 + i
                                 cell = sheet.cell(row=excel_row_idx, column=link_col_idx)
-                                
                                 url = ""
-                                if cell.hyperlink:
-                                    url = cell.hyperlink.target
+                                if cell.hyperlink: url = cell.hyperlink.target
                                 elif cell.value and str(cell.value).startswith('=HYPERLINK'):
                                     try:
-                                        # Extract from formula: =HYPERLINK("https://...", "Open")
                                         parts = str(cell.value).split('"')
-                                        if len(parts) > 1:
-                                            url = parts[1]
+                                        if len(parts) > 1: url = parts[1]
                                     except: pass
-                                
-                                # Fallback to existing value if no url found
                                 links.append(url if url else "")
-                            
-                            # Assign extracted URLs back to dataframe
                             df_raw['Link'] = links
-                            
-                    except Exception as e:
-                        pass
+                    except: pass
+            except: pass
 
-            except Exception:
-                pass # Fallback to CSV handling
-
-        # --- CSV HANDLING (Fallback or Default) ---
         if df_raw is None:
             file.seek(0)
             content = file.getvalue().decode("utf-8", errors='ignore')
@@ -229,14 +204,11 @@ def parse_optionstrat_file(file, file_type):
 
             group = str(trade_data.get('Group', ''))
             strat = get_strategy(group, name)
-            
-            # Extract Link (Now potentially holding the real URL)
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
             
             pnl = clean_num(trade_data.get('Total Return $', 0))
             debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
-            
             theta = clean_num(trade_data.get('Theta', 0))
             delta = clean_num(trade_data.get('Delta', 0))
             gamma = clean_num(trade_data.get('Gamma', 0))
@@ -276,23 +248,18 @@ def parse_optionstrat_file(file, file_type):
                     if len(leg) < 5: continue
                     sym = str(leg.iloc[0]) 
                     if not sym.startswith('.'): continue
-                    
                     try:
                         qty = clean_num(leg.iloc[1])
                         entry = clean_num(leg.iloc[2])
                         close_price = clean_num(leg.iloc[4])
-                        
                         leg_pnl = (close_price - entry) * qty * 100
-                        
                         if 'P' in sym and 'C' not in sym: put_pnl += leg_pnl
                         elif 'C' in sym and 'P' not in sym: call_pnl += leg_pnl
                         elif re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
                         elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
-                            
-                    except Exception as e: pass
+                    except: pass
             
             t_id = generate_id(name, strat, start_dt)
-            
             return {
                 'id': t_id, 'name': name, 'strategy': strat, 'start_dt': start_dt,
                 'exit_dt': exit_dt, 'days_held': days_held, 'debit': debit,
@@ -308,23 +275,19 @@ def parse_optionstrat_file(file, file_type):
 
         for index, row in df_raw.iterrows():
             name_val = str(row['Name'])
-            
             if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
                 if current_trade is not None:
                     res = finalize_trade(current_trade, current_legs, file_type)
                     if res: parsed_trades.append(res)
                 current_trade = row
                 current_legs = []
-            
             elif name_val.startswith('.'):
                 current_legs.append(row)
         
         if current_trade is not None:
              res = finalize_trade(current_trade, current_legs, file_type)
              if res: parsed_trades.append(res)
-             
         return parsed_trades
-
     except Exception as e:
         print(f"Parser Error: {e}")
         return []
@@ -333,26 +296,21 @@ def parse_optionstrat_file(file, file_type):
 def sync_data(file_list, file_type):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
-    
     conn = get_db_connection()
     c = conn.cursor()
-    
     db_active_ids = set()
     if file_type == "Active":
         try:
             current_active = pd.read_sql("SELECT id FROM trades WHERE status = 'Active'", conn)
             db_active_ids = set(current_active['id'].tolist())
         except: pass
-    
     file_found_ids = set()
 
     for file in file_list:
         count_new = 0
         count_update = 0
-        
         try:
             trades_data = parse_optionstrat_file(file, file_type)
-            
             if not trades_data:
                 log.append(f"⚠️ {file.name}: Skipped (No valid trades found)")
                 continue
@@ -364,7 +322,6 @@ def sync_data(file_list, file_type):
                 
                 c.execute("SELECT status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
-                
                 status = "Active" if file_type == "Active" else "Expired"
                 
                 if existing is None:
@@ -378,7 +335,6 @@ def sync_data(file_list, file_type):
                     count_new += 1
                 else:
                     old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv, old_link = existing
-                    
                     old_put = old_put if old_put else 0.0
                     old_call = old_call if old_call else 0.0
                     old_iv = old_iv if old_iv else 0.0
@@ -389,10 +345,8 @@ def sync_data(file_list, file_type):
                     final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
                     final_vega = t['vega'] if t['vega'] != 0 else old_vega
                     final_iv = t['iv'] if t['iv'] != 0 else old_iv
-                    
                     final_put = t['put_pnl'] if t['put_pnl'] != 0 else old_put
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
-                    # Update link if we have a valid new one, otherwise keep old
                     final_link = t['link'] if t['link'] != "" else old_link
 
                     if file_type == "History":
@@ -402,7 +356,6 @@ def sync_data(file_list, file_type):
                             (t['pnl'], status, t['exit_dt'].date() if t['exit_dt'] else None, t['days_held'], 
                              final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, trade_id))
                         count_update += 1
-                    
                     elif old_status in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
                             pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?
@@ -410,16 +363,13 @@ def sync_data(file_list, file_type):
                             (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, final_link, 
                              t['exit_dt'].date() if t['exit_dt'] else None, trade_id))
                         count_update += 1
-                        
                 if file_type == "Active":
                     today = datetime.now().date()
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
                     if not c.fetchone():
                         c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (?,?,?,?)",
                                   (trade_id, today, t['pnl'], t['days_held']))
-
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
-            
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
             
@@ -429,7 +379,6 @@ def sync_data(file_list, file_type):
             placeholders = ','.join('?' for _ in missing_ids)
             c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
             log.append(f"⚠️ Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
-
     conn.commit()
     conn.close()
     return log
@@ -458,18 +407,14 @@ def load_data():
     conn = get_db_connection()
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
-        
         snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
             vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
             df = df.merge(vol_df, left_on='id', right_on='trade_id', how='left')
             df['P&L Vol'] = df['P&L Vol'].fillna(0)
-        else:
-            df['P&L Vol'] = 0.0
-
-    except Exception as e:
-        return pd.DataFrame()
+        else: df['P&L Vol'] = 0.0
+    except Exception as e: return pd.DataFrame()
     finally: conn.close()
     
     if not df.empty:
@@ -484,17 +429,14 @@ def load_data():
         
         required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link']
         for col in required_cols:
-            if col not in df.columns:
-                df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
+            if col not in df.columns: df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
         
-        # --- AGGRESSIVE DATA SCRUBBING ---
         numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
         for c in numeric_cols:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
-        
         df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
@@ -502,7 +444,6 @@ def load_data():
         df['Theta Pot.'] = df['Theta'] * df['Days Held']
         df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
-        
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
         def get_grade(row):
@@ -525,7 +466,6 @@ def load_data():
             return pd.Series([grade, reason])
 
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
-        
     return df
 
 @st.cache_data(ttl=300)
@@ -629,6 +569,27 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
             if pnl > 1000: return "PROFIT CHECK", "SUCCESS"
     return "", "NONE"
 
+def calc_exit_score(row, benchmarks):
+    """Calculates a 0-100 score on urgency to close."""
+    score = 0
+    strat = row['Strategy']
+    bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}))
+    
+    # 1. Profit Target (Max 50)
+    target = bench.get('pnl', 1000) * regime_mult
+    if row['P&L'] >= target: score += 50
+    elif row['P&L'] >= target * 0.8: score += 30
+    
+    # 2. Time Drag (Max 30)
+    avg_days = bench.get('dit', 40)
+    if row['Days Held'] > avg_days * 1.2: score += 20
+    if strat == '130/160' and row['Days Held'] > 25: score += 30 # Hard rule
+    
+    # 3. Efficiency (Max 20)
+    if row['Theta Eff.'] < 0.5: score += 20
+    
+    return min(100, score)
+
 # --- MAIN APP ---
 df = load_data()
 benchmarks = BASE_CONFIG.copy()
@@ -657,48 +618,62 @@ with tab1:
         if active_df.empty:
             st.info("📭 No active trades.")
         else:
-            port_yield = active_df['Daily Yield %'].mean()
-            if port_yield < 0.10: st.sidebar.error(f"🚨 Yield Critical: {port_yield:.2f}%")
-            elif port_yield < 0.15: st.sidebar.warning(f"⚠️ Yield Low: {port_yield:.2f}%")
-            else: st.sidebar.success(f"✅ Yield Healthy: {port_yield:.2f}%")
+            # --- PORTFOLIO WIDGET ---
+            tot_theta = active_df['Theta'].sum()
+            tot_debit = active_df['Debit'].sum()
+            eff_score = (tot_theta / tot_debit * 100) if tot_debit > 0 else 0
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Daily Theta Income", f"${tot_theta:,.0f}")
+            c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
+            c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
+            c4.metric("Active Campaigns", len(active_df))
+            st.divider()
 
             act_list, sig_list = [], []
+            score_list = []
             for _, row in active_df.iterrows():
                 act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks)
+                score = calc_exit_score(row, benchmarks)
                 act_list.append(act)
                 sig_list.append(sig)
+                score_list.append(score)
+                
             active_df['Action'] = act_list
             active_df['Signal_Type'] = sig_list
+            active_df['Exit Score'] = score_list
 
-            # --- ACTION QUEUE ---
+            # --- ACTION QUEUE (Collapsible) ---
             todo_df = active_df[active_df['Action'] != ""]
-            if not todo_df.empty:
-                st.markdown("### ✅ Action Queue")
-                t1, t2 = st.columns([3, 1])
-                with t1:
-                    for _, row in todo_df.iterrows():
-                        sig = row['Signal_Type']
-                        color = {"SUCCESS":"green", "ERROR":"red", "WARNING":"orange", "INFO":"blue"}.get(sig, "grey")
-                        # HYPERLINK FEATURE
-                        # Check if link is valid URL (starts with http)
-                        is_valid_link = str(row['Link']).startswith('http')
-                        name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
-                        st.markdown(f"**{name_display}**: :{color}[{row['Action']}] | *{row['Strategy']}*")
-                with t2:
-                    csv_todo = todo_df[['Name', 'Action', 'P&L', 'Days Held']].to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download Queue", csv_todo, "todo_list.csv", "text/csv")
-                st.divider()
+            with st.expander(f"✅ Action Queue ({len(todo_df)})", expanded=False):
+                if not todo_df.empty:
+                    t1, t2 = st.columns([3, 1])
+                    with t1:
+                        for _, row in todo_df.iterrows():
+                            sig = row['Signal_Type']
+                            color = {"SUCCESS":"green", "ERROR":"red", "WARNING":"orange", "INFO":"blue"}.get(sig, "grey")
+                            is_valid_link = str(row['Link']).startswith('http')
+                            name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
+                            st.markdown(f"**{name_display}**: :{color}[{row['Action']}] (Score: {row['Exit Score']}) | *{row['Strategy']}*")
+                    with t2:
+                        csv_todo = todo_df[['Name', 'Action', 'P&L', 'Days Held']].to_csv(index=False).encode('utf-8')
+                        st.download_button("📥 Download Queue", csv_todo, "todo_list.csv", "text/csv")
+                else:
+                    st.info("No actions required.")
+
+            st.divider()
 
             # --- MASTER JOURNAL ---
             with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
                 st.caption("Edit 'Notes', 'Tags' or 'Parent ID' (for Linking).")
-                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Exit Score', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
                     "Link": st.column_config.LinkColumn("OS Link", display_text="Open 🔗"),
                     "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
+                    "Exit Score": st.column_config.ProgressColumn("Exit Urgency", min_value=0, max_value=100, format="%d"),
                     "Theta/Cap %": st.column_config.NumberColumn("Θ/Cap", format="%.2f%%", disabled=True),
                     "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True, help="Ratio of P&L to Total Theta Potential. >1.0 is excellent."),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
@@ -730,15 +705,6 @@ with tab1:
             strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200", "💼 SMSF"])
 
             with strat_tabs[0]:
-                with st.expander("📊 Portfolio Risk", expanded=True):
-                    total_delta = active_df['Delta'].sum()
-                    total_theta = active_df['Theta'].sum()
-                    total_cap = active_df['Debit'].sum()
-                    r1, r2, r3 = st.columns(3)
-                    r1.metric("Net Delta", f"{total_delta:,.1f}", delta="Bullish" if total_delta > 0 else "Bearish")
-                    r2.metric("Daily Theta", f"${total_theta:,.0f}")
-                    r3.metric("Capital at Risk", f"${total_cap:,.0f}")
-
                 strat_agg = active_df.groupby('Strategy').agg({
                     'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
                     'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean' 
@@ -787,9 +753,7 @@ with tab1:
                     use_container_width=True
                 )
 
-            # STRATEGY TAB RENDERER
-            # --- ADDED 'Link' to columns ---
-            cols = ['Name', 'Link', 'Action', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+            cols = ['Name', 'Link', 'Action', 'Exit Score', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
             
             def render_tab(tab, strategy_name):
                 with tab:
@@ -806,7 +770,7 @@ with tab1:
                     
                     if not subset.empty:
                         sum_row = pd.DataFrame({
-                            'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Grade': ['-'],
+                            'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Exit Score': [0], 'Grade': ['-'],
                             'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                             'Daily Yield %': [subset['Daily Yield %'].mean()],
                             'Ann. ROI': [subset['Ann. ROI'].mean()],
@@ -845,7 +809,8 @@ with tab1:
                             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
                             use_container_width=True,
                             column_config={
-                                "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️")
+                                "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️"),
+                                "Exit Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d")
                             }
                         )
                     else: st.info("No active trades.")
@@ -1148,4 +1113,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v99.1 | Hyperlinks in Strategy Performance")
+    st.caption("Allantis Trade Guardian v100.0 | Smart Dashboard & Collapsible Queue")
