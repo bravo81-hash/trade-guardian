@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v90.0 (Deep Dive & Leg Analytics)")
+st.info("✅ RUNNING VERSION: v91.0 (Fixed Parser & Enhanced Greeks)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -113,7 +113,6 @@ def safe_fmt(val, fmt_str):
 
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
-    # Create a reasonably unique ID based on name + date
     safe_name = re.sub(r'\W+', '', str(name))
     return f"{safe_name}_{strategy}_{d_str}"
 
@@ -130,16 +129,10 @@ def extract_ticker(name):
 
 # --- SMART FILE PARSER (The Brain) ---
 def parse_optionstrat_file(file, file_type):
-    """
-    Parses the hierarchical OptionStrat CSV structure.
-    Returns a list of trade dictionaries with calculated Leg PnLs.
-    """
     try:
-        # Read file as string first to handle irregularity
         if file.name.endswith(('.xlsx', '.xls')):
-            df_raw = pd.read_excel(file) # Excel usually reads cleaner
+            df_raw = pd.read_excel(file) 
         else:
-            # CSV Handling - find the header row first
             content = file.getvalue().decode("utf-8")
             lines = content.split('\n')
             header_row = 0
@@ -148,24 +141,20 @@ def parse_optionstrat_file(file, file_type):
                     header_row = i
                     break
             
-            # Read into DataFrame
             file.seek(0)
             df_raw = pd.read_csv(file, skiprows=header_row)
 
-        # Iterate rows to group Parents and Children
         parsed_trades = []
         current_trade = None
         current_legs = []
 
-        # Helper to process a completed trade block
         def finalize_trade(trade_data, legs, f_type):
-            if not trade_data: return None
+            if not trade_data.any(): return None
             
-            # Basic Info
             name = str(trade_data.get('Name', ''))
             created = trade_data.get('Created At', '')
             try: start_dt = pd.to_datetime(created)
-            except: return None # invalid date
+            except: return None 
 
             group = str(trade_data.get('Group', ''))
             strat = get_strategy(group, name)
@@ -173,13 +162,11 @@ def parse_optionstrat_file(file, file_type):
             pnl = clean_num(trade_data.get('Total Return $', 0))
             debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
             
-            # Greeks (Parent)
             theta = clean_num(trade_data.get('Theta', 0))
             delta = clean_num(trade_data.get('Delta', 0))
             gamma = clean_num(trade_data.get('Gamma', 0))
             vega = clean_num(trade_data.get('Vega', 0))
 
-            # Expiration
             exit_dt = None
             try:
                 raw_exp = trade_data.get('Expiration')
@@ -194,7 +181,6 @@ def parse_optionstrat_file(file, file_type):
                   days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
 
-            # Lot Sizing Logic
             lot_size = 1
             if strat == '130/160':
                 if debit > 11000: lot_size = 3
@@ -210,41 +196,33 @@ def parse_optionstrat_file(file, file_type):
             put_pnl = 0.0
             call_pnl = 0.0
             
-            # Only calculate leg split for HISTORY (Closed) trades
-            # Active trades don't have reliable closing prices per leg
             if f_type == "History":
                 for leg in legs:
-                    sym = str(leg.get('Name', '')) # Name col holds symbol in leg rows
+                    sym = str(leg.iloc[0]) # Name
                     if not sym.startswith('.'): continue
                     
                     try:
-                        qty = clean_num(leg.get('Quantity', 0))
-                        entry = clean_num(leg.get('Entry Price', 0))
-                        # Use Close Price for History, Current for Active fallback (but usually inaccurate)
-                        exit_price = clean_num(leg.get('Close Price', 0)) 
+                        # POSITION-BASED MAPPING FOR LEGS
+                        # In CSV, leg rows often don't align with headers.
+                        # Col 1: Quantity (under Total Return %)
+                        # Col 2: Entry Price (under Total Return $)
+                        # Col 4: Close Price (under Expiration)
                         
-                        # Fallback for expired worthless
-                        if exit_price == 0 and f_type == "History":
-                            # Assume 0 if column is empty? 
-                            # If it's empty in CSV, clean_num returns 0.
-                            pass
+                        qty = clean_num(leg.iloc[1])
+                        entry = clean_num(leg.iloc[2])
+                        close_price = clean_num(leg.iloc[4])
 
-                        leg_pnl = (exit_price - entry) * qty * 100
+                        # Logic: (Exit - Entry) * Qty * 100
+                        # Works for both long (pos Qty) and short (neg Qty)
+                        leg_pnl = (close_price - entry) * qty * 100
                         
-                        # Identify Put vs Call
-                        # SPX Format usually: .SPX[Date][P/C][Strike] e.g. .SPX260320P5675
-                        if 'P' in sym and 'C' not in sym: # Simple heuristic
-                            put_pnl += leg_pnl
-                        elif 'C' in sym and 'P' not in sym:
-                            call_pnl += leg_pnl
-                        else:
-                            # Regex fallback
-                            if re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
-                            elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
+                        if 'P' in sym and 'C' not in sym: put_pnl += leg_pnl
+                        elif 'C' in sym and 'P' not in sym: call_pnl += leg_pnl
+                        elif re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
+                        elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
                             
                     except: pass
             
-            # Generate ID
             t_id = generate_id(name, strat, start_dt)
             
             return {
@@ -255,10 +233,6 @@ def parse_optionstrat_file(file, file_type):
                 'put_pnl': put_pnl, 'call_pnl': call_pnl
             }
 
-        # Iterating DataFrame
-        processed_list = []
-        
-        # Ensure columns exist
         cols = df_raw.columns
         if 'Name' not in cols or 'Total Return $' not in cols:
             return []
@@ -266,28 +240,21 @@ def parse_optionstrat_file(file, file_type):
         for index, row in df_raw.iterrows():
             name_val = str(row['Name'])
             
-            # Check if this is a PARENT row
-            # Parent rows have a Name that isn't a symbol (doesn't start with .) and isn't "Symbol" (header residue)
             if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
-                # If we have a previous trade accumulating, finish it
-                if current_trade:
+                if current_trade is not None:
                     res = finalize_trade(current_trade, current_legs, file_type)
-                    if res: processed_list.append(res)
-                
-                # Start new trade
+                    if res: parsed_trades.append(res)
                 current_trade = row
                 current_legs = []
             
-            # Check if this is a LEG row
             elif name_val.startswith('.'):
                 current_legs.append(row)
         
-        # Finalize the last trade in buffer
         if current_trade is not None:
              res = finalize_trade(current_trade, current_legs, file_type)
-             if res: processed_list.append(res)
+             if res: parsed_trades.append(res)
              
-        return processed_list
+        return parsed_trades
 
     except Exception as e:
         print(f"Parser Error: {e}")
@@ -341,16 +308,18 @@ def sync_data(file_list, file_type):
                          t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl']))
                     count_new += 1
                 else:
-                    # Update Logic
                     old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call = existing
                     
-                    # Merge Greeks/PnL: Prefer new non-zero values, keep old if new is missing (common in closed files)
+                    # Ensure None values are 0
+                    old_put = old_put if old_put else 0.0
+                    old_call = old_call if old_call else 0.0
+
                     final_theta = t['theta'] if t['theta'] != 0 else old_theta
                     final_delta = t['delta'] if t['delta'] != 0 else old_delta
                     final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
                     final_vega = t['vega'] if t['vega'] != 0 else old_vega
                     
-                    # For Put/Call PnL, only update if we have new calculated values (History files)
+                    # Update PnL split if we have new data, otherwise keep old
                     final_put = t['put_pnl'] if t['put_pnl'] != 0 else old_put
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
 
@@ -370,7 +339,6 @@ def sync_data(file_list, file_type):
                              t['exit_dt'].date() if t['exit_dt'] else None, trade_id))
                         count_update += 1
                         
-                # Snapshot Logic
                 if file_type == "Active":
                     today = datetime.now().date()
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
@@ -419,7 +387,6 @@ def load_data():
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
         
-        # --- Volatility Calculation from Snapshots ---
         snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
@@ -458,10 +425,8 @@ def load_data():
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         
-        # --- NEW METRICS ---
         df['Ann. ROI'] = df['Daily Yield %'] * 365
         
-        # Theta Efficiency (P&L / Potential Decay)
         df['Theta Pot.'] = df['Theta'] * df['Days Held']
         df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
         
@@ -917,22 +882,38 @@ with tab3:
                 
                 # 2. GREEK EXPOSURE
                 st.markdown("##### 2. Greek Exposure (Aggression Check)")
-                st.caption("Are active trades carrying too much Delta compared to typical winners?")
+                st.caption("Are active trades carrying too much exposure compared to typical winners?")
                 
-                avg_win_delta = expired_wins.groupby('Strategy')['Delta'].mean().reset_index()
-                avg_act_delta = active_trades.groupby('Strategy')['Delta'].mean().reset_index()
-                avg_win_delta['Type'] = 'Winning History'
-                avg_act_delta['Type'] = 'Active (Current)'
+                greek_opt = st.selectbox("Select Greek", ['Delta', 'Theta', 'Gamma', 'Vega'], key="rc_greek")
                 
-                delta_comp = pd.concat([avg_win_delta, avg_act_delta])
+                avg_win_greek = expired_wins.groupby('Strategy')[greek_opt].mean().reset_index()
+                avg_act_greek = active_trades.groupby('Strategy')[greek_opt].mean().reset_index()
+                avg_win_greek['Type'] = 'Winning History'
+                avg_act_greek['Type'] = 'Active (Current)'
                 
-                fig_delta = px.bar(delta_comp, x='Strategy', y='Delta', color='Type', barmode='group',
-                                   title="Net Delta Exposure: Winners vs Current",
+                greek_comp = pd.concat([avg_win_greek, avg_act_greek])
+                
+                fig_greek = px.bar(greek_comp, x='Strategy', y=greek_opt, color='Type', barmode='group',
+                                   title=f"Net {greek_opt} Exposure: Winners vs Current",
                                    color_discrete_map={'Winning History': 'green', 'Active (Current)': 'blue'})
-                st.plotly_chart(fig_delta, use_container_width=True)
+                st.plotly_chart(fig_greek, use_container_width=True)
                 
             else:
                 st.info("Need both active and closed winning trades to perform analysis.")
+            
+            # 3. VELOCITY MAP (Juice Squeeze)
+            if not active_trades.empty:
+                st.divider()
+                st.markdown("##### 3. Capital Velocity (Lazy vs. Fast Money)")
+                fig_vel = px.scatter(active_trades, x='Days Held', y='P&L', size='Debit', color='Strategy',
+                                     title="Trade Velocity: P&L vs Time (Size = Capital)",
+                                     hover_data=['Name'])
+                # Add "Drag Zone"
+                fig_vel.add_shape(type="rect", x0=30, y0=-500, x1=100, y1=100, 
+                                  line=dict(color="Red", width=2, dash="dot"),
+                                  fillcolor="Red", opacity=0.1)
+                fig_vel.add_annotation(x=60, y=-200, text="DRAG ZONE (Old & Flat)", showarrow=False, font=dict(color="red"))
+                st.plotly_chart(fig_vel, use_container_width=True)
 
         # --- ANATOMY OF A WIN (Leg Analysis) ---
         with an2:
@@ -941,11 +922,9 @@ with tab3:
             
             expired = df[df['Status'] == 'Expired'].copy()
             if not expired.empty:
-                # Check if we have Leg PnL data
                 if expired['Put P&L'].sum() == 0 and expired['Call P&L'].sum() == 0:
-                    st.warning("No Leg PnL data detected. Did you re-sync your history files with this new version?")
+                    st.warning("⚠️ No Leg PnL data detected. Please re-upload your Closed/History files in the sidebar and click 'Process & Reconcile' to calculate split.")
                 else:
-                    # Aggregate
                     leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L', 'P&L']].sum().reset_index()
                     
                     fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], 
@@ -987,13 +966,30 @@ with tab3:
         with an5:
             # HEATMAPS
             if not expired_df.empty:
+                hm1, hm2, hm3 = st.tabs(["🗓️ Seasonality", "⏳ Duration", "📅 Entry Day"])
+                
                 exp_hm = expired_df.dropna(subset=['Exit Date']).copy()
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
-                hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
-                months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-                fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True, color_continuous_scale="RdBu")
-                st.plotly_chart(fig, use_container_width=True)
+                
+                with hm1:
+                    hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
+                    months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+                    fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True, color_continuous_scale="RdBu")
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with hm2:
+                    fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
+                                              title="Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                    st.plotly_chart(fig2, use_container_width=True)
+                
+                with hm3:
+                    if 'Entry Date' in exp_hm.columns:
+                        exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
+                        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                        fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg",
+                                                  title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                        st.plotly_chart(fig3, use_container_width=True)
 
         with an6:
             # RISK MAP
@@ -1063,4 +1059,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v90.0 | Deep Dive Analytics")
+    st.caption("Allantis Trade Guardian v91.0 | Fixed Parser & Enhanced Greeks")
