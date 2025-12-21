@@ -9,12 +9,15 @@ import os
 import re
 from datetime import datetime
 from openpyxl import load_workbook
+# Added scipy for stats/trendlines (lowess) in plotly if needed internally, though plotly mostly handles it.
+# Keeping import just in case for future advanced calcs.
+from scipy import stats 
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v100.0 (Smart Dashboard & Collapsible Queue)")
+st.info("✅ RUNNING VERSION: v101.0 (Greek Decay & Exit Optimizer)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -50,15 +53,26 @@ def init_db():
                     link TEXT
                 )''')
     
-    # SNAPSHOTS TABLE
+    # SNAPSHOTS TABLE - Added greeks to snapshots for decay tracking
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
                     snapshot_date DATE,
                     pnl REAL,
                     days_held INTEGER,
+                    theta REAL,
+                    delta REAL,
+                    vega REAL,
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
+    
+    # Check if snapshot columns exist (migration for existing dbs)
+    try: c.execute("ALTER TABLE snapshots ADD COLUMN theta REAL")
+    except: pass
+    try: c.execute("ALTER TABLE snapshots ADD COLUMN delta REAL")
+    except: pass
+    try: c.execute("ALTER TABLE snapshots ADD COLUMN vega REAL")
+    except: pass
                 
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
@@ -367,8 +381,13 @@ def sync_data(file_list, file_type):
                     today = datetime.now().date()
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
                     if not c.fetchone():
-                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held) VALUES (?,?,?,?)",
-                                  (trade_id, today, t['pnl'], t['days_held']))
+                        # Save Greeks into snapshot for decay tracking
+                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega) VALUES (?,?,?,?,?,?,?)",
+                                  (trade_id, today, t['pnl'], t['days_held'], t['theta'], t['delta'], t['vega']))
+                    else:
+                        # Update existing snapshot with Greeks if missing
+                        c.execute("UPDATE snapshots SET theta=?, delta=?, vega=? WHERE trade_id=? AND snapshot_date=?",
+                                  (t['theta'], t['delta'], t['vega'], trade_id, today))
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
@@ -458,8 +477,8 @@ def load_data():
                 if 4800 <= d <= 5500: grade="A"; reason="Ideal Pricing"
                 else: grade="C"; reason="Check Pricing"
             elif s == 'M200':
-                if 7500 <= d <= 8500: grade="A"; reason="Perfect Entry"
-                else: grade="B"; reason="Variance"
+                if 7500 <= d <= 8500: grade, reason = "A", "Perfect Entry"
+                else: grade, reason = "B", "Variance"
             elif s == 'SMSF':
                 if d > 15000: grade="B"; reason="High Debit" 
                 else: grade="A"; reason="Standard"
@@ -473,8 +492,9 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
+        # Load greeks in snapshots
         q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, t.strategy, t.name, t.id
+        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, t.strategy, t.name, t.id
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
@@ -482,6 +502,9 @@ def load_snapshots():
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
         df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
         df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
+        df['theta'] = pd.to_numeric(df['theta'], errors='coerce').fillna(0)
+        df['delta'] = pd.to_numeric(df['delta'], errors='coerce').fillna(0)
+        df['vega'] = pd.to_numeric(df['vega'], errors='coerce').fillna(0)
         return df
     except: return pd.DataFrame()
     finally: conn.close()
@@ -823,60 +846,6 @@ with tab1:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# 2. VALIDATOR
-with tab2:
-    st.markdown("### 🧪 Pre-Flight Audit")
-    with st.expander("ℹ️ Grading System Legend", expanded=True):
-        st.markdown("""
-        | Strategy | Grade | Debit Range (Per Lot) | Verdict |
-        | :--- | :--- | :--- | :--- |
-        | **130/160** | **A+** | `$3,500 - $4,500` | ✅ **Sweet Spot** (Highest statistical win rate) |
-        | **130/160** | **B** | `< $3,500` or `$4,500-$4,800` | ⚠️ **Acceptable** (Watch volatility) |
-        | **130/160** | **F** | `> $4,800` | ⛔ **Overpriced** (Historical failure rate 100%) |
-        | **160/190** | **A** | `$4,800 - $5,500` | ✅ **Ideal** Pricing |
-        | **160/190** | **C** | `> $5,500` | ⚠️ **Expensive** (Reduces ROI efficiency) |
-        | **M200** | **A** | `$7,500 - $8,500` | ✅ **Perfect** "Whale" sizing |
-        | **M200** | **B** | Any other price | ⚠️ **Variance** from mean |
-        | **SMSF** | **A** | `< $15,000` | ✅ **Standard** |
-        """)
-        
-    model_file = st.file_uploader("Upload Model File", key="mod")
-    if model_file:
-        try:
-            m_raw = parse_optionstrat_file(model_file, "Active") # Reuse parser
-            if m_raw:
-                t = m_raw[0] # check first
-                name, strat, debit = t['name'], t['strategy'], t['debit']
-                lot_size = t['lot_size']
-                debit_lot = debit / max(1, lot_size)
-                
-                grade, reason = "C", "Standard"
-                if strat == '130/160':
-                    if debit_lot > 4800: grade, reason = "F", "Overpriced (> $4.8k)"
-                    elif 3500 <= debit_lot <= 4500: grade, reason = "A+", "Sweet Spot"
-                    else: grade, reason = "B", "Acceptable"
-                elif strat == '160/190':
-                    if 4800 <= debit_lot <= 5500: grade, reason = "A", "Ideal Pricing"
-                    else: grade, reason = "C", "Check Pricing"
-                elif strat == 'M200':
-                    if 7500 <= debit_lot <= 8500: grade, reason = "A", "Perfect Entry"
-                    else: grade, reason = "B", "Variance"
-                elif strat == 'SMSF':
-                    if debit_lot > 15000: grade, reason = "B", "High Debit" 
-                    else: grade, reason = "A", "Standard"
-
-                st.divider()
-                st.subheader(f"Audit: {name}")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Strategy", strat)
-                c2.metric("Total Debit", f"${debit:,.0f}")
-                c3.metric("Per Lot", f"${debit_lot:,.0f}")
-                
-                if "A" in grade: st.success(f"✅ **APPROVED:** {reason}")
-                elif "F" in grade: st.error(f"⛔ **REJECT:** {reason}")
-                else: st.warning(f"⚠️ **CHECK:** {reason}")
-        except Exception as e: st.error(f"Error: {e}")
-
 # 3. ANALYTICS
 with tab3:
     if not df.empty:
@@ -893,12 +862,13 @@ with tab3:
         
         st.divider()
         
-        an1, an2, an3, an4, an5, an6, an7 = st.tabs([
-            "🔎 Root Cause (Why Slump?)", "⚖️ Anatomy of Win", "🌊 Equity Curve", 
-            "🎯 Expectancy", "🔥 Heatmaps", "⚠️ Risk Map", "🧬 Lifecycle"
+        an1, an2, an3, an4, an5, an6, an7, an8, an9 = st.tabs([
+            "🔎 Root Cause", "⚖️ Anatomy of Win", "🌊 Equity Curve", 
+            "🎯 Expectancy", "🔥 Heatmaps", "⚠️ Risk Map", "🧬 Lifecycle",
+            "📉 Greek Decay", "⏳ Exit Optimizer"
         ])
 
-        # --- ROOT CAUSE ANALYSIS (The Slump Detector) ---
+        # --- ROOT CAUSE ANALYSIS ---
         with an1:
             st.subheader("🕵️ Why are active trades suffering?")
             st.caption("Comparing Active Trades (Current) vs Winning Historical Trades.")
@@ -937,7 +907,6 @@ with tab3:
                     st.plotly_chart(fig_delta, use_container_width=True)
                 with g2:
                      if 'IV' in active_trades.columns:
-                        # Check if data exists
                         if active_trades['IV'].sum() == 0:
                             st.warning("⚠️ IV data is all zeros. Did you re-sync your active files?")
                         else:
@@ -957,14 +926,13 @@ with tab3:
                 fig_vel.add_annotation(x=60, y=-200, text="DRAG ZONE (Old & Flat)", showarrow=False, font=dict(color="red"))
                 st.plotly_chart(fig_vel, use_container_width=True)
 
-        # --- ANATOMY OF A WIN (Leg Analysis) ---
+        # --- ANATOMY OF A WIN ---
         with an2:
             st.subheader("⚖️ Put vs Call Contribution (Closed Trades)")
             st.caption("For closed trades only. Where does the profit actually come from?")
             
             expired = df[df['Status'] == 'Expired'].copy()
             if not expired.empty:
-                # Aggregate
                 leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L', 'P&L']].sum().reset_index()
                 
                 fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], 
@@ -988,7 +956,7 @@ with tab3:
                     .map(lambda x: 'color: green' if isinstance(x, (int, float)) and x > 0 else ('color: red' if isinstance(x, (int, float)) and x < 0 else ''), subset=['Put P&L', 'Call P&L', 'P&L']),
                     use_container_width=True
                 )
-                st.caption("Note: 'P&L' is the Broker Total (includes fees/slippage). 'Calc Sum' is the raw sum of leg price changes. Small 'Diff' is normal (fees). Large 'Diff' means leg parsing issue.")
+                st.caption("Note: 'P&L' is the Broker Total. 'Calc Sum' is raw leg sum.")
             else:
                 st.info("No closed trades.")
 
@@ -1068,6 +1036,83 @@ with tab3:
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No snapshots yet.")
 
+        # --- GREEK DECAY TRACKING ---
+        with an8:
+            st.subheader("📉 Greek Decay Tracking")
+            st.caption("Visualizing the path of Theta and Delta over time. Are you decaying as expected?")
+            
+            snaps = load_snapshots()
+            if not snaps.empty:
+                decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
+                strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
+                
+                if not strat_snaps.empty:
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        # Theta Decay Curve
+                        fig_theta = px.scatter(strat_snaps, x='days_held', y='theta', color='name',
+                                               title=f"Theta Decay: {decay_strat}",
+                                               labels={'days_held': 'Days Held', 'theta': 'Daily Theta ($)'},
+                                               trendline="lowess") # Local regression curve
+                        st.plotly_chart(fig_theta, use_container_width=True)
+                        st.caption("Ideally, Theta should increase (decay accelerates) or stay stable. Drops indicate risk.")
+
+                    with d2:
+                        # Delta Drift
+                        fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name',
+                                               title=f"Delta Drift: {decay_strat}",
+                                               labels={'days_held': 'Days Held', 'delta': 'Net Delta'},
+                                               trendline="lowess")
+                        st.plotly_chart(fig_delta, use_container_width=True)
+                        st.caption("Watch for Delta drifting too far from 0. High drift = Directional Risk.")
+                else:
+                    st.info(f"No snapshots for {decay_strat}.")
+            else:
+                st.info("Snapshots needed for decay tracking. Upload active files daily to build history.")
+
+        # --- EXIT OPTIMIZER ---
+        with an9:
+            st.subheader("⏳ Exit Timing Optimizer")
+            st.caption("Historical probability: 'If I hold longer, do I make more money?'")
+            
+            if not expired_df.empty:
+                opt_strat = st.selectbox("Optimize Strategy", expired_df['Strategy'].unique(), key="opt_strat")
+                strat_hist = expired_df[expired_df['Strategy'] == opt_strat].copy()
+                
+                if not strat_hist.empty:
+                    # Binning Days Held to create heatmap grid
+                    strat_hist['Day_Bin'] = pd.cut(strat_hist['Days Held'], bins=[0, 15, 30, 45, 60, 90, 120], labels=['0-15d', '15-30d', '30-45d', '45-60d', '60-90d', '90d+'])
+                    
+                    # Binning PnL to understand state
+                    # Simple bins: Losers, Small Win, Big Win
+                    pnl_bins = [-99999, -1, 500, 1000, 99999]
+                    pnl_labels = ['Loss (<$0)', 'Small Win ($0-$500)', 'Target Win ($500-$1k)', 'Home Run (>$1k)']
+                    strat_hist['PnL_Bin'] = pd.cut(strat_hist['P&L'], bins=pnl_bins, labels=pnl_labels)
+                    
+                    # Create Heatmap Data: Average PnL for each bucket
+                    heatmap_pnl = strat_hist.groupby(['PnL_Bin', 'Day_Bin'])['P&L'].mean().reset_index()
+                    
+                    # Pivot for Plotly
+                    pnl_matrix = heatmap_pnl.pivot(index='PnL_Bin', columns='Day_Bin', values='P&L')
+                    
+                    fig_opt = px.imshow(pnl_matrix, 
+                                        text_auto=".0f", 
+                                        aspect="auto",
+                                        color_continuous_scale="RdBu",
+                                        title=f"Avg Exit PnL by Duration & Zone ({opt_strat})",
+                                        labels=dict(x="Days Held", y="Result Zone", color="Avg Final PnL"))
+                    st.plotly_chart(fig_opt, use_container_width=True)
+                    
+                    st.info("""
+                    **How to read:** - This heatmap shows the **average final P&L** of trades that ended in these time buckets.
+                    - **Blue** means high profit exits. **Red** means loss exits.
+                    - Look for the **"Blue Zones"**: e.g., if '30-45d' is bluer than '15-30d', holding longer historically pays off.
+                    """)
+                else:
+                    st.warning("Not enough data for this strategy.")
+            else:
+                st.info("Need closed trade history to optimize exits.")
+
 # 4. RULE BOOK
 with tab4:
     st.markdown("""
@@ -1113,4 +1158,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v100.0 | Smart Dashboard & Collapsible Queue")
+    st.caption("Allantis Trade Guardian v101.0 | Greek Decay & Exit Optimizer")
