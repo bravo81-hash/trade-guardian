@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v109.0 (PnL Life Cycle Graph Restored)")
+st.info("✅ RUNNING VERSION: v110.0 (Decision Ladder System)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -599,51 +599,72 @@ market_regime = st.sidebar.selectbox("Current Market Regime", ["Neutral (Standar
 regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in market_regime else 1.0
 
 # --- SMART EXIT ENGINE ---
-def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
-    if status == "Missing": return "MISSING (Review)", "ERROR"
-    if status == "Active":
-        benchmark = benchmarks_dict.get(strat, {})
-        base_target = benchmark.get('pnl', 0) or BASE_CONFIG.get(strat, {}).get('pnl', 9999)
-        final_target = base_target * regime_mult
-        
-        if pnl >= final_target: return f"TAKE PROFIT (Hit ${final_target:,.0f})", "SUCCESS"
-        if strat == '130/160':
-            if 25 <= days_held <= 35 and pnl < 100: return "KILL (Stale >25d)", "ERROR"
-        elif strat == '160/190':
-            if days_held < 30: return "COOKING (Do Not Touch)", "INFO"
-            elif 30 <= days_held <= 40: return "WATCH (Profit Zone)", "WARNING"
-        elif strat == 'M200':
-            if 12 <= days_held <= 16:
-                return ("DAY 14 CHECK (Green)", "SUCCESS") if pnl > 200 else ("DAY 14 CHECK (Red)", "WARNING")
-        elif strat == 'SMSF':
-            if pnl > 1000: return "PROFIT CHECK", "SUCCESS"
-    return "", "NONE"
-
-def calc_exit_score(row, benchmarks):
-    score = 0
+def calculate_decision_ladder(row, benchmarks_dict):
+    """
+    Returns (Action, Score, Reason)
+    Score: 0 (Safe) to 100 (Critical Action Needed)
+    """
     strat = row['Strategy']
-    bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}))
-    target = bench.get('pnl', 1000) * regime_mult
+    days = row['Days Held']
+    pnl = row['P&L']
+    status = row['Status']
     
-    # Profit progress (0-50 points)
-    if row['P&L'] >= target: 
-        score += 50
-    elif row['P&L'] >= target * 0.8: 
-        score += 30 + (row['P&L'] / target) * 20
+    if status == 'Missing': return "REVIEW", 100, "Missing from data"
     
-    # Time factor (0-30 points)
-    avg_days = bench.get('dit', 40)
-    if row['Days Held'] > avg_days * 1.5: 
+    bench = benchmarks_dict.get(strat, BASE_CONFIG.get(strat, {}))
+    base_target = bench.get('pnl', 0) or 1000
+    target_profit = base_target * regime_mult
+    
+    score = 50 # Base neutral
+    action = "HOLD"
+    reason = "Normal"
+    
+    # 1. PROFIT SCORING (Upside Urgency)
+    if pnl >= target_profit:
+        return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}"
+    elif pnl >= target_profit * 0.8:
         score += 30
-    elif row['Days Held'] > avg_days * 1.2: 
+        action = "PREPARE EXIT"
+        reason = "Near Target"
+        
+    # 2. TIME & STRATEGY SCORING (Downside Urgency)
+    if strat == '130/160':
+        if days > 25 and pnl < 100:
+            return "KILL", 95, "Stale (>25d)"
+        elif days > 20:
+            score += 20
+            reason = "Aging"
+            
+    elif strat == '160/190':
+        if days < 30:
+            score = 10 # Force low score
+            action = "COOKING" 
+            reason = "Too Early (<30d)"
+        elif days > 45:
+            score += 25
+            action = "WATCH"
+            reason = "Mature (>45d)"
+            
+    elif strat == 'M200':
+        if 13 <= days <= 15:
+            score += 10
+            action = "DAY 14 CHECK"
+            reason = "Scheduled Review"
+            
+    # 3. EFFICIENCY SCORING
+    if row['Theta Eff.'] < 0.2 and days > 10:
         score += 15
-    if strat == '130/160' and row['Days Held'] > 25: score += 30
+        reason += " + Bad Decay"
+        
+    # Cap score
+    score = min(100, max(0, score))
     
-    # Efficiency (0-20 points)
-    if row['Theta Eff.'] < 0.5: score += 20
-    elif row['Theta Eff.'] < 0.8: score += 10
+    # Final Action mapping if not caught above
+    if score >= 90: action = "CRITICAL"
+    elif score >= 70: action = "WATCH"
+    elif score <= 30: action = "COOKING"
     
-    return min(100, max(0, score))
+    return action, score, reason
 
 # --- MAIN APP ---
 df = load_data()
@@ -693,50 +714,46 @@ with tab_dash:
 
             st.divider()
 
-            act_list, sig_list = [], []
-            score_list = []
-            for _, row in active_df.iterrows():
-                act, sig = get_action_signal(row['Strategy'], row['Status'], row['Days Held'], row['P&L'], benchmarks)
-                score = calc_exit_score(row, benchmarks)
-                act_list.append(act)
-                sig_list.append(sig)
-                score_list.append(score)
-                
-            active_df['Action'] = act_list
-            active_df['Signal_Type'] = sig_list
-            active_df['Exit Score'] = score_list
+            # Calculate Ladder for all active trades
+            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks), axis=1)
+            active_df['Action'] = [x[0] for x in ladder_results]
+            active_df['Urgency Score'] = [x[1] for x in ladder_results]
+            active_df['Reason'] = [x[2] for x in ladder_results]
 
-            todo_df = active_df[active_df['Action'] != ""]
-            with st.expander(f"✅ Action Queue ({len(todo_df)})", expanded=False):
+            # Sort by Urgency (Highest first)
+            active_df = active_df.sort_values('Urgency Score', ascending=False)
+
+            todo_df = active_df[active_df['Urgency Score'] >= 70]
+            with st.expander(f"🔥 Priority Action Queue ({len(todo_df)})", expanded=True):
                 if not todo_df.empty:
-                    t1, t2 = st.columns([3, 1])
-                    with t1:
-                        for _, row in todo_df.iterrows():
-                            sig = row['Signal_Type']
-                            color = {"SUCCESS":"green", "ERROR":"red", "WARNING":"orange", "INFO":"blue"}.get(sig, "grey")
-                            is_valid_link = str(row['Link']).startswith('http')
-                            name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
-                            st.markdown(f"**{name_display}**: :{color}[{row['Action']}] (Score: {row['Exit Score']}) | *{row['Strategy']}*")
-                    with t2:
-                        csv_todo = todo_df[['Name', 'Action', 'P&L', 'Days Held']].to_csv(index=False).encode('utf-8')
-                        st.download_button("📥 Download Queue", csv_todo, "todo_list.csv", "text/csv")
+                    for _, row in todo_df.iterrows():
+                        u_score = row['Urgency Score']
+                        color = "red" if u_score >= 90 else "orange"
+                        is_valid_link = str(row['Link']).startswith('http')
+                        name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
+                        
+                        c_a, c_b, c_c = st.columns([2, 1, 1])
+                        c_a.markdown(f"**{name_display}** ({row['Strategy']})")
+                        c_b.markdown(f":{color}[**{row['Action']}**] ({row['Reason']})")
+                        c_c.progress(u_score / 100)
                 else:
-                    st.info("No actions required.")
+                    st.success("✅ No critical actions required. Portfolio is healthy.")
 
             st.divider()
 
             sub_journal, sub_strat = st.tabs(["📝 Journal & Overview", "🏛️ Strategy Detail"])
 
             with sub_journal:
-                st.caption("Edit 'Notes', 'Tags' or 'Parent ID' (for Linking).")
-                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Exit Score', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
+                st.caption("Trades sorted by Urgency (Highest Priority Top).")
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
                     "Link": st.column_config.LinkColumn("OS Link", display_text="Open 🔗"),
                     "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
-                    "Exit Score": st.column_config.ProgressColumn("Exit Urgency", min_value=0, max_value=100, format="%d"),
+                    "Urgency Score": st.column_config.ProgressColumn("⚠️ Urgency Ladder", min_value=0, max_value=100, format="%d", help="0=Safe, 100=Act Now"),
+                    "Action": st.column_config.TextColumn("Decision", disabled=True),
                     "Theta/Cap %": st.column_config.NumberColumn("Θ/Cap", format="%.2f%%", disabled=True),
                     "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True, help="Ratio of P&L to Total Theta Potential. >1.0 is excellent."),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
@@ -745,7 +762,6 @@ with tab_dash:
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
                     "Parent ID": st.column_config.TextColumn("🔗 Link ID", help="Paste ID of previous leg to link campaigns."),
-                    "Action": st.column_config.TextColumn("Signal", disabled=True),
                 }
                 edited_df = st.data_editor(
                     active_df[display_cols],
@@ -831,7 +847,7 @@ with tab_dash:
                         use_container_width=True
                     )
 
-                cols = ['Name', 'Link', 'Action', 'Exit Score', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+                cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 
                 def render_tab(tab, strategy_name):
                     with tab:
@@ -848,7 +864,7 @@ with tab_dash:
                         
                         if not subset.empty:
                             sum_row = pd.DataFrame({
-                                'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Exit Score': [0], 'Grade': ['-'],
+                                'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Urgency Score': [0], 'Grade': ['-'],
                                 'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                                 'Daily Yield %': [subset['Daily Yield %'].mean()],
                                 'Ann. ROI': [subset['Ann. ROI'].mean()],
@@ -888,7 +904,7 @@ with tab_dash:
                                 use_container_width=True,
                                 column_config={
                                     "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️"),
-                                    "Exit Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d")
+                                    "Urgency Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d")
                                 }
                             )
                         else: st.info("No active trades.")
@@ -1204,4 +1220,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v109.0 (PnL Life Cycle Restored)")
+    st.caption("Allantis Trade Guardian v110.0 (Decision Ladder System)")
