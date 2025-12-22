@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v108.0 (Portfolio Health Matrix Added)")
+st.info("✅ RUNNING VERSION: v109.0 (PnL Life Cycle Graph Restored)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1033,33 +1033,19 @@ with tab_analytics:
                         st.plotly_chart(fig3, use_container_width=True)
 
         with an3: 
-            st.subheader("🔗 Strategy Correlation Matrix")
-            if not expired_df.empty:
-                pivot = expired_df.pivot_table(index='Exit Date', columns='Strategy', values='P&L', aggfunc='sum').fillna(0)
-                if len(pivot.columns) > 1:
-                    corr = pivot.corr()
-                    fig_corr = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", title="Strategy Correlation (1.0 = perfect correlation)")
-                    st.plotly_chart(fig_corr, use_container_width=True)
-                    st.caption("💡 Insight: Correlation > 0.7 means strategies move together (hidden concentration risk)")
-                else: st.info("Need more strategies closed.")
-
-            if not active_trades.empty:
-                g1, g2 = st.columns(2)
-                with g1:
-                    fig_delta = px.scatter(active_trades, x='Delta', y='Theta', size='Debit', color='Strategy', title="Active Fleet: Delta vs Theta", hover_data=['Name'])
-                    st.plotly_chart(fig_delta, use_container_width=True)
-                with g2:
-                    if 'IV' in active_trades.columns and active_trades['IV'].sum() > 0:
-                        fig_iv = px.scatter(active_trades, x='IV', y='Vega', size='Debit', color='Strategy', title="Active Fleet: IV vs Vega", hover_data=['Name'])
-                        st.plotly_chart(fig_iv, use_container_width=True)
-            
-            st.divider()
-            st.subheader("📉 Greek Decay Tracking")
+            st.subheader("🧬 Trade Life Cycle & Decay")
             snaps = load_snapshots()
             if not snaps.empty:
                 decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
                 strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
                 if not strat_snaps.empty:
+                    # --- NEW FEATURE: PnL LIFE CYCLE GRAPH ---
+                    fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', 
+                                      title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})",
+                                      labels={'days_held': 'Days Held', 'pnl': 'P&L ($)'})
+                    st.plotly_chart(fig_pnl, use_container_width=True)
+                    # ----------------------------------------
+                    
                     # FIXED: Use EARLIEST snapshot theta as anchor (Day 0 baseline)
                     def get_theta_anchor(group):
                         earliest = group.sort_values('days_held').iloc[0]
@@ -1217,4 +1203,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v108.0 (Portfolio Health Added)")
+    st.caption("Allantis Trade Guardian v109.0 (PnL Life Cycle Restored)")
