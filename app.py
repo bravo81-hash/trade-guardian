@@ -10,13 +10,13 @@ import re
 from datetime import datetime
 from openpyxl import load_workbook
 from scipy import stats 
-from scipy.spatial.distance import cdist # For Trade DNA
+from scipy.spatial.distance import cdist 
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v104.0 (Enhanced Analytics & DNA Fingerprinting)")
+st.info("✅ RUNNING VERSION: v105.0 (Fixed Greek Decay Curve)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -105,12 +105,11 @@ BASE_CONFIG = {
     'SMSF':    {'yield': 0.20, 'pnl': 600, 'roi': 8.0, 'dit': 40, 'target_debit_min': 2000, 'target_debit_max': 15000, 'target_days': [0, 1, 2, 3, 4]} 
 }
 
-# Manually create a VIX reference table (update quarterly)
+# VIX Context
 VIX_CONTEXT = {
     '2024-Q3': 14.2,
     '2024-Q4': 16.8,
     '2025-Q1': 15.3,
-    # Add as you go
 }
 
 # --- HELPER FUNCTIONS ---
@@ -501,8 +500,10 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
+        # UPDATED QUERY: Join to get initial trade theta for expected curve calculation
         q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, t.strategy, t.name, t.id
+        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
+               t.strategy, t.name, t.id, t.theta as initial_theta
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
@@ -513,6 +514,7 @@ def load_snapshots():
         df['theta'] = pd.to_numeric(df['theta'], errors='coerce').fillna(0)
         df['delta'] = pd.to_numeric(df['delta'], errors='coerce').fillna(0)
         df['vega'] = pd.to_numeric(df['vega'], errors='coerce').fillna(0)
+        df['initial_theta'] = pd.to_numeric(df['initial_theta'], errors='coerce').fillna(0)
         return df
     except: return pd.DataFrame()
     finally: conn.close()
@@ -1002,9 +1004,14 @@ with tab_analytics:
                 decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
                 strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
                 if not strat_snaps.empty:
-                    # Calculate Expected Decay (Linear Model)
-                    first_theta = strat_snaps.groupby('id')['theta'].transform('first')
-                    strat_snaps['Theta_Expected'] = first_theta * (1 - strat_snaps['days_held'] / 45)
+                    # Calculate Expected Decay using stored initial_theta
+                    # If initial_theta is 0, we can try to use the max theta in the history as a proxy
+                    if 'initial_theta' in strat_snaps.columns:
+                        strat_snaps['Theta_Expected'] = strat_snaps['initial_theta'] * (1 - strat_snaps['days_held'] / 45)
+                    else:
+                        # Fallback if initial_theta missing
+                        first_theta = strat_snaps.groupby('id')['theta'].transform('first')
+                        strat_snaps['Theta_Expected'] = first_theta * (1 - strat_snaps['days_held'] / 45)
                     
                     d1, d2 = st.columns(2)
                     with d1:
@@ -1115,4 +1122,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v104.0 | Trade DNA, Roll Analysis & Advanced Analytics")
+    st.caption("Allantis Trade Guardian v105.0 | Fixed Greek Decay Curve")
