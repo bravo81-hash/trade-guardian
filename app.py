@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v105.1 (Robust Decay Curve Patch)")
+st.info("✅ RUNNING VERSION: v106.0 (Theta Decay Fix - Anchor Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1004,28 +1004,63 @@ with tab_analytics:
                 decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
                 strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
                 if not strat_snaps.empty:
-                    # Calculate Expected Decay (Linear Model) using initial theta from trades table if available,
-                    # otherwise fallback to max snapshot theta
-                    if 'initial_theta' in strat_snaps.columns:
-                        # Use max of initial_theta or max observed theta as anchor to avoid 0s
-                        max_observed = strat_snaps.groupby('id')['theta'].transform('max')
-                        anchor = np.maximum(strat_snaps['initial_theta'], max_observed)
-                    else:
-                        anchor = strat_snaps.groupby('id')['theta'].transform('max')
-                        
-                    strat_snaps['Theta_Expected'] = anchor * (1 - strat_snaps['days_held'] / 45)
+                    # FIXED: Use EARLIEST snapshot theta as anchor (Day 0 baseline)
+                    def get_theta_anchor(group):
+                        earliest = group.sort_values('days_held').iloc[0]
+                        return earliest['theta'] if earliest['theta'] > 0 else group['theta'].max()
                     
-                    d1, d2 = st.columns(2)
-                    with d1:
-                        fig_theta = px.line(strat_snaps, x='days_held', y=['theta', 'Theta_Expected'], color='name', 
-                                            title=f"Theta: Actual vs Expected ({decay_strat})",
-                                            labels={'days_held': 'Days', 'value': 'Theta'},
-                                            line_dash_map={'theta': 'solid', 'Theta_Expected': 'dash'})
-                        st.plotly_chart(fig_theta, use_container_width=True)
-                    with d2:
-                        fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name', title=f"Delta Drift: {decay_strat}", labels={'days_held': 'Days', 'delta': 'Delta'}, trendline="lowess")
-                        st.plotly_chart(fig_delta, use_container_width=True)
-            else: st.info("Upload daily active files to build decay history.")
+                    anchor_map = strat_snaps.groupby('id').apply(get_theta_anchor)
+                    strat_snaps['Theta_Anchor'] = strat_snaps['id'].map(anchor_map)
+                    
+                    strat_snaps['Theta_Expected'] = strat_snaps['Theta_Anchor'] * (1 - strat_snaps['days_held'] / 45)
+                    
+                    strat_snaps = strat_snaps[
+                        (strat_snaps['Theta_Anchor'] > 0) & 
+                        (strat_snaps['theta'] != 0) & 
+                        (strat_snaps['days_held'] < 60) 
+                    ]
+                    
+                    if not strat_snaps.empty:
+                        d1, d2 = st.columns(2)
+                        with d1:
+                            fig_theta = go.Figure()
+                            for trade_id in strat_snaps['id'].unique():
+                                trade_data = strat_snaps[strat_snaps['id'] == trade_id].sort_values('days_held')
+                                fig_theta.add_trace(go.Scatter(
+                                    x=trade_data['days_held'],
+                                    y=trade_data['theta'],
+                                    mode='lines+markers',
+                                    name=f"{trade_data['name'].iloc[0][:15]} (Actual)",
+                                    line=dict(width=2),
+                                    showlegend=True
+                                ))
+                                fig_theta.add_trace(go.Scatter(
+                                    x=trade_data['days_held'],
+                                    y=trade_data['Theta_Expected'],
+                                    mode='lines',
+                                    name=f"{trade_data['name'].iloc[0][:15]} (Expected)",
+                                    line=dict(dash='dash', width=1),
+                                    opacity=0.5,
+                                    showlegend=False
+                                ))
+                            fig_theta.update_layout(title=f"Theta: Actual vs Expected ({decay_strat})", xaxis_title="Days Held", yaxis_title="Theta ($)", hovermode='x unified')
+                            st.plotly_chart(fig_theta, use_container_width=True)
+                            
+                            avg_deviation = (strat_snaps['theta'] - strat_snaps['Theta_Expected']).mean()
+                            if avg_deviation > 10:
+                                st.success(f"✅ Theta holding better than expected (+${avg_deviation:.0f}/day avg)")
+                            elif avg_deviation < -10:
+                                st.warning(f"⚠️ Theta decaying faster than expected (${avg_deviation:.0f}/day avg)")
+                            else:
+                                st.info("📊 Theta decay tracking as expected")
+                        
+                        with d2:
+                            fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name', title=f"Delta Drift: {decay_strat}", labels={'days_held': 'Days', 'delta': 'Delta'}, trendline="lowess")
+                            st.plotly_chart(fig_delta, use_container_width=True)
+                    else:
+                        st.warning("Insufficient data after filtering. Upload more daily snapshots.")
+            else:
+                st.info("Upload daily active files to build decay history.")
 
             st.divider()
             st.subheader("⏳ Exit Timing Optimizer")
@@ -1124,4 +1159,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v105.1 | Robust Decay Curve Patch")
+    st.caption("Allantis Trade Guardian v106.0 (Theta Decay Fix - Anchor Logic)")
