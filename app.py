@@ -9,15 +9,13 @@ import os
 import re
 from datetime import datetime
 from openpyxl import load_workbook
-# Added scipy for stats/trendlines (lowess) in plotly if needed internally, though plotly mostly handles it.
-# Keeping import just in case for future advanced calcs.
 from scipy import stats 
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v101.0 (Greek Decay & Exit Optimizer)")
+st.info("✅ RUNNING VERSION: v102.0 (Compact Layout & Removed Validator)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -53,7 +51,7 @@ def init_db():
                     link TEXT
                 )''')
     
-    # SNAPSHOTS TABLE - Added greeks to snapshots for decay tracking
+    # SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -66,7 +64,6 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
-    # Check if snapshot columns exist (migration for existing dbs)
     try: c.execute("ALTER TABLE snapshots ADD COLUMN theta REAL")
     except: pass
     try: c.execute("ALTER TABLE snapshots ADD COLUMN delta REAL")
@@ -381,11 +378,9 @@ def sync_data(file_list, file_type):
                     today = datetime.now().date()
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
                     if not c.fetchone():
-                        # Save Greeks into snapshot for decay tracking
                         c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega) VALUES (?,?,?,?,?,?,?)",
                                   (trade_id, today, t['pnl'], t['days_held'], t['theta'], t['delta'], t['vega']))
                     else:
-                        # Update existing snapshot with Greeks if missing
                         c.execute("UPDATE snapshots SET theta=?, delta=?, vega=? WHERE trade_id=? AND snapshot_date=?",
                                   (t['theta'], t['delta'], t['vega'], trade_id, today))
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
@@ -492,7 +487,6 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # Load greeks in snapshots
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, t.strategy, t.name, t.id
         FROM snapshots s
@@ -593,24 +587,16 @@ def get_action_signal(strat, status, days_held, pnl, benchmarks_dict):
     return "", "NONE"
 
 def calc_exit_score(row, benchmarks):
-    """Calculates a 0-100 score on urgency to close."""
     score = 0
     strat = row['Strategy']
     bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}))
-    
-    # 1. Profit Target (Max 50)
     target = bench.get('pnl', 1000) * regime_mult
     if row['P&L'] >= target: score += 50
     elif row['P&L'] >= target * 0.8: score += 30
-    
-    # 2. Time Drag (Max 30)
     avg_days = bench.get('dit', 40)
     if row['Days Held'] > avg_days * 1.2: score += 20
-    if strat == '130/160' and row['Days Held'] > 25: score += 30 # Hard rule
-    
-    # 3. Efficiency (Max 20)
+    if strat == '130/160' and row['Days Held'] > 25: score += 30
     if row['Theta Eff.'] < 0.5: score += 20
-    
     return min(100, score)
 
 # --- MAIN APP ---
@@ -630,11 +616,11 @@ if not df.empty:
                     'dit': winners['Days Held'].mean()
                 }
 
-# TABS
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Active Dashboard", "🧪 Trade Validator", "📈 Analytics (Deep Dive)", "📖 Rule Book"])
+# --- TABS (COMPACT LAYOUT) ---
+tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "📖 Rules"])
 
 # 1. ACTIVE DASHBOARD
-with tab1:
+with tab_dash:
     if not df.empty:
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
@@ -686,8 +672,10 @@ with tab1:
 
             st.divider()
 
-            # --- MASTER JOURNAL ---
-            with st.expander("📝 Master Trade Journal (Editable)", expanded=False):
+            # --- DASHBOARD SUB-TABS ---
+            sub_journal, sub_strat = st.tabs(["📝 Journal & Overview", "🏛️ Strategy Detail"])
+
+            with sub_journal:
                 st.caption("Edit 'Notes', 'Tags' or 'Parent ID' (for Linking).")
                 display_cols = ['id', 'Name', 'Link', 'Strategy', 'Exit Score', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID', 'Action']
                 column_config = {
@@ -721,133 +709,131 @@ with tab1:
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
 
-            st.divider()
+            with sub_strat:
+                st.markdown("### 🏛️ Strategy Performance")
+                strat_tabs_inner = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200", "💼 SMSF"])
 
-            # --- STRATEGY PERFORMANCE ---
-            st.markdown("### 🏛️ Strategy Performance")
-            strat_tabs = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200", "💼 SMSF"])
-
-            with strat_tabs[0]:
-                strat_agg = active_df.groupby('Strategy').agg({
-                    'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
-                    'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean' 
-                }).reset_index()
-                
-                strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
-                strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
-                
-                total_row = pd.DataFrame({
-                    'Strategy': ['TOTAL'], 
-                    'P&L': [strat_agg['P&L'].sum()], 'Debit': [strat_agg['Debit'].sum()],
-                    'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
-                    'Name': [strat_agg['Name'].sum()], 
-                    'Daily Yield %': [active_df['Daily Yield %'].mean()],
-                    'Ann. ROI': [active_df['Ann. ROI'].mean()],
-                    'Theta Eff.': [active_df['Theta Eff.'].mean()],
-                    'P&L Vol': [active_df['P&L Vol'].mean()],
-                    'Trend': ['-'], 'Target %': ['-']
-                })
-                final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
-                
-                display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'P&L Vol', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
-                display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Θ Eff', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
-                
-                def highlight_trend(val):
-                    return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
-
-                def style_total(row):
-                    return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
-
-                st.dataframe(
-                    display_agg.style
-                    .format({
-                        'Total P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
-                        'Total Debit': lambda x: safe_fmt(x, "${:,.0f}"), 
-                        'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
-                        'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
-                        'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
-                        'Ann. ROI': lambda x: safe_fmt(x, "{:.1f}%"), 
-                        'Θ Eff': lambda x: safe_fmt(x, "{:.2f}"),
-                        'Sleep Well (Vol)': lambda x: safe_fmt(x, "{:.1f}"),
-                        'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                with strat_tabs_inner[0]:
+                    strat_agg = active_df.groupby('Strategy').agg({
+                        'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                        'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean' 
+                    }).reset_index()
+                    
+                    strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
+                    strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
+                    
+                    total_row = pd.DataFrame({
+                        'Strategy': ['TOTAL'], 
+                        'P&L': [strat_agg['P&L'].sum()], 'Debit': [strat_agg['Debit'].sum()],
+                        'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
+                        'Name': [strat_agg['Name'].sum()], 
+                        'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                        'Ann. ROI': [active_df['Ann. ROI'].mean()],
+                        'Theta Eff.': [active_df['Theta Eff.'].mean()],
+                        'P&L Vol': [active_df['P&L Vol'].mean()],
+                        'Trend': ['-'], 'Target %': ['-']
                     })
-                    .map(highlight_trend, subset=['Trend'])
-                    .apply(style_total, axis=1), 
-                    use_container_width=True
-                )
+                    final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
+                    
+                    display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'P&L Vol', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                    display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', 'Θ Eff', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
+                    
+                    def highlight_trend(val):
+                        return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
 
-            cols = ['Name', 'Link', 'Action', 'Exit Score', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
-            
-            def render_tab(tab, strategy_name):
-                with tab:
-                    subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                    bench = benchmarks.get(strategy_name) or BASE_CONFIG.get(strategy_name) or {'pnl': 0, 'yield': 0, 'dit': 0}
-                    target_yield = bench.get('yield', 0)
-                    target_disp = bench.get('pnl', 0) * regime_mult
-                    
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Hist. Avg Win", f"${bench.get('pnl',0):,.0f}")
-                    c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%/d")
-                    c3.metric("Target Profit", f"${target_disp:,.0f}")
-                    c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
-                    
-                    if not subset.empty:
-                        sum_row = pd.DataFrame({
-                            'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Exit Score': [0], 'Grade': ['-'],
-                            'Theta/Cap %': [subset['Theta/Cap %'].mean()],
-                            'Daily Yield %': [subset['Daily Yield %'].mean()],
-                            'Ann. ROI': [subset['Ann. ROI'].mean()],
-                            'Theta Eff.': [subset['Theta Eff.'].mean()],
-                            'P&L Vol': [subset['P&L Vol'].mean()],
-                            'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
-                            'Days Held': [subset['Days Held'].mean()],
-                            'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
-                            'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()], 'Notes': ['']
+                    def style_total(row):
+                        return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
+
+                    st.dataframe(
+                        display_agg.style
+                        .format({
+                            'Total P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
+                            'Total Debit': lambda x: safe_fmt(x, "${:,.0f}"), 
+                            'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
+                            'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
+                            'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
+                            'Ann. ROI': lambda x: safe_fmt(x, "{:.1f}%"), 
+                            'Θ Eff': lambda x: safe_fmt(x, "{:.2f}"),
+                            'Sleep Well (Vol)': lambda x: safe_fmt(x, "{:.1f}"),
+                            'Target': lambda x: safe_fmt(x, "{:.2f}%")
                         })
-                        display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                        .map(highlight_trend, subset=['Trend'])
+                        .apply(style_total, axis=1), 
+                        use_container_width=True
+                    )
+
+                cols = ['Name', 'Link', 'Action', 'Exit Score', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+                
+                def render_tab(tab, strategy_name):
+                    with tab:
+                        subset = active_df[active_df['Strategy'] == strategy_name].copy()
+                        bench = benchmarks.get(strategy_name) or BASE_CONFIG.get(strategy_name) or {'pnl': 0, 'yield': 0, 'dit': 0}
+                        target_yield = bench.get('yield', 0)
+                        target_disp = bench.get('pnl', 0) * regime_mult
                         
-                        def yield_color(val):
-                            if isinstance(val, (int, float)):
-                                if val < 0: return 'color: red; font-weight: bold'
-                                if val >= target_yield * 0.8: return 'color: green; font-weight: bold' 
-                                return 'color: orange; font-weight: bold' 
-                            return ''
-
-                        st.dataframe(
-                            display_df.style
-                            .format({
-                                'Theta/Cap %': "{:.2f}%", 
-                                'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 
-                                'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 
-                                'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}",
-                                'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 
-                                'Days Held': "{:.0f}"
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Hist. Avg Win", f"${bench.get('pnl',0):,.0f}")
+                        c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%/d")
+                        c3.metric("Target Profit", f"${target_disp:,.0f}")
+                        c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
+                        
+                        if not subset.empty:
+                            sum_row = pd.DataFrame({
+                                'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Exit Score': [0], 'Grade': ['-'],
+                                'Theta/Cap %': [subset['Theta/Cap %'].mean()],
+                                'Daily Yield %': [subset['Daily Yield %'].mean()],
+                                'Ann. ROI': [subset['Ann. ROI'].mean()],
+                                'Theta Eff.': [subset['Theta Eff.'].mean()],
+                                'P&L Vol': [subset['P&L Vol'].mean()],
+                                'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()],
+                                'Days Held': [subset['Days Held'].mean()],
+                                'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
+                                'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()], 'Notes': ['']
                             })
-                            .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
-                            .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else ('color: #842029; font-weight: bold' if 'F' in str(v) else 'color: #d97706; font-weight: bold'), subset=['Grade'])
-                            .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
-                            .map(yield_color, subset=['Daily Yield %'])
-                            .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
-                            .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
-                            .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
-                            use_container_width=True,
-                            column_config={
-                                "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️"),
-                                "Exit Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d")
-                            }
-                        )
-                    else: st.info("No active trades.")
+                            display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                            
+                            def yield_color(val):
+                                if isinstance(val, (int, float)):
+                                    if val < 0: return 'color: red; font-weight: bold'
+                                    if val >= target_yield * 0.8: return 'color: green; font-weight: bold' 
+                                    return 'color: orange; font-weight: bold' 
+                                return ''
 
-            render_tab(strat_tabs[1], '130/160')
-            render_tab(strat_tabs[2], '160/190')
-            render_tab(strat_tabs[3], 'M200')
-            render_tab(strat_tabs[4], 'SMSF')
+                            st.dataframe(
+                                display_df.style
+                                .format({
+                                    'Theta/Cap %': "{:.2f}%", 
+                                    'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 
+                                    'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 
+                                    'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}",
+                                    'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 
+                                    'Days Held': "{:.0f}"
+                                })
+                                .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
+                                .map(lambda v: 'color: #0f5132; font-weight: bold' if 'A' in str(v) else ('color: #842029; font-weight: bold' if 'F' in str(v) else 'color: #d97706; font-weight: bold'), subset=['Grade'])
+                                .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
+                                .map(yield_color, subset=['Daily Yield %'])
+                                .map(lambda v: 'color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v > 45 else '', subset=['Days Held'])
+                                .map(lambda v: 'background-color: #ffcccb; color: #8b0000; font-weight: bold' if isinstance(v, (int, float)) and v < 0.1 else ('background-color: #d1e7dd; color: #0f5132; font-weight: bold' if isinstance(v, (int, float)) and v > 0.2 else ''), subset=['Theta/Cap %'])
+                                .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
+                                use_container_width=True,
+                                column_config={
+                                    "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️"),
+                                    "Exit Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d")
+                                }
+                            )
+                        else: st.info("No active trades.")
+
+                render_tab(strat_tabs_inner[1], '130/160')
+                render_tab(strat_tabs_inner[2], '160/190')
+                render_tab(strat_tabs_inner[3], 'M200')
+                render_tab(strat_tabs_inner[4], 'SMSF')
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
 # 3. ANALYTICS
-with tab3:
+with tab_analytics:
     if not df.empty:
         # 1. METRICS LEDGER
         st.markdown("### 📊 Performance Deep Dive")
@@ -862,134 +848,57 @@ with tab3:
         
         st.divider()
         
-        an1, an2, an3, an4, an5, an6, an7, an8, an9 = st.tabs([
-            "🔎 Root Cause", "⚖️ Anatomy of Win", "🌊 Equity Curve", 
-            "🎯 Expectancy", "🔥 Heatmaps", "⚠️ Risk Map", "🧬 Lifecycle",
-            "📉 Greek Decay", "⏳ Exit Optimizer"
-        ])
+        # Sub-tabs for Analytics (Compact View)
+        an1, an2, an3 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization"])
+        
+        with an1: # Diagnostics (Root Cause, Anatomy)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("🕵️ Root Cause Analysis")
+                expired_wins = df[(df['Status'] == 'Expired') & (df['P&L'] > 0)]
+                active_trades = df[df['Status'] == 'Active']
+                
+                if not expired_wins.empty and not active_trades.empty:
+                    avg_win_debit = expired_wins.groupby('Strategy')['Debit/Lot'].mean().reset_index()
+                    avg_act_debit = active_trades.groupby('Strategy')['Debit/Lot'].mean().reset_index()
+                    avg_win_debit['Type'] = 'Winning History'
+                    avg_act_debit['Type'] = 'Active (Current)'
+                    comp_df = pd.concat([avg_win_debit, avg_act_debit])
+                    
+                    fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group',
+                                    title="Entry Price per Lot Comparison",
+                                    color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
+                    st.plotly_chart(fig_price, use_container_width=True)
+                else: st.info("Need more data.")
 
-        # --- ROOT CAUSE ANALYSIS ---
-        with an1:
-            st.subheader("🕵️ Why are active trades suffering?")
-            st.caption("Comparing Active Trades (Current) vs Winning Historical Trades.")
-            
-            expired_wins = df[(df['Status'] == 'Expired') & (df['P&L'] > 0)]
-            active_trades = df[df['Status'] == 'Active']
-            
-            if not expired_wins.empty and not active_trades.empty:
-                # 1. PRICE CHECK
-                st.markdown("##### 1. Are you overpaying? (Entry Debit Comparison)")
-                avg_win_debit = expired_wins.groupby('Strategy')['Debit/Lot'].mean().reset_index()
-                avg_act_debit = active_trades.groupby('Strategy')['Debit/Lot'].mean().reset_index()
-                
-                avg_win_debit['Type'] = 'Winning History'
-                avg_act_debit['Type'] = 'Active (Current)'
-                
-                comp_df = pd.concat([avg_win_debit, avg_act_debit])
-                
-                fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group',
-                                   title="Entry Price per Lot: Winners vs Current",
-                                   color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
-                st.plotly_chart(fig_price, use_container_width=True)
-                
-            else:
-                st.info("Need both active and closed winning trades to perform analysis.")
-            
-            if not active_trades.empty:
-                st.divider()
-                st.markdown("##### 2. Active Greeks Lab (Fleet Risk)")
-                st.caption("Analyze the Greek Exposure of your CURRENT active trades.")
-                
-                g1, g2 = st.columns(2)
-                with g1:
-                    fig_delta = px.scatter(active_trades, x='Delta', y='Theta', size='Debit', color='Strategy',
-                                           title="Delta vs Theta (Size = Capital)", hover_data=['Name'])
-                    st.plotly_chart(fig_delta, use_container_width=True)
-                with g2:
-                     if 'IV' in active_trades.columns:
-                        if active_trades['IV'].sum() == 0:
-                            st.warning("⚠️ IV data is all zeros. Did you re-sync your active files?")
-                        else:
-                            fig_iv = px.scatter(active_trades, x='IV', y='Vega', size='Debit', color='Strategy',
-                                                title="IV vs Vega Exposure", hover_data=['Name'])
-                            st.plotly_chart(fig_iv, use_container_width=True)
-                
-                st.divider()
-                st.markdown("##### 3. Capital Velocity (Lazy vs. Fast Money)")
-                fig_vel = px.scatter(active_trades, x='Days Held', y='P&L', size='Debit', color='Strategy',
-                                     title="Trade Velocity: P&L vs Time (with Trendline)",
-                                     hover_data=['Name'], trendline="ols")
-                # Add "Drag Zone"
-                fig_vel.add_shape(type="rect", x0=30, y0=-500, x1=100, y1=100, 
-                                  line=dict(color="Red", width=2, dash="dot"),
-                                  fillcolor="Red", opacity=0.1)
-                fig_vel.add_annotation(x=60, y=-200, text="DRAG ZONE (Old & Flat)", showarrow=False, font=dict(color="red"))
-                st.plotly_chart(fig_vel, use_container_width=True)
+            with col2:
+                st.subheader("⚖️ Profit Drivers (Puts vs Calls)")
+                expired = df[df['Status'] == 'Expired'].copy()
+                if not expired.empty:
+                    leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
+                    fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], 
+                                        title="Profit Source Split",
+                                        color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
+                    st.plotly_chart(fig_legs, use_container_width=True)
+                else: st.info("No closed trades.")
 
-        # --- ANATOMY OF A WIN ---
-        with an2:
-            st.subheader("⚖️ Put vs Call Contribution (Closed Trades)")
-            st.caption("For closed trades only. Where does the profit actually come from?")
-            
-            expired = df[df['Status'] == 'Expired'].copy()
+            st.markdown("##### 🔬 Trade-by-Trade Split")
             if not expired.empty:
-                leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L', 'P&L']].sum().reset_index()
-                
-                fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], 
-                                    title="Profit Driver: Puts vs Calls",
-                                    labels={'value': 'PnL ($)', 'variable': 'Leg Side'},
-                                    color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
-                st.plotly_chart(fig_legs, use_container_width=True)
-                
-                st.divider()
-                st.markdown("##### 🔬 Trade-by-Trade Split")
-                
                 split_df = expired[['Name', 'Strategy', 'Put P&L', 'Call P&L', 'P&L']].copy()
                 split_df['Calc Sum'] = split_df['Put P&L'] + split_df['Call P&L']
                 split_df['Diff'] = split_df['P&L'] - split_df['Calc Sum']
-                
-                st.dataframe(
-                    split_df.style.format({
-                        'Put P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 
-                        'P&L': "${:,.0f}", 'Calc Sum': "${:,.0f}", 'Diff': "${:,.0f}"
-                    })
-                    .map(lambda x: 'color: green' if isinstance(x, (int, float)) and x > 0 else ('color: red' if isinstance(x, (int, float)) and x < 0 else ''), subset=['Put P&L', 'Call P&L', 'P&L']),
-                    use_container_width=True
-                )
-                st.caption("Note: 'P&L' is the Broker Total. 'Calc Sum' is raw leg sum.")
-            else:
-                st.info("No closed trades.")
+                st.dataframe(split_df.style.format({'Put P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 'P&L': "${:,.0f}", 'Calc Sum': "${:,.0f}", 'Diff': "${:,.0f}"}).map(lambda x: 'color: green' if isinstance(x, (int, float)) and x > 0 else ('color: red' if isinstance(x, (int, float)) and x < 0 else ''), subset=['Put P&L', 'Call P&L', 'P&L']), use_container_width=True)
 
-        with an3:
-            # EQUITY CURVE
+        with an2: # Trends (Equity, Heatmaps, Lifecycle)
             if not expired_df.empty:
                 ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
                 ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
                 fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Realized Equity Curve", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.info("No closed trades.")
             
-        with an4:
-            # EXPECTANCY
+            st.divider()
+            hm1, hm2, hm3 = st.tabs(["🗓️ Seasonality", "⏳ Duration", "📅 Entry Day"])
             if not expired_df.empty:
-                strat_perf = []
-                for strat, grp in expired_df.groupby('Strategy'):
-                    w = grp[grp['P&L'] > 0]
-                    l = grp[grp['P&L'] <= 0]
-                    wr = len(w) / len(grp) * 100
-                    pf = (w['P&L'].sum() / abs(l['P&L'].sum())) if abs(l['P&L'].sum()) > 0 else 100.0
-                    strat_perf.append({
-                        'Strategy': strat, 'Trades': len(grp), 'Win Rate': wr, 
-                        'Profit Factor': pf, 'Total P&L': grp['P&L'].sum()
-                    })
-                perf_df = pd.DataFrame(strat_perf)
-                st.dataframe(perf_df.style.format({'Win Rate': "{:.1f}%", 'Profit Factor': "{:.2f}", 'Total P&L': "${:,.0f}"}), use_container_width=True)
-
-        with an5:
-            # HEATMAPS
-            if not expired_df.empty:
-                hm1, hm2, hm3 = st.tabs(["🗓️ Seasonality", "⏳ Duration", "📅 Entry Day"])
-                
                 exp_hm = expired_df.dropna(subset=['Exit Date']).copy()
                 exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name()
                 exp_hm['Year'] = exp_hm['Exit Date'].dt.year
@@ -999,122 +908,61 @@ with tab3:
                     months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
                     fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True, color_continuous_scale="RdBu")
                     st.plotly_chart(fig, use_container_width=True)
-                
                 with hm2:
-                    fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", 
-                                              title="Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                    fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", title="Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
                     st.plotly_chart(fig2, use_container_width=True)
-                
                 with hm3:
                     if 'Entry Date' in exp_hm.columns:
                         exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
                         days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-                        fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg",
-                                                  title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                        fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg", title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
                         st.plotly_chart(fig3, use_container_width=True)
 
-        with an6:
-            # RISK MAP
-            active_only = df[df['Status'] == 'Active']
-            if not active_only.empty:
-                c1, c2 = st.columns(2)
-                with c1:
-                    fig_strat = px.pie(active_only, values='Debit', names='Strategy', title="Risk by Strategy (Capital)", hole=0.4)
-                    st.plotly_chart(fig_strat, use_container_width=True)
-                with c2:
-                    gamma_wall = active_only.groupby('Exit Date')['Debit'].sum().reset_index()
-                    fig_gw = px.bar(gamma_wall, x='Exit Date', y='Debit', title="Expiration Wall (Capital at Risk)", color='Debit', color_continuous_scale='Reds')
-                    st.plotly_chart(fig_gw, use_container_width=True)
-
-        with an7:
-            # LIFECYCLE
-            snaps = load_snapshots()
-            if not snaps.empty:
-                sel_strat = st.selectbox("Select Strategy", snaps['strategy'].unique(), key="life_strat")
-                strat_snaps = snaps[snaps['strategy'] == sel_strat]
-                fig = px.line(strat_snaps, x='days_held', y='pnl', color='name', line_group='id', title=f"Trade Lifecycle: {sel_strat}", markers=True)
-                st.plotly_chart(fig, use_container_width=True)
-            else: st.info("No snapshots yet.")
-
-        # --- GREEK DECAY TRACKING ---
-        with an8:
-            st.subheader("📉 Greek Decay Tracking")
-            st.caption("Visualizing the path of Theta and Delta over time. Are you decaying as expected?")
+        with an3: # Risk & Optimization (Greeks, Decay, Optimizer)
+            if not active_trades.empty:
+                g1, g2 = st.columns(2)
+                with g1:
+                    fig_delta = px.scatter(active_trades, x='Delta', y='Theta', size='Debit', color='Strategy', title="Active Fleet: Delta vs Theta", hover_data=['Name'])
+                    st.plotly_chart(fig_delta, use_container_width=True)
+                with g2:
+                    if 'IV' in active_trades.columns and active_trades['IV'].sum() > 0:
+                        fig_iv = px.scatter(active_trades, x='IV', y='Vega', size='Debit', color='Strategy', title="Active Fleet: IV vs Vega", hover_data=['Name'])
+                        st.plotly_chart(fig_iv, use_container_width=True)
             
+            st.divider()
+            st.subheader("📉 Greek Decay Tracking")
             snaps = load_snapshots()
             if not snaps.empty:
                 decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
                 strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
-                
                 if not strat_snaps.empty:
                     d1, d2 = st.columns(2)
                     with d1:
-                        # Theta Decay Curve
-                        fig_theta = px.scatter(strat_snaps, x='days_held', y='theta', color='name',
-                                               title=f"Theta Decay: {decay_strat}",
-                                               labels={'days_held': 'Days Held', 'theta': 'Daily Theta ($)'},
-                                               trendline="lowess") # Local regression curve
+                        fig_theta = px.scatter(strat_snaps, x='days_held', y='theta', color='name', title=f"Theta Decay: {decay_strat}", labels={'days_held': 'Days', 'theta': 'Theta'}, trendline="lowess")
                         st.plotly_chart(fig_theta, use_container_width=True)
-                        st.caption("Ideally, Theta should increase (decay accelerates) or stay stable. Drops indicate risk.")
-
                     with d2:
-                        # Delta Drift
-                        fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name',
-                                               title=f"Delta Drift: {decay_strat}",
-                                               labels={'days_held': 'Days Held', 'delta': 'Net Delta'},
-                                               trendline="lowess")
+                        fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name', title=f"Delta Drift: {decay_strat}", labels={'days_held': 'Days', 'delta': 'Delta'}, trendline="lowess")
                         st.plotly_chart(fig_delta, use_container_width=True)
-                        st.caption("Watch for Delta drifting too far from 0. High drift = Directional Risk.")
-                else:
-                    st.info(f"No snapshots for {decay_strat}.")
-            else:
-                st.info("Snapshots needed for decay tracking. Upload active files daily to build history.")
+            else: st.info("Upload daily active files to build decay history.")
 
-        # --- EXIT OPTIMIZER ---
-        with an9:
+            st.divider()
             st.subheader("⏳ Exit Timing Optimizer")
-            st.caption("Historical probability: 'If I hold longer, do I make more money?'")
-            
             if not expired_df.empty:
                 opt_strat = st.selectbox("Optimize Strategy", expired_df['Strategy'].unique(), key="opt_strat")
                 strat_hist = expired_df[expired_df['Strategy'] == opt_strat].copy()
-                
                 if not strat_hist.empty:
-                    # Binning Days Held to create heatmap grid
                     strat_hist['Day_Bin'] = pd.cut(strat_hist['Days Held'], bins=[0, 15, 30, 45, 60, 90, 120], labels=['0-15d', '15-30d', '30-45d', '45-60d', '60-90d', '90d+'])
-                    
-                    # Binning PnL to understand state
-                    # Simple bins: Losers, Small Win, Big Win
                     pnl_bins = [-99999, -1, 500, 1000, 99999]
-                    pnl_labels = ['Loss (<$0)', 'Small Win ($0-$500)', 'Target Win ($500-$1k)', 'Home Run (>$1k)']
+                    pnl_labels = ['Loss', 'Small Win', 'Target Win', 'Home Run']
                     strat_hist['PnL_Bin'] = pd.cut(strat_hist['P&L'], bins=pnl_bins, labels=pnl_labels)
-                    
-                    # Create Heatmap Data: Average PnL for each bucket
                     heatmap_pnl = strat_hist.groupby(['PnL_Bin', 'Day_Bin'])['P&L'].mean().reset_index()
-                    
-                    # Pivot for Plotly
                     pnl_matrix = heatmap_pnl.pivot(index='PnL_Bin', columns='Day_Bin', values='P&L')
-                    
-                    fig_opt = px.imshow(pnl_matrix, 
-                                        text_auto=".0f", 
-                                        aspect="auto",
-                                        color_continuous_scale="RdBu",
-                                        title=f"Avg Exit PnL by Duration & Zone ({opt_strat})",
-                                        labels=dict(x="Days Held", y="Result Zone", color="Avg Final PnL"))
+                    fig_opt = px.imshow(pnl_matrix, text_auto=".0f", aspect="auto", color_continuous_scale="RdBu", title=f"Avg Exit PnL by Duration & Zone ({opt_strat})")
                     st.plotly_chart(fig_opt, use_container_width=True)
-                    
-                    st.info("""
-                    **How to read:** - This heatmap shows the **average final P&L** of trades that ended in these time buckets.
-                    - **Blue** means high profit exits. **Red** means loss exits.
-                    - Look for the **"Blue Zones"**: e.g., if '30-45d' is bluer than '15-30d', holding longer historically pays off.
-                    """)
-                else:
-                    st.warning("Not enough data for this strategy.")
-            else:
-                st.info("Need closed trade history to optimize exits.")
+            else: st.info("Need closed trade history.")
 
 # 4. RULE BOOK
-with tab4:
+with tab_rules:
     st.markdown("""
     # 📖 The Trader's Constitution
     *Refined by Data Audit & Behavioral Analysis*
@@ -1158,4 +1006,4 @@ with tab4:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v101.0 | Greek Decay & Exit Optimizer")
+    st.caption("Allantis Trade Guardian v102.0 | Compact Layout & Removed Validator")
