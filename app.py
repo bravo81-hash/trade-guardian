@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist # For Trade DNA
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v103.0 (Trade DNA, Roll Analysis & Advanced Analytics)")
+st.info("✅ RUNNING VERSION: v104.0 (Enhanced Analytics & DNA Fingerprinting)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -387,7 +387,6 @@ def sync_data(file_list, file_type):
                     today = datetime.now().date()
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
                     
-                    # Fix: Handle Missing Greeks
                     theta_val = t['theta'] if t['theta'] else 0.0
                     delta_val = t['delta'] if t['delta'] else 0.0
                     vega_val = t['vega'] if t['vega'] else 0.0
@@ -502,7 +501,6 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # Load greeks in snapshots
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, t.strategy, t.name, t.id
         FROM snapshots s
@@ -521,33 +519,19 @@ def load_snapshots():
 
 # --- HELPER: FIND SIMILAR TRADES ---
 def find_similar_trades(current_trade, historical_df, top_n=3):
-    """Find most similar historical trades using Greek profile."""
     if historical_df.empty:
         return pd.DataFrame()
-    
-    # Normalize Greeks for comparison
     features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
-    
-    # Ensure features exist
     for f in features:
         if f not in current_trade or f not in historical_df.columns:
             return pd.DataFrame()
-
-    # Create feature vectors
     curr_vec = np.nan_to_num(current_trade[features].values.astype(float)).reshape(1, -1)
     hist_vecs = np.nan_to_num(historical_df[features].values.astype(float))
-    
-    # Calculate Euclidean distance
     distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
-    
-    # Get top N most similar
     similar_idx = np.argsort(distances)[:top_n]
     similar = historical_df.iloc[similar_idx].copy()
-    
-    # Avoid division by zero
     max_dist = distances.max() if distances.max() > 0 else 1
     similar['Similarity %'] = 100 * (1 - distances[similar_idx] / max_dist)
-    
     return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
 
 # --- INITIALIZE DB ---
@@ -639,13 +623,11 @@ def calc_exit_score(row, benchmarks):
     bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}))
     target = bench.get('pnl', 1000) * regime_mult
     
-    # Profit progress (0-50 points)
     if row['P&L'] >= target: 
         score += 50
     elif row['P&L'] >= target * 0.8: 
-        score += 30 + (row['P&L'] / target) * 20 # Graduated scale
+        score += 30 + (row['P&L'] / target) * 20
     
-    # Time factor (0-30 points)
     avg_days = bench.get('dit', 40)
     if row['Days Held'] > avg_days * 1.5: 
         score += 30
@@ -653,11 +635,10 @@ def calc_exit_score(row, benchmarks):
         score += 15
     if strat == '130/160' and row['Days Held'] > 25: score += 30
     
-    # Efficiency (0-20 points)
     if row['Theta Eff.'] < 0.5: score += 20
     elif row['Theta Eff.'] < 0.8: score += 10
     
-    return min(100, max(0, score)) # Force 0-100 range
+    return min(100, max(0, score))
 
 # --- MAIN APP ---
 df = load_data()
@@ -676,7 +657,7 @@ if not df.empty:
                     'dit': winners['Days Held'].mean()
                 }
 
-# --- TABS (COMPACT LAYOUT) ---
+# --- TABS ---
 tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "📖 Rules"])
 
 # 1. ACTIVE DASHBOARD
@@ -687,7 +668,6 @@ with tab_dash:
         if active_df.empty:
             st.info("📭 No active trades.")
         else:
-            # --- PORTFOLIO WIDGET ---
             tot_theta = active_df['Theta'].sum()
             tot_debit = active_df['Debit'].sum()
             eff_score = (tot_theta / tot_debit * 100) if tot_debit > 0 else 0
@@ -697,7 +677,6 @@ with tab_dash:
             c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
             c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
             
-            # VIX Context
             current_q = f"{datetime.now().year}-Q{(datetime.now().month-1)//3 + 1}"
             market_vix = VIX_CONTEXT.get(current_q, 15.0)
             avg_entry_iv = active_df['IV'].mean()
@@ -718,7 +697,6 @@ with tab_dash:
             active_df['Signal_Type'] = sig_list
             active_df['Exit Score'] = score_list
 
-            # --- ACTION QUEUE (Collapsible) ---
             todo_df = active_df[active_df['Action'] != ""]
             with st.expander(f"✅ Action Queue ({len(todo_df)})", expanded=False):
                 if not todo_df.empty:
@@ -738,7 +716,6 @@ with tab_dash:
 
             st.divider()
 
-            # --- DASHBOARD SUB-TABS ---
             sub_journal, sub_strat = st.tabs(["📝 Journal & Overview", "🏛️ Strategy Detail"])
 
             with sub_journal:
@@ -775,7 +752,6 @@ with tab_dash:
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
                 
-                # Trade DNA Section in Expander
                 with st.expander("🧬 Trade DNA Fingerprinting (Find Similar)", expanded=False):
                     if not expired_df.empty:
                         selected_dna_trade = st.selectbox("Select Active Trade to Analyze", active_df['Name'].unique())
@@ -917,7 +893,6 @@ with tab_dash:
 # 3. ANALYTICS
 with tab_analytics:
     if not df.empty:
-        # 1. METRICS LEDGER
         st.markdown("### 📊 Performance Deep Dive")
         
         realized_pnl = df[df['Status']=='Expired']['P&L'].sum()
@@ -930,10 +905,9 @@ with tab_analytics:
         
         st.divider()
         
-        # Sub-tabs for Analytics (Compact View)
         an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
         
-        with an1: # Diagnostics (Root Cause, Anatomy)
+        with an1:
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("🕵️ Root Cause Analysis")
@@ -971,7 +945,7 @@ with tab_analytics:
                 split_df['Diff'] = split_df['P&L'] - split_df['Calc Sum']
                 st.dataframe(split_df.style.format({'Put P&L': "${:,.0f}", 'Call P&L': "${:,.0f}", 'P&L': "${:,.0f}", 'Calc Sum': "${:,.0f}", 'Diff': "${:,.0f}"}).map(lambda x: 'color: green' if isinstance(x, (int, float)) and x > 0 else ('color: red' if isinstance(x, (int, float)) and x < 0 else ''), subset=['Put P&L', 'Call P&L', 'P&L']), use_container_width=True)
 
-        with an2: # Trends (Equity, Heatmaps, Lifecycle)
+        with an2:
             if not expired_df.empty:
                 ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
                 ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
@@ -1000,8 +974,7 @@ with tab_analytics:
                         fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg", title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
                         st.plotly_chart(fig3, use_container_width=True)
 
-        with an3: # Risk & Optimization (Greeks, Decay, Optimizer)
-            # Correlation Matrix
+        with an3: 
             st.subheader("🔗 Strategy Correlation Matrix")
             if not expired_df.empty:
                 pivot = expired_df.pivot_table(index='Exit Date', columns='Strategy', values='P&L', aggfunc='sum').fillna(0)
@@ -1030,7 +1003,8 @@ with tab_analytics:
                 strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
                 if not strat_snaps.empty:
                     # Calculate Expected Decay (Linear Model)
-                    strat_snaps['Theta_Expected'] = strat_snaps.groupby('id')['theta'].transform('first') * (1 - strat_snaps['days_held'] / 45)
+                    first_theta = strat_snaps.groupby('id')['theta'].transform('first')
+                    strat_snaps['Theta_Expected'] = first_theta * (1 - strat_snaps['days_held'] / 45)
                     
                     d1, d2 = st.columns(2)
                     with d1:
@@ -1060,9 +1034,9 @@ with tab_analytics:
                     st.plotly_chart(fig_opt, use_container_width=True)
             else: st.info("Need closed trade history.")
 
-        with an4: # Roll Campaign Analysis
+        with an4: 
             st.subheader("🔄 Roll Campaign Analysis")
-            rolled_trades = df[df['Parent ID'].notna()].copy()
+            rolled_trades = df[df['Parent ID'].notna() & (df['Parent ID'] != "")].copy()
             if not rolled_trades.empty:
                 campaign_summary = []
                 for parent in rolled_trades['Parent ID'].unique():
@@ -1094,7 +1068,7 @@ with tab_analytics:
                     else:
                         st.warning(f"⚠️ Rolling HURTS: Consider taking losses earlier.")
             else:
-                st.info("No rolled trades linked via Parent ID yet.")
+                st.info("No rolled trades linked via Parent ID yet. Use the 'Journal' tab to link trades.")
 
 # 4. RULE BOOK
 with tab_rules:
@@ -1141,4 +1115,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v103.0 | Trade DNA, Roll Analysis & Advanced Analytics")
+    st.caption("Allantis Trade Guardian v104.0 | Trade DNA, Roll Analysis & Advanced Analytics")
