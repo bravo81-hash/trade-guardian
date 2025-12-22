@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v106.0 (Theta Decay Fix - Anchor Logic)")
+st.info("✅ RUNNING VERSION: v107.0 (Theta Decay Fix & Strategic Insights)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -625,11 +625,13 @@ def calc_exit_score(row, benchmarks):
     bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}))
     target = bench.get('pnl', 1000) * regime_mult
     
+    # Profit progress (0-50 points)
     if row['P&L'] >= target: 
         score += 50
     elif row['P&L'] >= target * 0.8: 
         score += 30 + (row['P&L'] / target) * 20
     
+    # Time factor (0-30 points)
     avg_days = bench.get('dit', 40)
     if row['Days Held'] > avg_days * 1.5: 
         score += 30
@@ -637,6 +639,7 @@ def calc_exit_score(row, benchmarks):
         score += 15
     if strat == '130/160' and row['Days Held'] > 25: score += 30
     
+    # Efficiency (0-20 points)
     if row['Theta Eff.'] < 0.5: score += 20
     elif row['Theta Eff.'] < 0.8: score += 10
     
@@ -679,11 +682,15 @@ with tab_dash:
             c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
             c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
             
-            current_q = f"{datetime.now().year}-Q{(datetime.now().month-1)//3 + 1}"
-            market_vix = VIX_CONTEXT.get(current_q, 15.0)
-            avg_entry_iv = active_df['IV'].mean()
-            delta_iv = avg_entry_iv - market_vix
-            c4.metric("Avg Entry IV", f"{avg_entry_iv:.1f}", delta=f"{delta_iv:.1f} vs VIX", delta_color="normal")
+            # Capital Velocity
+            target_days = benchmarks.get('130/160', {}).get('dit', 36)
+            c4.metric("Capital Velocity", f"{active_df['Days Held'].mean():.0f} days avg", help="Lower = faster capital recycling", delta=f"Target: {target_days:.0f}d")
+            
+            # Stale Capital Warning
+            stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
+            if stale_capital > tot_debit * 0.3:
+                 st.warning(f"⚠️ ${stale_capital:,.0f} stuck in trades >40 days old. Consider exits.")
+
             st.divider()
 
             act_list, sig_list = [], []
@@ -760,6 +767,8 @@ with tab_dash:
                         curr_row = active_df[active_df['Name'] == selected_dna_trade].iloc[0]
                         similar = find_similar_trades(curr_row, expired_df)
                         if not similar.empty:
+                            best_match = similar.iloc[0]
+                            st.info(f"🎯 **Best Match:** {best_match['Name']} ({best_match['Similarity %']:.0f}% similar) → Made ${best_match['P&L']:,.0f} in {best_match['Days Held']:.0f} days")
                             st.write(f"Most similar historical trades to **{selected_dna_trade}**:")
                             st.dataframe(similar.style.format({'P&L': '${:,.0f}', 'ROI': '{:.1f}%', 'Similarity %': '{:.0f}%'}))
                             avg_outcome = similar['P&L'].mean()
@@ -900,10 +909,24 @@ with tab_analytics:
         realized_pnl = df[df['Status']=='Expired']['P&L'].sum()
         floating_pnl = df[df['Status']=='Active']['P&L'].sum()
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("💰 Banked Profit", f"${realized_pnl:,.0f}")
-        m2.metric("📄 Floating PnL", f"${floating_pnl:,.0f}", delta_color="normal")
-        m3.metric("🔮 Total Projected", f"${realized_pnl+floating_pnl:,.0f}")
+        # Expectancy Metrics
+        if not expired_df.empty:
+            total_trades = len(expired_df)
+            win_rate = (expired_df['P&L'] > 0).sum() / total_trades if total_trades > 0 else 0
+            avg_win = expired_df[expired_df['P&L'] > 0]['P&L'].mean() if (expired_df['P&L'] > 0).any() else 0
+            avg_loss = abs(expired_df[expired_df['P&L'] <= 0]['P&L'].mean()) if (expired_df['P&L'] <= 0).any() else 0
+            expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+            
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("💰 Banked Profit", f"${realized_pnl:,.0f}")
+            m2.metric("📊 Win Rate", f"{win_rate:.1%}")
+            m3.metric("🎲 Expectancy", f"${expectancy:,.0f}", help="Expected $ per trade")
+            m4.metric("🔮 Total Projected", f"${realized_pnl+floating_pnl:,.0f}")
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("💰 Banked Profit", f"${realized_pnl:,.0f}")
+            m2.metric("📄 Floating PnL", f"${floating_pnl:,.0f}", delta_color="normal")
+            m3.metric("🔮 Total Projected", f"${realized_pnl+floating_pnl:,.0f}")
         
         st.divider()
         
@@ -1049,8 +1072,10 @@ with tab_analytics:
                             avg_deviation = (strat_snaps['theta'] - strat_snaps['Theta_Expected']).mean()
                             if avg_deviation > 10:
                                 st.success(f"✅ Theta holding better than expected (+${avg_deviation:.0f}/day avg)")
+                                st.info("💡 **Action:** Current positions have resilient Greeks. Consider letting winners run longer.")
                             elif avg_deviation < -10:
                                 st.warning(f"⚠️ Theta decaying faster than expected (${avg_deviation:.0f}/day avg)")
+                                st.error("🚨 **Action:** Greeks deteriorating. Review for early exit or structural issues.")
                             else:
                                 st.info("📊 Theta decay tracking as expected")
                         
@@ -1100,7 +1125,7 @@ with tab_analytics:
                     camp_df = pd.DataFrame(campaign_summary)
                     st.dataframe(camp_df.style.format({'Total P&L': '${:,.0f}', 'Avg P&L/Leg': '${:,.0f}'}), use_container_width=True)
                     
-                    avg_single = expired_df[expired_df['Parent ID'] == ""]['P&L'].mean()
+                    avg_single = expired_df[expired_df['Parent ID'].isna() | (expired_df['Parent ID'] == "")]['P&L'].mean()
                     avg_rolled = camp_df['Total P&L'].mean()
                     
                     c1, c2 = st.columns(2)
@@ -1159,4 +1184,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v106.0 (Theta Decay Fix - Anchor Logic)")
+    st.caption("Allantis Trade Guardian v107.0 (Theta Decay Fix & Strategic Insights)")
