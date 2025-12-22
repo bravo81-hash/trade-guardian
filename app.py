@@ -1042,7 +1042,8 @@ with tab_analytics:
                     # --- NEW FEATURE: PnL LIFE CYCLE GRAPH ---
                     fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', 
                                       title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})",
-                                      labels={'days_held': 'Days Held', 'pnl': 'P&L ($)'})
+                                      labels={'days_held': 'Days Held', 'pnl': 'P&L ($)'},
+                                      markers=True)
                     st.plotly_chart(fig_pnl, use_container_width=True)
                     # ----------------------------------------
                     
