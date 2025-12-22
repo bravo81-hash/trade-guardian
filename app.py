@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v105.0 (Fixed Greek Decay Curve)")
+st.info("✅ RUNNING VERSION: v105.1 (Robust Decay Curve Patch)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1004,14 +1004,16 @@ with tab_analytics:
                 decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
                 strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
                 if not strat_snaps.empty:
-                    # Calculate Expected Decay using stored initial_theta
-                    # If initial_theta is 0, we can try to use the max theta in the history as a proxy
+                    # Calculate Expected Decay (Linear Model) using initial theta from trades table if available,
+                    # otherwise fallback to max snapshot theta
                     if 'initial_theta' in strat_snaps.columns:
-                        strat_snaps['Theta_Expected'] = strat_snaps['initial_theta'] * (1 - strat_snaps['days_held'] / 45)
+                        # Use max of initial_theta or max observed theta as anchor to avoid 0s
+                        max_observed = strat_snaps.groupby('id')['theta'].transform('max')
+                        anchor = np.maximum(strat_snaps['initial_theta'], max_observed)
                     else:
-                        # Fallback if initial_theta missing
-                        first_theta = strat_snaps.groupby('id')['theta'].transform('first')
-                        strat_snaps['Theta_Expected'] = first_theta * (1 - strat_snaps['days_held'] / 45)
+                        anchor = strat_snaps.groupby('id')['theta'].transform('max')
+                        
+                    strat_snaps['Theta_Expected'] = anchor * (1 - strat_snaps['days_held'] / 45)
                     
                     d1, d2 = st.columns(2)
                     with d1:
@@ -1122,4 +1124,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v105.0 | Fixed Greek Decay Curve")
+    st.caption("Allantis Trade Guardian v105.1 | Robust Decay Curve Patch")
