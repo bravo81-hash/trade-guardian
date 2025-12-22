@@ -625,13 +625,11 @@ def calc_exit_score(row, benchmarks):
     bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}))
     target = bench.get('pnl', 1000) * regime_mult
     
-    # Profit progress (0-50 points)
     if row['P&L'] >= target: 
         score += 50
     elif row['P&L'] >= target * 0.8: 
         score += 30 + (row['P&L'] / target) * 20
     
-    # Time factor (0-30 points)
     avg_days = bench.get('dit', 40)
     if row['Days Held'] > avg_days * 1.5: 
         score += 30
@@ -639,7 +637,6 @@ def calc_exit_score(row, benchmarks):
         score += 15
     if strat == '130/160' and row['Days Held'] > 25: score += 30
     
-    # Efficiency (0-20 points)
     if row['Theta Eff.'] < 0.5: score += 20
     elif row['Theta Eff.'] < 0.8: score += 10
     
@@ -682,11 +679,12 @@ with tab_dash:
             c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
             c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
             
-            # Capital Velocity
-            target_days = benchmarks.get('130/160', {}).get('dit', 36)
-            c4.metric("Capital Velocity", f"{active_df['Days Held'].mean():.0f} days avg", help="Lower = faster capital recycling", delta=f"Target: {target_days:.0f}d")
+            current_q = f"{datetime.now().year}-Q{(datetime.now().month-1)//3 + 1}"
+            market_vix = VIX_CONTEXT.get(current_q, 15.0)
+            avg_entry_iv = active_df['IV'].mean()
+            delta_iv = avg_entry_iv - market_vix
+            c4.metric("Capital Velocity", f"{active_df['Days Held'].mean():.0f} days avg", help="Lower = faster capital recycling")
             
-            # Stale Capital Warning
             stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
             if stale_capital > tot_debit * 0.3:
                  st.warning(f"⚠️ ${stale_capital:,.0f} stuck in trades >40 days old. Consider exits.")
