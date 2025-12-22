@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v110.0 (Decision Ladder System)")
+st.info("✅ RUNNING VERSION: v111.0 (Traffic Light Health Indicator)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -694,8 +694,30 @@ with tab_dash:
         if active_df.empty:
             st.info("📭 No active trades.")
         else:
-            tot_theta = active_df['Theta'].sum()
+            # --- CALCULATE PORTFOLIO HEALTH (New in v111.0) ---
             tot_debit = active_df['Debit'].sum()
+            if tot_debit == 0: tot_debit = 1
+            
+            target_allocation = {'130/160': 0.30, '160/190': 0.40, 'M200': 0.20, 'SMSF': 0.10}
+            actual_alloc = active_df.groupby('Strategy')['Debit'].sum() / tot_debit
+            allocation_score = 100 - sum(abs(actual_alloc.get(s, 0) - target_allocation.get(s, 0)) * 100 for s in target_allocation)
+            
+            total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
+            avg_age = active_df['Days Held'].mean()
+            
+            health_status = "🟢 HEALTHY" if allocation_score > 80 and total_delta_pct < 2 and avg_age < 25 else \
+                            "🟡 REVIEW" if allocation_score > 60 and total_delta_pct < 5 and avg_age < 35 else \
+                            "🔴 CRITICAL"
+            
+            if "HEALTHY" in health_status:
+                st.success(f"**Portfolio Status: {health_status}** (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
+            elif "REVIEW" in health_status:
+                st.warning(f"**Portfolio Status: {health_status}** (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
+            else:
+                st.error(f"**Portfolio Status: {health_status}** (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
+            
+            # --- EXISTING DASHBOARD METRICS ---
+            tot_theta = active_df['Theta'].sum()
             eff_score = (tot_theta / tot_debit * 100) if tot_debit > 0 else 0
             
             c1, c2, c3, c4 = st.columns(4)
@@ -920,12 +942,12 @@ with tab_dash:
 # 3. ANALYTICS
 with tab_analytics:
     if not df.empty:
-        # Re-establish active context for the health check
+        # Re-establish active context for the health check breakdown
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
         # --- NEW PORTFOLIO HEALTH CHECK (Added v108.0) ---
         if not active_df.empty:
-            st.markdown("### 🏥 Portfolio Health Check")
+            st.markdown("### 🏥 Portfolio Health Check (Breakdown)")
             health_col1, health_col2, health_col3 = st.columns(3)
             
             tot_debit = active_df['Debit'].sum()
@@ -1220,4 +1242,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v110.0 (Decision Ladder System)")
+    st.caption("Allantis Trade Guardian v111.0 (Traffic Light Health Indicator)")
