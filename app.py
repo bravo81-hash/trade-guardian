@@ -783,6 +783,13 @@ with tab_dash:
 
             active_df = active_df.sort_values('Urgency Score', ascending=False)
 
+            # Format the Juice Column for display (Global availability)
+            def fmt_juice(row):
+                if row['Juice Type'] == 'Recovery Days': return f"{row['Juice Val']:.0f} days"
+                return f"${row['Juice Val']:.0f}"
+            
+            active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
+
             todo_df = active_df[active_df['Urgency Score'] >= 70]
             with st.expander(f"🔥 Priority Action Queue ({len(todo_df)})", expanded=True):
                 if not todo_df.empty:
@@ -810,13 +817,6 @@ with tab_dash:
 
             with sub_journal:
                 st.caption("Trades sorted by Urgency. 'Gauge' shows either Remaining Profit ($) or Days to Breakeven (d).")
-                
-                # Format the Juice Column for display
-                def fmt_juice(row):
-                    if row['Juice Type'] == 'Recovery Days': return f"{row['Juice Val']:.0f} days"
-                    return f"${row['Juice Val']:.0f}"
-                
-                active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
 
                 display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Theta Eff.', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
@@ -919,7 +919,7 @@ with tab_dash:
                         use_container_width=True
                     )
 
-                cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+                cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 
                 def render_tab(tab, strategy_name):
                     with tab:
@@ -936,7 +936,7 @@ with tab_dash:
                         
                         if not subset.empty:
                             sum_row = pd.DataFrame({
-                                'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Urgency Score': [0], 'Grade': ['-'],
+                                'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Urgency Score': [0], 'Grade': ['-'], 'Gauge': ['-'],
                                 'Theta/Cap %': [subset['Theta/Cap %'].mean()],
                                 'Daily Yield %': [subset['Daily Yield %'].mean()],
                                 'Ann. ROI': [subset['Ann. ROI'].mean()],
@@ -976,7 +976,8 @@ with tab_dash:
                                 use_container_width=True,
                                 column_config={
                                     "Link": st.column_config.LinkColumn("OS Link", display_text="Open ↗️"),
-                                    "Urgency Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d")
+                                    "Urgency Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d"),
+                                    "Gauge": st.column_config.TextColumn("Tank / Recov", help="Wins: $ Left to Target. Losses: Days to Breakeven.")
                                 }
                             )
                         else: st.info("No active trades.")
