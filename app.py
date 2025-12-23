@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v115.0 (Analytics Restoration Fix)")
+st.info("✅ RUNNING VERSION: v116.0 (Pre-Flight Calculator Added)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -563,6 +563,57 @@ st.sidebar.markdown("⬇️ *finally...*")
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
+
+# --- NEW: PRE-FLIGHT CALCULATOR (v116.0) ---
+with st.sidebar.expander("✈️ Pre-Flight Calculator", expanded=False):
+    st.caption("Validate setup before entry.")
+    
+    pf_debit = st.number_input("Debit ($)", min_value=1.0, value=5000.0, step=100.0)
+    pf_theta = st.number_input("Theta ($)", min_value=0.0, value=15.0, step=1.0)
+    pf_delta = st.number_input("Net Delta (Abs)", min_value=0.0, value=10.0, step=1.0)
+    pf_vega = st.number_input("Vega", min_value=0.0, value=100.0, step=10.0)
+    
+    if st.button("Run Check"):
+        # Calculations
+        golden_ratio = pf_theta / (abs(pf_delta) + 1)
+        efficiency = (pf_theta / pf_debit) * 100
+        fragility = pf_vega / pf_theta if pf_theta > 0 else 999
+        
+        # Results
+        st.markdown("---")
+        
+        # 1. Golden Ratio
+        if golden_ratio > 1.0:
+            st.success(f"🛡️ **Stability: {golden_ratio:.2f}** (Fortress)")
+        elif golden_ratio > 0.5:
+            st.info(f"⚖️ **Stability: {golden_ratio:.2f}** (Income)")
+        else:
+            st.error(f"🎲 **Stability: {golden_ratio:.2f}** (Coin Flip)")
+            
+        # 2. Efficiency
+        if efficiency > 0.2:
+            st.success(f"💰 **Yield: {efficiency:.2f}%** (High)")
+        elif efficiency > 0.12:
+            st.info(f"💵 **Yield: {efficiency:.2f}%** (Standard)")
+        else:
+            st.error(f"📉 **Yield: {efficiency:.2f}%** (Low)")
+            
+        # 3. Fragility
+        if fragility < 5:
+            st.success(f"💎 **Fragility: {fragility:.1f}** (Robust)")
+        elif fragility < 10:
+            st.warning(f"⚠️ **Fragility: {fragility:.1f}** (Standard)")
+        else:
+            st.error(f"🔨 **Fragility: {fragility:.1f}** (Glass)")
+            
+        # Verdict
+        st.markdown("---")
+        if golden_ratio > 0.5 and efficiency > 0.12 and fragility < 10:
+            st.success("✅ **VERDICT: ENTER**")
+        elif golden_ratio < 0.25 or efficiency < 0.1:
+            st.error("❌ **VERDICT: SKIP**")
+        else:
+            st.warning("✋ **VERDICT: ADJUST / LIMIT SIZE**")
 
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
@@ -1308,4 +1359,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v115.0 (Analytics Restoration Fix)")
+    st.caption("Allantis Trade Guardian v116.0 (Pre-Flight Calculator Added)")
