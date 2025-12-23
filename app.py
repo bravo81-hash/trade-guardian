@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v111.0 (Traffic Light Health Indicator)")
+st.info("✅ RUNNING VERSION: v112.0 (Zombie Detector & Juice Gauge)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -601,43 +601,84 @@ regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in marke
 # --- SMART EXIT ENGINE ---
 def calculate_decision_ladder(row, benchmarks_dict):
     """
-    Returns (Action, Score, Reason)
-    Score: 0 (Safe) to 100 (Critical Action Needed)
+    Returns (Action, Score, Reason, Juice_Gauge_Value, Juice_Gauge_Type)
     """
     strat = row['Strategy']
     days = row['Days Held']
     pnl = row['P&L']
     status = row['Status']
+    theta = row['Theta']
     
-    if status == 'Missing': return "REVIEW", 100, "Missing from data"
+    # Defaults
+    juice_val = 0.0
+    juice_type = "Neutral"
+
+    if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
     
     bench = benchmarks_dict.get(strat, BASE_CONFIG.get(strat, {}))
     base_target = bench.get('pnl', 0) or 1000
     target_profit = base_target * regime_mult
+    avg_duration = bench.get('dit', 45)
     
     score = 50 # Base neutral
     action = "HOLD"
     reason = "Normal"
     
-    # 1. PROFIT SCORING (Upside Urgency)
+    # --- ZOMBIE & JUICE LOGIC ---
+    if pnl < 0:
+        # LOSS SCENARIO: Check for Zombies
+        juice_type = "Recovery Days"
+        if theta > 0:
+            recov_days = abs(pnl) / theta
+            juice_val = recov_days
+            
+            # Is it a Zombie? (Ignore young trades < 15 days or cooking strat < 30)
+            is_cooking = (strat == '160/190' and days < 30)
+            is_young = days < 15
+            
+            if not is_cooking and not is_young:
+                remaining_time_est = max(1, avg_duration - days)
+                if recov_days > remaining_time_est:
+                    score += 40
+                    action = "STRUCTURAL FAILURE"
+                    reason = f"Zombie Trade (Recov {recov_days:.0f}d > Left {remaining_time_est:.0f}d)"
+        else:
+            juice_val = 999 # Theta negative or zero = impossible recovery via decay
+            if days > 15:
+                score += 30
+                reason = "Negative Theta"
+
+    else:
+        # WIN SCENARIO: Check Left in Tank
+        juice_type = "Left in Tank"
+        left_in_tank = max(0, target_profit - pnl)
+        juice_val = left_in_tank
+        
+        if left_in_tank < 100:
+            score += 35
+            reason = "Empty Tank (<$100 left)"
+
+    # --- STANDARD LOGIC ---
+    
+    # 1. PROFIT SCORING
     if pnl >= target_profit:
-        return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}"
+        return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
     elif pnl >= target_profit * 0.8:
         score += 30
         action = "PREPARE EXIT"
         reason = "Near Target"
         
-    # 2. TIME & STRATEGY SCORING (Downside Urgency)
+    # 2. TIME & STRATEGY SCORING
     if strat == '130/160':
         if days > 25 and pnl < 100:
-            return "KILL", 95, "Stale (>25d)"
+            return "KILL", 95, "Stale (>25d)", juice_val, juice_type
         elif days > 20:
             score += 20
             reason = "Aging"
             
     elif strat == '160/190':
         if days < 30:
-            score = 10 # Force low score
+            score = 10 
             action = "COOKING" 
             reason = "Too Early (<30d)"
         elif days > 45:
@@ -656,15 +697,13 @@ def calculate_decision_ladder(row, benchmarks_dict):
         score += 15
         reason += " + Bad Decay"
         
-    # Cap score
     score = min(100, max(0, score))
     
-    # Final Action mapping if not caught above
     if score >= 90: action = "CRITICAL"
     elif score >= 70: action = "WATCH"
     elif score <= 30: action = "COOKING"
     
-    return action, score, reason
+    return action, score, reason, juice_val, juice_type
 
 # --- MAIN APP ---
 df = load_data()
@@ -694,7 +733,7 @@ with tab_dash:
         if active_df.empty:
             st.info("📭 No active trades.")
         else:
-            # --- CALCULATE PORTFOLIO HEALTH (New in v111.0) ---
+            # --- PORTFOLIO HEALTH ---
             tot_debit = active_df['Debit'].sum()
             if tot_debit == 0: tot_debit = 1
             
@@ -716,7 +755,7 @@ with tab_dash:
             else:
                 st.error(f"**Portfolio Status: {health_status}** (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
             
-            # --- EXISTING DASHBOARD METRICS ---
+            # --- METRICS ---
             tot_theta = active_df['Theta'].sum()
             eff_score = (tot_theta / tot_debit * 100) if tot_debit > 0 else 0
             
@@ -725,24 +764,23 @@ with tab_dash:
             c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
             c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
             
-            # Capital Velocity
             target_days = benchmarks.get('130/160', {}).get('dit', 36)
             c4.metric("Capital Velocity", f"{active_df['Days Held'].mean():.0f} days avg", help="Lower = faster capital recycling", delta=f"Target: {target_days:.0f}d")
             
-            # Stale Capital Warning
             stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
             if stale_capital > tot_debit * 0.3:
                  st.warning(f"⚠️ ${stale_capital:,.0f} stuck in trades >40 days old. Consider exits.")
 
             st.divider()
 
-            # Calculate Ladder for all active trades
+            # --- CALCULATE LADDER + ZOMBIE STATUS ---
             ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks), axis=1)
             active_df['Action'] = [x[0] for x in ladder_results]
             active_df['Urgency Score'] = [x[1] for x in ladder_results]
             active_df['Reason'] = [x[2] for x in ladder_results]
+            active_df['Juice Val'] = [x[3] for x in ladder_results]
+            active_df['Juice Type'] = [x[4] for x in ladder_results]
 
-            # Sort by Urgency (Highest first)
             active_df = active_df.sort_values('Urgency Score', ascending=False)
 
             todo_df = active_df[active_df['Urgency Score'] >= 70]
@@ -757,7 +795,12 @@ with tab_dash:
                         c_a, c_b, c_c = st.columns([2, 1, 1])
                         c_a.markdown(f"**{name_display}** ({row['Strategy']})")
                         c_b.markdown(f":{color}[**{row['Action']}**] ({row['Reason']})")
-                        c_c.progress(u_score / 100)
+                        
+                        # Custom Juice Display in Queue
+                        if row['Juice Type'] == 'Recovery Days':
+                            c_c.metric("Days to Break Even", f"{row['Juice Val']:.0f}d", delta_color="inverse")
+                        else:
+                            c_c.metric("Left in Tank", f"${row['Juice Val']:.0f}")
                 else:
                     st.success("✅ No critical actions required. Portfolio is healthy.")
 
@@ -766,8 +809,16 @@ with tab_dash:
             sub_journal, sub_strat = st.tabs(["📝 Journal & Overview", "🏛️ Strategy Detail"])
 
             with sub_journal:
-                st.caption("Trades sorted by Urgency (Highest Priority Top).")
-                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Status', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'P&L Vol', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
+                st.caption("Trades sorted by Urgency. 'Gauge' shows either Remaining Profit ($) or Days to Breakeven (d).")
+                
+                # Format the Juice Column for display
+                def fmt_juice(row):
+                    if row['Juice Type'] == 'Recovery Days': return f"{row['Juice Val']:.0f} days"
+                    return f"${row['Juice Val']:.0f}"
+                
+                active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
+
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Theta Eff.', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
@@ -776,10 +827,9 @@ with tab_dash:
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
                     "Urgency Score": st.column_config.ProgressColumn("⚠️ Urgency Ladder", min_value=0, max_value=100, format="%d", help="0=Safe, 100=Act Now"),
                     "Action": st.column_config.TextColumn("Decision", disabled=True),
-                    "Theta/Cap %": st.column_config.NumberColumn("Θ/Cap", format="%.2f%%", disabled=True),
+                    "Gauge": st.column_config.TextColumn("Tank / Recov", help="Wins: $ Left to Target. Losses: Days to Breakeven."),
                     "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True, help="Ratio of P&L to Total Theta Potential. >1.0 is excellent."),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
-                    "P&L Vol": st.column_config.NumberColumn("Sleep Well (Vol)", format="$%d", disabled=True, help="Standard Deviation of Daily P&L. Lower is better."),
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
@@ -1145,22 +1195,6 @@ with tab_analytics:
             else:
                 st.info("Upload daily active files to build decay history.")
 
-            st.divider()
-            st.subheader("⏳ Exit Timing Optimizer")
-            if not expired_df.empty:
-                opt_strat = st.selectbox("Optimize Strategy", expired_df['Strategy'].unique(), key="opt_strat")
-                strat_hist = expired_df[expired_df['Strategy'] == opt_strat].copy()
-                if not strat_hist.empty:
-                    strat_hist['Day_Bin'] = pd.cut(strat_hist['Days Held'], bins=[0, 15, 30, 45, 60, 90, 120], labels=['0-15d', '15-30d', '30-45d', '45-60d', '60-90d', '90d+'])
-                    pnl_bins = [-99999, -1, 500, 1000, 99999]
-                    pnl_labels = ['Loss', 'Small Win', 'Target Win', 'Home Run']
-                    strat_hist['PnL_Bin'] = pd.cut(strat_hist['P&L'], bins=pnl_bins, labels=pnl_labels)
-                    heatmap_pnl = strat_hist.groupby(['PnL_Bin', 'Day_Bin'])['P&L'].mean().reset_index()
-                    pnl_matrix = heatmap_pnl.pivot(index='PnL_Bin', columns='Day_Bin', values='P&L')
-                    fig_opt = px.imshow(pnl_matrix, text_auto=".0f", aspect="auto", color_continuous_scale="RdBu", title=f"Avg Exit PnL by Duration & Zone ({opt_strat})")
-                    st.plotly_chart(fig_opt, use_container_width=True)
-            else: st.info("Need closed trade history.")
-
         with an4: 
             st.subheader("🔄 Roll Campaign Analysis")
             rolled_trades = df[df['Parent ID'].notna() & (df['Parent ID'] != "")].copy()
@@ -1242,4 +1276,4 @@ with tab_rules:
     3.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v111.0 (Traffic Light Health Indicator)")
+    st.caption("Allantis Trade Guardian v112.0 (Zombie Detector & Juice Gauge)")
