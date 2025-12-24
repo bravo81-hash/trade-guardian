@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v116.0 (Pre-Flight Calculator Added)")
+st.info("✅ RUNNING VERSION: v119.0 (Universal Calculator + DTE Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -564,57 +564,6 @@ with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-# --- NEW: PRE-FLIGHT CALCULATOR (v116.0) ---
-with st.sidebar.expander("✈️ Pre-Flight Calculator", expanded=False):
-    st.caption("Validate setup before entry.")
-    
-    pf_debit = st.number_input("Debit ($)", min_value=1.0, value=5000.0, step=100.0)
-    pf_theta = st.number_input("Theta ($)", min_value=0.0, value=15.0, step=1.0)
-    pf_delta = st.number_input("Net Delta (Abs)", min_value=0.0, value=10.0, step=1.0)
-    pf_vega = st.number_input("Vega", min_value=0.0, value=100.0, step=10.0)
-    
-    if st.button("Run Check"):
-        # Calculations
-        golden_ratio = pf_theta / (abs(pf_delta) + 1)
-        efficiency = (pf_theta / pf_debit) * 100
-        fragility = pf_vega / pf_theta if pf_theta > 0 else 999
-        
-        # Results
-        st.markdown("---")
-        
-        # 1. Golden Ratio
-        if golden_ratio > 1.0:
-            st.success(f"🛡️ **Stability: {golden_ratio:.2f}** (Fortress)")
-        elif golden_ratio > 0.5:
-            st.info(f"⚖️ **Stability: {golden_ratio:.2f}** (Income)")
-        else:
-            st.error(f"🎲 **Stability: {golden_ratio:.2f}** (Coin Flip)")
-            
-        # 2. Efficiency
-        if efficiency > 0.2:
-            st.success(f"💰 **Yield: {efficiency:.2f}%** (High)")
-        elif efficiency > 0.12:
-            st.info(f"💵 **Yield: {efficiency:.2f}%** (Standard)")
-        else:
-            st.error(f"📉 **Yield: {efficiency:.2f}%** (Low)")
-            
-        # 3. Fragility
-        if fragility < 5:
-            st.success(f"💎 **Fragility: {fragility:.1f}** (Robust)")
-        elif fragility < 10:
-            st.warning(f"⚠️ **Fragility: {fragility:.1f}** (Standard)")
-        else:
-            st.error(f"🔨 **Fragility: {fragility:.1f}** (Glass)")
-            
-        # Verdict
-        st.markdown("---")
-        if golden_ratio > 0.5 and efficiency > 0.12 and fragility < 10:
-            st.success("✅ **VERDICT: ENTER**")
-        elif golden_ratio < 0.25 or efficiency < 0.1:
-            st.error("❌ **VERDICT: SKIP**")
-        else:
-            st.warning("✋ **VERDICT: ADJUST / LIMIT SIZE**")
-
 with st.sidebar.expander("🛠️ Maintenance"):
     if st.button("🧹 Vacuum DB"):
         conn = get_db_connection()
@@ -778,12 +727,93 @@ tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics"
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
+    # --- UNIVERSAL PRE-FLIGHT CALCULATOR (v119.0) ---
+    with st.expander("✈️ Universal Pre-Flight Calculator", expanded=False):
+        pf_c1, pf_c2, pf_c3 = st.columns(3)
+        with pf_c1:
+            pf_goal = st.selectbox("Strategy Profile", [
+                "🛡️ Hedged Income (Butterflies, Calendars, M200)", 
+                "🏰 Standard Income (Credit Spreads, Iron Condors)", 
+                "🚀 Directional (Long Calls/Puts, Verticals)", 
+                "⚡ Speculative Vol (Straddles, Earnings)"
+            ])
+            pf_dte = st.number_input("DTE (Days)", min_value=1, value=45, step=1)
+        with pf_c2:
+            pf_price = st.number_input("Net Price ($)", value=5000.0, step=100.0, help="Total Debit or Credit (Risk Amount)")
+            pf_theta = st.number_input("Theta ($)", value=15.0, step=1.0)
+        with pf_c3:
+            pf_delta = st.number_input("Net Delta", value=-10.0, step=1.0, format="%.2f")
+            pf_vega = st.number_input("Vega", value=100.0, step=1.0, format="%.2f")
+            
+        if st.button("Run Pre-Flight Check"):
+            st.markdown("---")
+            res_c1, res_c2, res_c3 = st.columns(3)
+            
+            # --- HEDGED INCOME LOGIC (User's Core) ---
+            if "Hedged Income" in pf_goal:
+                stability = pf_theta / (abs(pf_delta) + 1)
+                yield_pct = (pf_theta / abs(pf_price)) * 100
+                annualized_roi = (yield_pct * 365)
+                vega_cushion = pf_vega / pf_theta if pf_theta != 0 else 0
+                
+                with res_c1:
+                    if stability > 1.0: st.success(f"🛡️ Stability: {stability:.2f} (Fortress)")
+                    elif stability > 0.5: st.info(f"⚖️ Stability: {stability:.2f} (Good)")
+                    else: st.error(f"🎲 Stability: {stability:.2f} (Coin Flip)")
+                with res_c2:
+                    if annualized_roi > 50: st.success(f"💰 Ann. ROI: {annualized_roi:.0f}%")
+                    elif annualized_roi > 25: st.info(f"💵 Ann. ROI: {annualized_roi:.0f}%")
+                    else: st.error(f"📉 Ann. ROI: {annualized_roi:.0f}%")
+                with res_c3:
+                    if pf_dte < 21: st.warning("⚠️ High Gamma Risk (Low DTE)")
+                    elif pf_vega > 0: st.success(f"💎 Hedge: {vega_cushion:.1f}x (Good)")
+                    else: st.error(f"⚠️ Hedge: {pf_vega:.0f} (Negative Vega)")
+
+            # --- STANDARD INCOME LOGIC ---
+            elif "Standard Income" in pf_goal:
+                stability = pf_theta / (abs(pf_delta) + 1)
+                yield_pct = (pf_theta / abs(pf_price)) * 100
+                annualized_roi = (yield_pct * 365)
+                fragility = abs(pf_vega) / pf_theta if pf_theta != 0 else 999
+                
+                with res_c1:
+                    if stability > 0.5: st.success(f"🛡️ Stability: {stability:.2f} (Good)")
+                    else: st.error(f"🎲 Stability: {stability:.2f} (Unstable)")
+                with res_c2:
+                    if annualized_roi > 40: st.success(f"💰 Ann. ROI: {annualized_roi:.0f}%")
+                    else: st.warning(f"📉 Ann. ROI: {annualized_roi:.0f}%")
+                with res_c3:
+                    if pf_dte < 21: st.warning("⚠️ High Gamma Risk (Low DTE)")
+                    elif pf_vega < 0 and fragility < 5: st.success(f"💎 Fragility: {fragility:.1f} (Robust)")
+                    else: st.warning(f"⚠️ Fragility: {fragility:.1f} (High)")
+
+            # --- DIRECTIONAL LOGIC ---
+            elif "Directional" in pf_goal:
+                leverage = abs(pf_delta) / abs(pf_price) * 100
+                theta_drag = (pf_theta / abs(pf_price)) * 100
+                with res_c1: st.metric("Leverage", f"{leverage:.2f} Δ/$100")
+                with res_c2:
+                    if theta_drag > -0.1: st.success(f"🔥 Burn: {theta_drag:.2f}% (Low)")
+                    else: st.warning(f"💸 Burn: {theta_drag:.2f}% (High)")
+                with res_c3:
+                    proj_roi = (abs(pf_delta) * 5) / abs(pf_price) * 100 
+                    st.metric("ROI on $5 Move", f"{proj_roi:.1f}%")
+
+            # --- SPECULATIVE VOL LOGIC ---
+            elif "Speculative Vol" in pf_goal:
+                vega_efficiency = abs(pf_vega) / abs(pf_price) * 100
+                move_needed = abs(pf_theta / pf_vega) if pf_vega != 0 else 0
+                with res_c1: st.metric("Vega Exposure", f"{vega_efficiency:.1f}%")
+                with res_c2: st.metric("Daily Cost", f"${pf_theta:.0f}")
+                with res_c3: st.info(f"Need {move_needed:.1f}% IV move to break even")
+
     if not df.empty:
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
         if active_df.empty:
             st.info("📭 No active trades.")
         else:
+            # --- PORTFOLIO HEALTH ---
             tot_debit = active_df['Debit'].sum()
             if tot_debit == 0: tot_debit = 1
             
@@ -805,6 +835,7 @@ with tab_dash:
             else:
                 st.error(f"**Portfolio Status: {health_status}** (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
             
+            # --- METRICS ---
             tot_theta = active_df['Theta'].sum()
             eff_score = (tot_theta / tot_debit * 100) if tot_debit > 0 else 0
             
@@ -1259,22 +1290,6 @@ with tab_analytics:
             else:
                 st.info("Upload daily active files to build decay history.")
 
-            st.divider()
-            st.subheader("⏳ Exit Timing Optimizer")
-            if not expired_df.empty:
-                opt_strat = st.selectbox("Optimize Strategy", expired_df['Strategy'].unique(), key="opt_strat")
-                strat_hist = expired_df[expired_df['Strategy'] == opt_strat].copy()
-                if not strat_hist.empty:
-                    strat_hist['Day_Bin'] = pd.cut(strat_hist['Days Held'], bins=[0, 15, 30, 45, 60, 90, 120], labels=['0-15d', '15-30d', '30-45d', '45-60d', '60-90d', '90d+'])
-                    pnl_bins = [-99999, -1, 500, 1000, 99999]
-                    pnl_labels = ['Loss', 'Small Win', 'Target Win', 'Home Run']
-                    strat_hist['PnL_Bin'] = pd.cut(strat_hist['P&L'], bins=pnl_bins, labels=pnl_labels)
-                    heatmap_pnl = strat_hist.groupby(['PnL_Bin', 'Day_Bin'])['P&L'].mean().reset_index()
-                    pnl_matrix = heatmap_pnl.pivot(index='PnL_Bin', columns='Day_Bin', values='P&L')
-                    fig_opt = px.imshow(pnl_matrix, text_auto=".0f", aspect="auto", color_continuous_scale="RdBu", title=f"Avg Exit PnL by Duration & Zone ({opt_strat})")
-                    st.plotly_chart(fig_opt, use_container_width=True)
-            else: st.info("Need closed trade history.")
-
         with an4: 
             st.subheader("🔄 Roll Campaign Analysis")
             rolled_trades = df[df['Parent ID'].notna() & (df['Parent ID'] != "")].copy()
@@ -1359,4 +1374,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v116.0 (Pre-Flight Calculator Added)")
+    st.caption("Allantis Trade Guardian v119.0 (Universal Calculator + DTE Logic)")
