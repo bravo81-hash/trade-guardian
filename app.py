@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v119.0 (Universal Calculator + DTE Logic)")
+st.info("✅ RUNNING VERSION: v120.0 (Smart Rename & Trade Manager)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -332,8 +332,43 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                c.execute("SELECT status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
+                # Check 1: Exact Match on ID
+                c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
+                
+                # Check 2: Rename Detection (Same Link, Different ID/Name)
+                # Only check if exact match failed and we have a valid link
+                rename_detected = False
+                if existing is None and t['link'] and len(t['link']) > 15:
+                    c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
+                    link_match = c.fetchone()
+                    if link_match:
+                        # Found a trade with same link but different ID -> Rename!
+                        old_id, old_name = link_match
+                        
+                        # Rename in Database
+                        try:
+                            # 1. Update Snapshot FKs
+                            c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
+                            # 2. Update Trade Record (Update ID is tricky in SQL, better to insert new and delete old, or update strictly if supported)
+                            # SQLite supports UPDATE on PK if cascading not issue, but simpler is:
+                            c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
+                            
+                            log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
+                            
+                            # Now fetch the 'new' existing record to process updates normally below
+                            c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
+                            existing = c.fetchone()
+                            rename_detected = True
+                            
+                            if file_type == "Active":
+                                file_found_ids.add(trade_id)
+                                if old_id in db_active_ids: db_active_ids.remove(old_id)
+                                db_active_ids.add(trade_id)
+                                
+                        except Exception as rename_err:
+                            print(f"Rename failed: {rename_err}")
+
                 status = "Active" if file_type == "Active" else "Expired"
                 
                 if existing is None:
@@ -346,7 +381,10 @@ def sync_data(file_list, file_type):
                          t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link']))
                     count_new += 1
                 else:
-                    old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv, old_link = existing
+                    # Unpack (Handle slight schema variations if needed, but here standard)
+                    # existing is (id, status, ...)
+                    old_id_val, old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv, old_link = existing
+                    
                     old_put = old_put if old_put else 0.0
                     old_call = old_call if old_call else 0.0
                     old_iv = old_iv if old_iv else 0.0
@@ -564,19 +602,45 @@ with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-with st.sidebar.expander("🛠️ Maintenance"):
+# --- NEW: TRADE MANAGER (Manual Fix) ---
+with st.sidebar.expander("🛠️ Maintenance", expanded=False):
+    st.caption("Fix Duplicates / Rename Issues")
+    
+    # 1. Vacuum
     if st.button("🧹 Vacuum DB"):
         conn = get_db_connection()
         conn.execute("VACUUM")
         conn.close()
         st.success("Optimized.")
-    if st.button("🔥 Purge Old Snapshots (>90d)"):
-        conn = get_db_connection()
-        cutoff = (datetime.now() - pd.Timedelta(days=90)).date()
-        conn.execute("DELETE FROM snapshots WHERE snapshot_date < ?", (cutoff,))
-        conn.commit()
-        conn.close()
-        st.success("Purged.")
+        
+    # 2. Delete Trades
+    st.markdown("---")
+    conn = get_db_connection()
+    try:
+        all_trades = pd.read_sql("SELECT id, name, status, pnl, days_held FROM trades ORDER BY status, entry_date DESC", conn)
+        if not all_trades.empty:
+            st.write("🗑️ **Delete Specific Trades**")
+            all_trades['Label'] = all_trades['name'] + " (" + all_trades['status'] + ", $" + all_trades['pnl'].astype(str) + ")"
+            trades_to_del = st.multiselect("Select trades to delete:", all_trades['Label'].tolist())
+            
+            if st.button("🔥 Delete Selected Trades"):
+                if trades_to_del:
+                    ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
+                    placeholders = ','.join('?' for _ in ids_to_del)
+                    
+                    # Delete snapshots first (FK constraint)
+                    conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
+                    # Delete trades
+                    conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
+                    conn.commit()
+                    st.success(f"Deleted {len(ids_to_del)} trades!")
+                    st.cache_data.clear()
+                    st.rerun()
+    except: pass
+    conn.close()
+    
+    # 3. Hard Reset
+    st.markdown("---")
     if st.button("🧨 Hard Reset (Delete All Data)"):
         conn = get_db_connection()
         conn.execute("DROP TABLE IF EXISTS trades")
@@ -727,7 +791,7 @@ tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics"
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
-    # --- UNIVERSAL PRE-FLIGHT CALCULATOR (v119.0) ---
+    # --- UNIVERSAL PRE-FLIGHT CALCULATOR ---
     with st.expander("✈️ Universal Pre-Flight Calculator", expanded=False):
         pf_c1, pf_c2, pf_c3 = st.columns(3)
         with pf_c1:
@@ -1374,4 +1438,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v119.0 (Universal Calculator + DTE Logic)")
+    st.caption("Allantis Trade Guardian v120.0 (Smart Rename & Trade Manager)")
