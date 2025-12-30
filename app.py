@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v121.1 (Fix: Analytics NameError)")
+st.info("✅ RUNNING VERSION: v122.0 (Time-Weighted Returns per Strategy)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -777,7 +777,7 @@ tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics"
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
-    # --- UNIVERSAL PRE-FLIGHT CALCULATOR ---
+    # --- UNIVERSAL PRE-FLIGHT CALCULATOR (v119.0) ---
     with st.expander("✈️ Universal Pre-Flight Calculator", expanded=False):
         pf_c1, pf_c2, pf_c3 = st.columns(3)
         with pf_c1:
@@ -1127,14 +1127,18 @@ with tab_analytics:
     # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
-    # --- NEW: CLOSED TRADE PERFORMANCE (v121.0) ---
+    # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
         
         # Aggregate Performance by Strategy
+        # Add Capital-Days Calculation: Debit * Days Held
+        expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
+        
         perf_agg = expired_df.groupby('Strategy').agg({
             'P&L': 'sum',
             'Debit': 'sum',
+            'Cap_Days': 'sum',
             'ROI': 'mean', # Average Return per Trade
             'id': 'count'
         }).reset_index()
@@ -1144,20 +1148,27 @@ with tab_analytics:
         perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
         perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
         
-        # Portfolio Return (Total PnL / Total Capital Cycled)
-        perf_agg['Ret on Cap %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
+        # Time-Weighted Annualized Return Calculation
+        # Formula: (Total PnL / Total Capital-Days) * 365
+        perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
+        
+        # Simple Return on Cycled Capital (Total PnL / Total Debit)
+        perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
         
         # Formatting for Display
-        perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Ret on Cap %', 'ROI']].copy()
-        perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Ret on Cap %', 'Avg Trade ROI']
+        perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
+        perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
         
         # Add Total Row
         total_pnl = perf_display['Total P&L'].sum()
         total_vol = perf_display['Total Volume'].sum()
+        total_cap_days = perf_agg['Cap_Days'].sum()
         total_trades = perf_display['Trades'].sum()
         total_wins = perf_agg['Wins'].sum()
+        
         total_win_rate = total_wins / total_trades if total_trades > 0 else 0
-        total_ret_cap = (total_pnl / total_vol * 100) if total_vol > 0 else 0
+        total_simple_ret = (total_pnl / total_vol * 100) if total_vol > 0 else 0
+        total_twr = (total_pnl / total_cap_days * 365 * 100) if total_cap_days > 0 else 0
         avg_trade_roi = expired_df['ROI'].mean()
         
         total_row = pd.DataFrame({
@@ -1166,7 +1177,8 @@ with tab_analytics:
             'Win Rate': [total_win_rate],
             'Total P&L': [total_pnl],
             'Total Volume': [total_vol],
-            'Ret on Cap %': [total_ret_cap],
+            'Simple Return %': [total_simple_ret],
+            'Ann. TWR %': [total_twr],
             'Avg Trade ROI': [avg_trade_roi]
         })
         
@@ -1178,14 +1190,17 @@ with tab_analytics:
                 'Win Rate': "{:.1%}",
                 'Total P&L': "${:,.0f}",
                 'Total Volume': "${:,.0f}",
-                'Ret on Cap %': "{:.2f}%",
+                'Simple Return %': "{:.2f}%",
+                'Ann. TWR %': "{:.2f}%",
                 'Avg Trade ROI': "{:.2f}%"
             })
-            .map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Ret on Cap %', 'Avg Trade ROI'])
+            .map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI'])
             .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1),
             use_container_width=True,
             column_config={
                 "Win Rate": st.column_config.ProgressColumn("Win Rate", min_value=0, max_value=1, format="%.2f"),
+                "Ann. TWR %": st.column_config.NumberColumn("Ann. TWR %", help="Time-Weighted Annualized Return on Employed Capital. Measures efficiency adjusted for duration."),
+                "Simple Return %": st.column_config.NumberColumn("Simple Ret %", help="Total P&L / Total Debit. Measures raw return on cycled capital.")
             }
         )
         st.divider()
@@ -1403,22 +1418,6 @@ with tab_analytics:
             else:
                 st.info("Upload daily active files to build decay history.")
 
-            st.divider()
-            st.subheader("⏳ Exit Timing Optimizer")
-            if not expired_df.empty:
-                opt_strat = st.selectbox("Optimize Strategy", expired_df['Strategy'].unique(), key="opt_strat")
-                strat_hist = expired_df[expired_df['Strategy'] == opt_strat].copy()
-                if not strat_hist.empty:
-                    strat_hist['Day_Bin'] = pd.cut(strat_hist['Days Held'], bins=[0, 15, 30, 45, 60, 90, 120], labels=['0-15d', '15-30d', '30-45d', '45-60d', '60-90d', '90d+'])
-                    pnl_bins = [-99999, -1, 500, 1000, 99999]
-                    pnl_labels = ['Loss', 'Small Win', 'Target Win', 'Home Run']
-                    strat_hist['PnL_Bin'] = pd.cut(strat_hist['P&L'], bins=pnl_bins, labels=pnl_labels)
-                    heatmap_pnl = strat_hist.groupby(['PnL_Bin', 'Day_Bin'])['P&L'].mean().reset_index()
-                    pnl_matrix = heatmap_pnl.pivot(index='PnL_Bin', columns='Day_Bin', values='P&L')
-                    fig_opt = px.imshow(pnl_matrix, text_auto=".0f", aspect="auto", color_continuous_scale="RdBu", title=f"Avg Exit PnL by Duration & Zone ({opt_strat})")
-                    st.plotly_chart(fig_opt, use_container_width=True)
-            else: st.info("Need closed trade history.")
-
         with an4: 
             st.subheader("🔄 Roll Campaign Analysis")
             rolled_trades = df[df['Parent ID'].notna() & (df['Parent ID'] != "")].copy()
@@ -1503,4 +1502,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v121.0 (Closed Trade Returns & Performance Matrix)")
+    st.caption("Allantis Trade Guardian v122.0 (Time-Weighted Returns per Strategy)")
