@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v120.0 (Smart Rename & Trade Manager)")
+st.info("✅ RUNNING VERSION: v121.0 (Closed Trade Returns & Performance Matrix)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -337,35 +337,21 @@ def sync_data(file_list, file_type):
                 existing = c.fetchone()
                 
                 # Check 2: Rename Detection (Same Link, Different ID/Name)
-                # Only check if exact match failed and we have a valid link
-                rename_detected = False
                 if existing is None and t['link'] and len(t['link']) > 15:
                     c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
                     link_match = c.fetchone()
                     if link_match:
-                        # Found a trade with same link but different ID -> Rename!
                         old_id, old_name = link_match
-                        
-                        # Rename in Database
                         try:
-                            # 1. Update Snapshot FKs
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
-                            # 2. Update Trade Record (Update ID is tricky in SQL, better to insert new and delete old, or update strictly if supported)
-                            # SQLite supports UPDATE on PK if cascading not issue, but simpler is:
                             c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
-                            
                             log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
-                            
-                            # Now fetch the 'new' existing record to process updates normally below
                             c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
                             existing = c.fetchone()
-                            rename_detected = True
-                            
                             if file_type == "Active":
                                 file_found_ids.add(trade_id)
                                 if old_id in db_active_ids: db_active_ids.remove(old_id)
                                 db_active_ids.add(trade_id)
-                                
                         except Exception as rename_err:
                             print(f"Rename failed: {rename_err}")
 
@@ -381,10 +367,7 @@ def sync_data(file_list, file_type):
                          t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link']))
                     count_new += 1
                 else:
-                    # Unpack (Handle slight schema variations if needed, but here standard)
-                    # existing is (id, status, ...)
                     old_id_val, old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv, old_link = existing
-                    
                     old_put = old_put if old_put else 0.0
                     old_call = old_call if old_call else 0.0
                     old_iv = old_iv if old_iv else 0.0
@@ -1141,6 +1124,69 @@ with tab_analytics:
     # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
+    # --- NEW: CLOSED TRADE PERFORMANCE (v121.0) ---
+    if not expired_df.empty:
+        st.markdown("### 🏆 Closed Trade Performance")
+        
+        # Aggregate Performance by Strategy
+        perf_agg = expired_df.groupby('Strategy').agg({
+            'P&L': 'sum',
+            'Debit': 'sum',
+            'ROI': 'mean', # Average Return per Trade
+            'id': 'count'
+        }).reset_index()
+        
+        # Win Rate Calculation
+        wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
+        perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
+        perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
+        
+        # Portfolio Return (Total PnL / Total Capital Cycled)
+        perf_agg['Ret on Cap %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
+        
+        # Formatting for Display
+        perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Ret on Cap %', 'ROI']].copy()
+        perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Ret on Cap %', 'Avg Trade ROI']
+        
+        # Add Total Row
+        total_pnl = perf_display['Total P&L'].sum()
+        total_vol = perf_display['Total Volume'].sum()
+        total_trades = perf_display['Trades'].sum()
+        total_wins = perf_agg['Wins'].sum()
+        total_win_rate = total_wins / total_trades if total_trades > 0 else 0
+        total_ret_cap = (total_pnl / total_vol * 100) if total_vol > 0 else 0
+        avg_trade_roi = expired_df['ROI'].mean()
+        
+        total_row = pd.DataFrame({
+            'Strategy': ['TOTAL'],
+            'Trades': [total_trades],
+            'Win Rate': [total_win_rate],
+            'Total P&L': [total_pnl],
+            'Total Volume': [total_vol],
+            'Ret on Cap %': [total_ret_cap],
+            'Avg Trade ROI': [avg_trade_roi]
+        })
+        
+        perf_display = pd.concat([perf_display, total_row], ignore_index=True)
+
+        st.dataframe(
+            perf_display.style
+            .format({
+                'Win Rate': "{:.1%}",
+                'Total P&L': "${:,.0f}",
+                'Total Volume': "${:,.0f}",
+                'Ret on Cap %': "{:.2f}%",
+                'Avg Trade ROI': "{:.2f}%"
+            })
+            .map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Ret on Cap %', 'Avg Trade ROI'])
+            .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1),
+            use_container_width=True,
+            column_config={
+                "Win Rate": st.column_config.ProgressColumn("Win Rate", min_value=0, max_value=1, format="%.2f"),
+            }
+        )
+        st.divider()
+
     if not df.empty:
         # Re-establish active context for the health check breakdown
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
@@ -1354,6 +1400,22 @@ with tab_analytics:
             else:
                 st.info("Upload daily active files to build decay history.")
 
+            st.divider()
+            st.subheader("⏳ Exit Timing Optimizer")
+            if not expired_df.empty:
+                opt_strat = st.selectbox("Optimize Strategy", expired_df['Strategy'].unique(), key="opt_strat")
+                strat_hist = expired_df[expired_df['Strategy'] == opt_strat].copy()
+                if not strat_hist.empty:
+                    strat_hist['Day_Bin'] = pd.cut(strat_hist['Days Held'], bins=[0, 15, 30, 45, 60, 90, 120], labels=['0-15d', '15-30d', '30-45d', '45-60d', '60-90d', '90d+'])
+                    pnl_bins = [-99999, -1, 500, 1000, 99999]
+                    pnl_labels = ['Loss', 'Small Win', 'Target Win', 'Home Run']
+                    strat_hist['PnL_Bin'] = pd.cut(strat_hist['P&L'], bins=pnl_bins, labels=pnl_labels)
+                    heatmap_pnl = strat_hist.groupby(['PnL_Bin', 'Day_Bin'])['P&L'].mean().reset_index()
+                    pnl_matrix = heatmap_pnl.pivot(index='PnL_Bin', columns='Day_Bin', values='P&L')
+                    fig_opt = px.imshow(pnl_matrix, text_auto=".0f", aspect="auto", color_continuous_scale="RdBu", title=f"Avg Exit PnL by Duration & Zone ({opt_strat})")
+                    st.plotly_chart(fig_opt, use_container_width=True)
+            else: st.info("Need closed trade history.")
+
         with an4: 
             st.subheader("🔄 Roll Campaign Analysis")
             rolled_trades = df[df['Parent ID'].notna() & (df['Parent ID'] != "")].copy()
@@ -1438,4 +1500,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v120.0 (Smart Rename & Trade Manager)")
+    st.caption("Allantis Trade Guardian v121.0 (Closed Trade Returns & Performance Matrix)")
