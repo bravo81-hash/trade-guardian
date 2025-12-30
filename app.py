@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v121.0 (Closed Trade Returns & Performance Matrix)")
+st.info("✅ RUNNING VERSION: v121.1 (Fix: Analytics NameError)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -754,6 +754,9 @@ def calculate_decision_ladder(row, benchmarks_dict):
 # --- MAIN APP ---
 df = load_data()
 benchmarks = BASE_CONFIG.copy()
+# SAFETY FIX: Initialize expired_df immediately
+expired_df = pd.DataFrame() 
+
 if not df.empty:
     expired_df = df[df['Status'] == 'Expired']
     if not expired_df.empty:
