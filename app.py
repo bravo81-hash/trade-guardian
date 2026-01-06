@@ -16,18 +16,21 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v122.0 (Time-Weighted Returns per Strategy)")
+st.info("✅ RUNNING VERSION: v123.0 (Dynamic Strategy Manager)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v4.db"
 
+def get_db_connection():
+    return sqlite3.connect(DB_NAME)
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     c = conn.cursor()
     
-    # TRADES TABLE
+    # 1. TRADES TABLE (Existing)
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -52,7 +55,7 @@ def init_db():
                     link TEXT
                 )''')
     
-    # SNAPSHOTS TABLE
+    # 2. SNAPSHOTS TABLE (Existing)
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -65,54 +68,76 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
+    # 3. STRATEGY CONFIG TABLE (New in v123)
+    c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
+                    name TEXT PRIMARY KEY,
+                    identifier TEXT,
+                    target_pnl REAL,
+                    target_days INTEGER,
+                    min_stability REAL,
+                    description TEXT
+                )''')
+    
+    # Run migrations
     try: c.execute("ALTER TABLE snapshots ADD COLUMN theta REAL")
     except: pass
     try: c.execute("ALTER TABLE snapshots ADD COLUMN delta REAL")
     except: pass
     try: c.execute("ALTER TABLE snapshots ADD COLUMN vega REAL")
     except: pass
-                
+    
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
     conn.close()
-    migrate_db()
+    
+    # Seed Defaults if empty
+    seed_default_strategies()
 
-def migrate_db():
-    conn = sqlite3.connect(DB_NAME)
+def seed_default_strategies():
+    conn = get_db_connection()
     c = conn.cursor()
-    cols = [
-        ('tags', 'TEXT'), 
-        ('parent_id', 'TEXT'), 
-        ('put_pnl', 'REAL'), 
-        ('call_pnl', 'REAL'), 
-        ('iv', 'REAL'),
-        ('link', 'TEXT')
-    ]
-    for col_name, col_type in cols:
-        try: c.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-        except: pass
-    conn.commit()
+    # Check if empty
+    c.execute("SELECT count(*) FROM strategy_config")
+    if c.fetchone()[0] == 0:
+        # Insert the "Classic" strategies automatically so user loses nothing
+        defaults = [
+            ('130/160', '130', 500, 36, 0.8, 'Income Discipline'),
+            ('160/190', '160', 700, 44, 0.8, 'Patience Training'),
+            ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery'),
+            ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder')
+        ]
+        c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?)", defaults)
+        conn.commit()
+        st.toast("Updated Database with Strategy Manager logic.")
     conn.close()
 
-def get_db_connection():
-    return sqlite3.connect(DB_NAME)
-
-# --- CONFIGURATION (Defaults) ---
-BASE_CONFIG = {
-    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
-    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
-    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
-    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
-}
+# --- LOAD STRATEGY CONFIG ---
+@st.cache_data(ttl=60)
+def load_strategy_config():
+    if not os.path.exists(DB_NAME): return {}
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        config = {}
+        for _, row in df.iterrows():
+            config[row['name']] = {
+                'id': row['identifier'],
+                'pnl': row['target_pnl'],
+                'dit': row['target_days'],
+                'stability': row['min_stability']
+            }
+        return config
+    except: return {}
+    finally: conn.close()
 
 # --- HELPER FUNCTIONS ---
-def get_strategy(group_name, trade_name=""):
-    g = str(group_name).upper()
-    n = str(trade_name).upper()
-    if "SMSF" in g or "SMSF" in n: return "SMSF"
-    elif "M200" in g or "M200" in n: return "M200"
-    elif "160/190" in g or "160/190" in n: return "160/190"
-    elif "130/160" in g or "130/160" in n: return "130/160"
+# UPDATED: Now uses dynamic config instead of hardcoded logic
+def get_strategy_dynamic(trade_name, config_dict):
+    name_upper = str(trade_name).upper()
+    # 1. Look for matches in config
+    for strat_name, details in config_dict.items():
+        if details['id'].upper() in name_upper:
+            return strat_name
     return "Other"
 
 def clean_num(x):
@@ -147,7 +172,7 @@ def extract_ticker(name):
     except: return "UNKNOWN"
 
 # --- SMART FILE PARSER ---
-def parse_optionstrat_file(file, file_type):
+def parse_optionstrat_file(file, file_type, config_dict):
     try:
         df_raw = None
         if file.name.endswith(('.xlsx', '.xls')):
@@ -214,8 +239,9 @@ def parse_optionstrat_file(file, file_type):
             try: start_dt = pd.to_datetime(created)
             except: return None 
 
-            group = str(trade_data.get('Group', ''))
-            strat = get_strategy(group, name)
+            # DYNAMIC STRATEGY DETECTION
+            strat = get_strategy_dynamic(name, config_dict)
+            
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
             
@@ -242,15 +268,8 @@ def parse_optionstrat_file(file, file_type):
             if days_held < 1: days_held = 1
 
             lot_size = 1
-            if strat == '130/160':
-                if debit > 11000: lot_size = 3
-                elif debit > 6000: lot_size = 2
-            elif strat == '160/190':
-                if debit > 8000: lot_size = 2
-            elif strat == 'M200':
-                if debit > 12000: lot_size = 2
-            elif strat == 'SMSF':
-                if debit > 12000: lot_size = 2
+            # Simple heuristic for now, can be updated later
+            if debit > 5000: lot_size = 2
 
             put_pnl = 0.0
             call_pnl = 0.0
@@ -317,12 +336,15 @@ def sync_data(file_list, file_type):
             db_active_ids = set(current_active['id'].tolist())
         except: pass
     file_found_ids = set()
+    
+    # Load dynamic config for parser
+    config_dict = load_strategy_config()
 
     for file in file_list:
         count_new = 0
         count_update = 0
         try:
-            trades_data = parse_optionstrat_file(file, file_type)
+            trades_data = parse_optionstrat_file(file, file_type, config_dict)
             if not trades_data:
                 log.append(f"⚠️ {file.name}: Skipped (No valid trades found)")
                 continue
@@ -332,11 +354,10 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                # Check 1: Exact Match on ID
                 c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
-                # Check 2: Rename Detection (Same Link, Different ID/Name)
+                # Check 2: Rename Detection
                 if existing is None and t['link'] and len(t['link']) > 15:
                     c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
                     link_match = c.fetchone()
@@ -439,6 +460,22 @@ def update_journal(edited_df):
         conn.commit()
         return count
     except Exception as e: return 0
+    finally: conn.close()
+
+def update_strategy_config(edited_df):
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # Simple wipe and replace for config (it's small)
+        c.execute("DELETE FROM strategy_config")
+        for i, row in edited_df.iterrows():
+            c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?)", 
+                      (row['Name'], row['Identifier'], row['Target PnL'], row['Target Days'], row['Min Stability'], row['Description']))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(e)
+        return False
     finally: conn.close()
 
 # --- DATA LOADER ---
@@ -585,6 +622,30 @@ with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
+# --- NEW: STRATEGY MANAGER (v123.0) ---
+with st.sidebar.expander("⚙️ Strategy Manager", expanded=False):
+    st.caption("Define your strategies dynamically.")
+    
+    conn = get_db_connection()
+    try:
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Display as editable DF
+        edit_cols = ['name', 'identifier', 'target_pnl', 'target_days', 'min_stability', 'description']
+        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description']
+        
+        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor")
+        
+        if st.button("💾 Save Strategies"):
+            if update_strategy_config(edited_strats):
+                st.success("Strategies Updated!")
+                st.cache_data.clear()
+                st.rerun()
+    except Exception as e:
+        st.error(f"Error loading strategies: {e}")
+    finally:
+        conn.close()
+
 # --- NEW: TRADE MANAGER (Manual Fix) ---
 with st.sidebar.expander("🛠️ Maintenance", expanded=False):
     st.caption("Fix Duplicates / Rename Issues")
@@ -611,9 +672,7 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
                     ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
                     placeholders = ','.join('?' for _ in ids_to_del)
                     
-                    # Delete snapshots first (FK constraint)
                     conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
-                    # Delete trades
                     conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
                     conn.commit()
                     st.success(f"Deleted {len(ids_to_del)} trades!")
@@ -628,6 +687,7 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
         conn = get_db_connection()
         conn.execute("DROP TABLE IF EXISTS trades")
         conn.execute("DROP TABLE IF EXISTS snapshots")
+        conn.execute("DROP TABLE IF EXISTS strategy_config")
         conn.commit()
         conn.close()
         init_db()
@@ -655,14 +715,14 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
     if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
     
-    bench = benchmarks_dict.get(strat, BASE_CONFIG.get(strat, {}))
+    # UPDATED v123: Use DB config if available, else hardcoded base
+    # (Since we seeded DB with base, this now pulls from DB)
+    bench = benchmarks_dict.get(strat, {})
     
     hist_avg_pnl = bench.get('pnl', 1000)
-    if hist_avg_pnl == 0: hist_avg_pnl = 1000
     target_profit = hist_avg_pnl * regime_mult
     
     hist_avg_days = bench.get('dit', 40)
-    if hist_avg_days == 0: hist_avg_days = 40
     
     score = 50 
     action = "HOLD"
@@ -753,31 +813,39 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
 # --- MAIN APP ---
 df = load_data()
-benchmarks = BASE_CONFIG.copy()
-# SAFETY FIX: Initialize expired_df immediately
+# LOAD CONFIG FROM DB (Replaces BASE_CONFIG)
+dynamic_benchmarks = load_strategy_config() 
+# Fallback if empty (shouldn't happen due to seeding)
+if not dynamic_benchmarks: dynamic_benchmarks = BASE_CONFIG.copy()
+
 expired_df = pd.DataFrame() 
 
 if not df.empty:
     expired_df = df[df['Status'] == 'Expired']
     if not expired_df.empty:
+        # OVERRIDE CONFIG WITH HISTORY WHERE AVAILABLE
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
+            
+            # Keep defaults from DB unless history is robust
+            current_bench = dynamic_benchmarks.get(strat, {})
+            
             if not winners.empty:
-                benchmarks[strat] = {
-                    'yield': grp['Daily Yield %'].mean(),
-                    'pnl': winners['P&L'].mean(),
-                    'roi': winners['ROI'].mean(),
-                    'dit': winners['Days Held'].mean(),
-                    'stability': grp['Stability'].mean() if 'Stability' in grp.columns else 0.8
-                }
+                # Update PnL/DIT with history, keep others from config
+                current_bench['pnl'] = winners['P&L'].mean()
+                current_bench['dit'] = winners['Days Held'].mean()
+                current_bench['yield'] = grp['Daily Yield %'].mean()
+                current_bench['roi'] = winners['ROI'].mean()
+                
+            dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
 tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "📖 Rules"])
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
-    # --- UNIVERSAL PRE-FLIGHT CALCULATOR (v119.0) ---
+    # --- UNIVERSAL PRE-FLIGHT CALCULATOR ---
     with st.expander("✈️ Universal Pre-Flight Calculator", expanded=False):
         pf_c1, pf_c2, pf_c3 = st.columns(3)
         with pf_c1:
@@ -894,7 +962,7 @@ with tab_dash:
             c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
             c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
             
-            target_days = benchmarks.get('130/160', {}).get('dit', 36)
+            target_days = dynamic_benchmarks.get('130/160', {}).get('dit', 36)
             c4.metric("Capital Velocity", f"{active_df['Days Held'].mean():.0f} days avg", help="Lower = faster capital recycling", delta=f"Target: {target_days:.0f}d")
             
             stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
@@ -903,7 +971,7 @@ with tab_dash:
 
             st.divider()
 
-            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks), axis=1)
+            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
             active_df['Action'] = [x[0] for x in ladder_results]
             active_df['Urgency Score'] = [x[1] for x in ladder_results]
             active_df['Reason'] = [x[2] for x in ladder_results]
@@ -996,7 +1064,9 @@ with tab_dash:
 
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
-                strat_tabs_inner = st.tabs(["📋 Overview", "🔹 130/160", "🔸 160/190", "🐳 M200", "💼 SMSF"])
+                # Get unique strategies from config to create dynamic tabs
+                sorted_strats = sorted(list(dynamic_benchmarks.keys()))
+                strat_tabs_inner = st.tabs(["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats])
 
                 with strat_tabs_inner[0]:
                     strat_agg = active_df.groupby('Strategy').agg({
@@ -1004,8 +1074,8 @@ with tab_dash:
                         'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean', 'Stability': 'mean' 
                     }).reset_index()
                     
-                    strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
-                    strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: benchmarks.get(x, {}).get('yield', 0))
+                    strat_agg['Trend'] = strat_agg.apply(lambda r: "🟢 Improving" if r['Daily Yield %'] >= dynamic_benchmarks.get(r['Strategy'], {}).get('yield', 0) else "🔴 Lagging", axis=1)
+                    strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: dynamic_benchmarks.get(x, {}).get('yield', 0))
                     
                     total_row = pd.DataFrame({
                         'Strategy': ['TOTAL'], 
@@ -1051,10 +1121,11 @@ with tab_dash:
 
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 
-                def render_tab(tab, strategy_name):
-                    with tab:
-                        subset = active_df[active_df['Strategy'] == strategy_name].copy()
-                        bench = benchmarks.get(strategy_name) or BASE_CONFIG.get(strategy_name) or {'pnl': 0, 'yield': 0, 'dit': 0}
+                # Dynamic rendering of sub-tabs
+                for i, strat_name in enumerate(sorted_strats):
+                    with strat_tabs_inner[i+1]:
+                        subset = active_df[active_df['Strategy'] == strat_name].copy()
+                        bench = dynamic_benchmarks.get(strat_name, {})
                         target_yield = bench.get('yield', 0)
                         target_disp = bench.get('pnl', 0) * regime_mult
                         
@@ -1113,11 +1184,6 @@ with tab_dash:
                                 }
                             )
                         else: st.info("No active trades.")
-
-                render_tab(strat_tabs_inner[1], '130/160')
-                render_tab(strat_tabs_inner[2], '160/190')
-                render_tab(strat_tabs_inner[3], 'M200')
-                render_tab(strat_tabs_inner[4], 'SMSF')
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
@@ -1502,4 +1568,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v122.0 (Time-Weighted Returns per Strategy)")
+    st.caption("Allantis Trade Guardian v123.0 (Dynamic Strategy Manager)")
