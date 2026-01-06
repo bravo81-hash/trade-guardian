@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v123.0 (Dynamic Strategy Manager)")
+st.info("✅ RUNNING VERSION: v124.0 (Strategy Manager Tab)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -131,7 +131,6 @@ def load_strategy_config():
     finally: conn.close()
 
 # --- HELPER FUNCTIONS ---
-# UPDATED: Now uses dynamic config instead of hardcoded logic
 def get_strategy_dynamic(trade_name, config_dict):
     name_upper = str(trade_name).upper()
     # 1. Look for matches in config
@@ -354,10 +353,11 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
+                # Check 1: Exact Match on ID
                 c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
-                # Check 2: Rename Detection
+                # Check 2: Rename Detection (Same Link, Different ID/Name)
                 if existing is None and t['link'] and len(t['link']) > 15:
                     c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
                     link_match = c.fetchone()
@@ -466,7 +466,6 @@ def update_strategy_config(edited_df):
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        # Simple wipe and replace for config (it's small)
         c.execute("DELETE FROM strategy_config")
         for i, row in edited_df.iterrows():
             c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?)", 
@@ -621,30 +620,6 @@ st.sidebar.markdown("⬇️ *finally...*")
 with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
-
-# --- NEW: STRATEGY MANAGER (v123.0) ---
-with st.sidebar.expander("⚙️ Strategy Manager", expanded=False):
-    st.caption("Define your strategies dynamically.")
-    
-    conn = get_db_connection()
-    try:
-        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        
-        # Display as editable DF
-        edit_cols = ['name', 'identifier', 'target_pnl', 'target_days', 'min_stability', 'description']
-        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description']
-        
-        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor")
-        
-        if st.button("💾 Save Strategies"):
-            if update_strategy_config(edited_strats):
-                st.success("Strategies Updated!")
-                st.cache_data.clear()
-                st.rerun()
-    except Exception as e:
-        st.error(f"Error loading strategies: {e}")
-    finally:
-        conn.close()
 
 # --- NEW: TRADE MANAGER (Manual Fix) ---
 with st.sidebar.expander("🛠️ Maintenance", expanded=False):
@@ -813,9 +788,15 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
 # --- MAIN APP ---
 df = load_data()
-# LOAD CONFIG FROM DB (Replaces BASE_CONFIG)
+# BASE_CONFIG is now a fallback, real config comes from DB via load_strategy_config
+BASE_CONFIG = {
+    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
+    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
+    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
+    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
+}
+
 dynamic_benchmarks = load_strategy_config() 
-# Fallback if empty (shouldn't happen due to seeding)
 if not dynamic_benchmarks: dynamic_benchmarks = BASE_CONFIG.copy()
 
 expired_df = pd.DataFrame() 
@@ -823,25 +804,19 @@ expired_df = pd.DataFrame()
 if not df.empty:
     expired_df = df[df['Status'] == 'Expired']
     if not expired_df.empty:
-        # OVERRIDE CONFIG WITH HISTORY WHERE AVAILABLE
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
             winners = grp[grp['P&L'] > 0]
-            
-            # Keep defaults from DB unless history is robust
             current_bench = dynamic_benchmarks.get(strat, {})
-            
             if not winners.empty:
-                # Update PnL/DIT with history, keep others from config
                 current_bench['pnl'] = winners['P&L'].mean()
                 current_bench['dit'] = winners['Days Held'].mean()
                 current_bench['yield'] = grp['Daily Yield %'].mean()
                 current_bench['roi'] = winners['ROI'].mean()
-                
             dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
-tab_dash, tab_analytics, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "📖 Rules"])
+tab_dash, tab_analytics, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "⚙️ Strategies", "📖 Rules"])
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
@@ -1520,6 +1495,48 @@ with tab_analytics:
             else:
                 st.info("No rolled trades linked via Parent ID yet. Use the 'Journal' tab to link trades.")
 
+# --- NEW: STRATEGY CONFIG TAB CONTENT ---
+with tab_strategies:
+    st.markdown("### ⚙️ Strategy Configuration Manager")
+    st.caption("Define rules to auto-detect your trades and set specific targets.")
+    
+    conn = get_db_connection()
+    try:
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Display as editable DF
+        edit_cols = ['name', 'identifier', 'target_pnl', 'target_days', 'min_stability', 'description']
+        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description']
+        
+        edited_strats = st.data_editor(
+            strat_df, 
+            num_rows="dynamic", 
+            key="strat_editor_main",
+            use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
+                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
+                "Description": st.column_config.TextColumn("Notes")
+            }
+        )
+        
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            if st.button("💾 Save Changes"):
+                if update_strategy_config(edited_strats):
+                    st.success("Configuration Saved!")
+                    st.cache_data.clear()
+                    st.rerun()
+    except Exception as e:
+        st.error(f"Error loading strategies: {e}")
+    finally:
+        conn.close()
+    
+    st.info("💡 **How to use:** \n1. Add a new row. \n2. Enter a Name (e.g. 'Iron Fly'). \n3. Enter a Keyword (e.g. 'FLY') that you will use in OptionStrat trade names. \n4. Set your Targets. \n5. Click Save. The app will now auto-detect 'FLY' trades and apply these rules.")
+
 # 4. RULE BOOK
 with tab_rules:
     st.markdown("""
@@ -1568,4 +1585,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v123.0 (Dynamic Strategy Manager)")
+    st.caption("Allantis Trade Guardian v124.0 (Strategy Manager Tab)")
