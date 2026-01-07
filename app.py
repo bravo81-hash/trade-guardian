@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v126.0 (Fix: Group Name Strategy Detection)")
+st.info("✅ RUNNING VERSION: v127.0 (Self-Healing Database & Reprocess Feature)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -30,7 +30,7 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. TRADES TABLE
+    # 1. CREATE TABLES IF NOT EXIST
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -55,7 +55,6 @@ def init_db():
                     link TEXT
                 )''')
     
-    # 2. SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -68,7 +67,6 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
-    # 3. STRATEGY CONFIG TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
                     name TEXT PRIMARY KEY,
                     identifier TEXT,
@@ -79,38 +77,54 @@ def init_db():
                     typical_debit REAL
                 )''')
     
-    # Run migrations
-    try: c.execute("ALTER TABLE snapshots ADD COLUMN theta REAL")
-    except: pass
-    try: c.execute("ALTER TABLE snapshots ADD COLUMN delta REAL")
-    except: pass
-    try: c.execute("ALTER TABLE snapshots ADD COLUMN vega REAL")
-    except: pass
-    try: c.execute("ALTER TABLE strategy_config ADD COLUMN typical_debit REAL")
-    except: pass
+    # 2. ROBUST COLUMN MIGRATION (PRAGMA CHECK)
+    # This ensures we don't crash if columns already exist or failed to add previously
+    def add_column_safe(table, col_name, col_type):
+        try:
+            c.execute(f"SELECT {col_name} FROM {table} LIMIT 1")
+        except:
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+                # print(f"Migrated: Added {col_name} to {table}")
+            except: pass
+
+    # Snapshots migrations
+    add_column_safe('snapshots', 'theta', 'REAL')
+    add_column_safe('snapshots', 'delta', 'REAL')
+    add_column_safe('snapshots', 'vega', 'REAL')
+    
+    # Strategy Config migrations (Critical for v125+)
+    add_column_safe('strategy_config', 'typical_debit', 'REAL')
     
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
     conn.close()
     
-    # Seed Defaults if empty
+    # 3. SEED DEFAULTS IF EMPTY
     seed_default_strategies()
 
 def seed_default_strategies():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT count(*) FROM strategy_config")
-    if c.fetchone()[0] == 0:
-        defaults = [
-            ('130/160', '130', 500, 36, 0.8, 'Income Discipline', 4000),
-            ('160/190', '160', 700, 44, 0.8, 'Patience Training', 5200),
-            ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery', 8000),
-            ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder', 5000)
-        ]
-        c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
-        conn.commit()
-        st.toast("Updated Database with Strategy Manager logic.")
-    conn.close()
+    try:
+        # Check if table is empty
+        c.execute("SELECT count(*) FROM strategy_config")
+        count = c.fetchone()[0]
+        
+        if count == 0:
+            defaults = [
+                ('130/160', '130', 500, 36, 0.8, 'Income Discipline', 4000),
+                ('160/190', '160', 700, 44, 0.8, 'Patience Training', 5200),
+                ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery', 8000),
+                ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder', 5000)
+            ]
+            c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
+            conn.commit()
+            st.toast("Database Healed: Default strategies restored.")
+    except Exception as e:
+        print(f"Seeding error: {e}")
+    finally:
+        conn.close()
 
 # --- LOAD STRATEGY CONFIG ---
 @st.cache_data(ttl=60)
@@ -118,15 +132,23 @@ def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
     conn = get_db_connection()
     try:
+        # Check if table exists first to avoid crash on fresh/old DB
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_config'")
+        if not c.fetchone(): return {}
+
         df = pd.read_sql("SELECT * FROM strategy_config", conn)
         config = {}
         for _, row in df.iterrows():
+            # Handle missing column if migration failed silently (fallback)
+            typ_debit = row['typical_debit'] if 'typical_debit' in row and pd.notnull(row['typical_debit']) else 5000
+            
             config[row['name']] = {
                 'id': row['identifier'],
                 'pnl': row['target_pnl'],
                 'dit': row['target_days'],
                 'stability': row['min_stability'],
-                'debit_per_lot': row['typical_debit'] if 'typical_debit' in row and row['typical_debit'] > 0 else 5000
+                'debit_per_lot': typ_debit
             }
         return config
     except: return {}
@@ -134,12 +156,9 @@ def load_strategy_config():
 
 # --- HELPER FUNCTIONS ---
 def get_strategy_dynamic(trade_name, group_name, config_dict):
-    # Search in both Trade Name AND Group Name
-    # Combine them to search once
     search_text = (str(trade_name) + " " + str(group_name)).upper()
-    
     for strat_name, details in config_dict.items():
-        if details['id'].upper() in search_text:
+        if str(details['id']).upper() in search_text:
             return strat_name
     return "Other"
 
@@ -492,6 +511,32 @@ def update_strategy_config(edited_df):
         return False
     finally: conn.close()
 
+def reprocess_other_trades():
+    # Force re-check of all trades marked as 'Other' against current config
+    conn = get_db_connection()
+    c = conn.cursor()
+    config_dict = load_strategy_config()
+    
+    # Fetch all trades currently marked 'Other' or where we suspect a mismatch
+    # Just fetch all for safety but only update if different
+    c.execute("SELECT id, name, strategy FROM trades")
+    all_trades = c.fetchall()
+    
+    updated_count = 0
+    
+    for t_id, t_name, current_strat in all_trades:
+        # We don't have group info in DB usually, but we check name match
+        # If 'Group' was crucial, we might miss it here, but name usually contains strat too
+        new_strat = get_strategy_dynamic(t_name, "", config_dict) # Pass empty group for now
+        
+        if new_strat != "Other" and new_strat != current_strat:
+            c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
+            updated_count += 1
+            
+    conn.commit()
+    conn.close()
+    return updated_count
+
 # --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
@@ -542,6 +587,7 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
+        # Stability Ratio (Theta vs Risk)
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -1177,44 +1223,83 @@ with tab_dash:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# 3. ANALYTICS
+# --- NEW: STRATEGY CONFIG TAB CONTENT ---
+with tab_strategies:
+    st.markdown("### ⚙️ Strategy Configuration Manager")
+    st.caption("Define rules to auto-detect your trades, set specific targets, and define Lot Size.")
+    
+    conn = get_db_connection()
+    try:
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Display as editable DF
+        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
+        
+        edited_strats = st.data_editor(
+            strat_df, 
+            num_rows="dynamic", 
+            key="strat_editor_main",
+            use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
+                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d", help="PER LOT Target"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d", help="Used to auto-calculate Lot Size"),
+                "Description": st.column_config.TextColumn("Notes")
+            }
+        )
+        
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button("💾 Save Changes"):
+                if update_strategy_config(edited_strats):
+                    st.success("Configuration Saved!")
+                    st.cache_data.clear()
+                    st.rerun()
+        with c2:
+            if st.button("🔄 Reprocess 'Other' Trades"):
+                count = reprocess_other_trades()
+                st.success(f"Reprocessed {count} trades!")
+                st.cache_data.clear()
+                st.rerun()
+
+    except Exception as e:
+        st.error(f"Error loading strategies: {e}")
+    finally:
+        conn.close()
+    
+    st.info("💡 **How to use:** \n1. Add a new row. \n2. Enter a Name and Keyword. \n3. Set 'Typical Debit' (e.g., 5000). The app will divide actual debit by this number to find Lot Size. \n4. Set 'Target PnL' PER LOT. \n5. Click Save. \n6. Click 'Reprocess' to fix old trades marked as 'Other'.")
+
+# 3. ANALYTICS (Updated v125)
 with tab_analytics:
-    # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
-    # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
+    # --- NEW: CLOSED TRADE PERFORMANCE ---
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
         
-        # Aggregate Performance by Strategy
-        # Add Capital-Days Calculation: Debit * Days Held
         expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
         
         perf_agg = expired_df.groupby('Strategy').agg({
             'P&L': 'sum',
             'Debit': 'sum',
             'Cap_Days': 'sum',
-            'ROI': 'mean', # Average Return per Trade
+            'ROI': 'mean', 
             'id': 'count'
         }).reset_index()
         
-        # Win Rate Calculation
         wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
         perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
         perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
         
-        # Time-Weighted Annualized Return Calculation
-        # Formula: (Total PnL / Total Capital-Days) * 365
         perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
-        
-        # Simple Return on Cycled Capital (Total PnL / Total Debit)
         perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
         
-        # Formatting for Display
         perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
         perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
         
-        # Add Total Row
         total_pnl = perf_display['Total P&L'].sum()
         total_vol = perf_display['Total Volume'].sum()
         total_cap_days = perf_agg['Cap_Days'].sum()
@@ -1572,4 +1657,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v126.0 (Fix: Group Name Strategy Detection)")
+    st.caption("Allantis Trade Guardian v127.0 (Self-Healing Database & Reprocess Feature)")
