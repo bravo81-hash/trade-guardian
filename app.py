@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v128.0 (Robust Strategy Matching & Manual Override)")
+st.info("✅ RUNNING VERSION: v129.0 (Strategy Repair & Strict Matching)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -30,7 +30,7 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. CREATE TABLES IF NOT EXIST
+    # 1. CREATE TABLES
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -77,7 +77,7 @@ def init_db():
                     typical_debit REAL
                 )''')
     
-    # 2. ROBUST COLUMN MIGRATION
+    # 2. MIGRATIONS
     def add_column_safe(table, col_name, col_type):
         try:
             c.execute(f"SELECT {col_name} FROM {table} LIMIT 1")
@@ -95,25 +95,31 @@ def init_db():
     conn.commit()
     conn.close()
     
-    # 3. SEED DEFAULTS
+    # 3. SEED DEFAULTS (Run once if empty)
     seed_default_strategies()
 
-def seed_default_strategies():
+def seed_default_strategies(force_reset=False):
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        if force_reset:
+            c.execute("DELETE FROM strategy_config")
+        
         c.execute("SELECT count(*) FROM strategy_config")
         count = c.fetchone()[0]
+        
         if count == 0:
+            # UPDATED DEFAULTS v129: Longer identifiers to prevent collision
             defaults = [
-                ('130/160', '130', 500, 36, 0.8, 'Income Discipline', 4000),
-                ('160/190', '160', 700, 44, 0.8, 'Patience Training', 5200),
+                ('130/160', '130/160', 500, 36, 0.8, 'Income Discipline', 4000),
+                ('160/190', '160/190', 700, 44, 0.8, 'Patience Training', 5200),
                 ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery', 8000),
                 ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder', 5000)
             ]
             c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
             conn.commit()
-            st.toast("Database Healed: Default strategies restored.")
+            if force_reset:
+                st.toast("Strategies Reset to Factory Defaults.")
     except Exception as e:
         print(f"Seeding error: {e}")
     finally:
@@ -125,6 +131,7 @@ def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
     conn = get_db_connection()
     try:
+        # Check if table exists
         c = conn.cursor()
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_config'")
         if not c.fetchone(): return {}
@@ -148,23 +155,21 @@ def load_strategy_config():
 # --- HELPER FUNCTIONS ---
 def get_strategy_dynamic(trade_name, group_name, config_dict):
     """
-    Robust Matching: Checks longest identifiers first to prevent '160' triggering inside '130/160'.
-    Prioritizes Name match, then Group match.
+    Robust Matching: Checks longest identifiers first.
     """
     t_name = str(trade_name).upper()
     g_name = str(group_name).upper()
     
-    # Sort strategies by length of identifier (Longest first = Most Specific)
-    # This prevents short keys like "160" from grabbing "130/160" trades
+    # Sort by length of ID descending (Longest match wins)
     sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
     
-    # 1. Check Trade Name First (Highest Precision)
+    # 1. Priority: Trade Name
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in t_name:
             return strat_name
             
-    # 2. Check Group Name Second (Broad Classification)
+    # 2. Priority: Group Name
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in g_name:
@@ -387,7 +392,6 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                # Check match on ID
                 c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
@@ -399,9 +403,8 @@ def sync_data(file_list, file_type):
                         old_id, old_name = link_match
                         try:
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
-                            # Note: t['strategy'] here is the NEWLY detected strategy
                             c.execute("UPDATE trades SET id=?, name=?, strategy=? WHERE id=?", (trade_id, t['name'], t['strategy'], old_id))
-                            log.append(f"🔄 Renamed & Updated Strat: '{old_name}' -> '{t['name']}'")
+                            log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
                             c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                             existing = c.fetchone()
                             if file_type == "Active":
@@ -428,11 +431,7 @@ def sync_data(file_list, file_type):
                     if db_lot_size and db_lot_size > 0:
                         final_lot_size = db_lot_size
 
-                    # Preserve existing strategy unless it was 'Other' or we want to force updates?
-                    # Ideally, if file parser detects a specific strategy, we might want to update it if the DB has 'Other'
-                    # But if user manually set it, we should respect that.
-                    # For now, let's trust the FILE parser unless manual override exists (which we can't easily track without a flag).
-                    # Actually, let's ONLY update strategy if the existing one is 'Other' and new one is specific.
+                    # Update strategy only if existing is Other and new is specific
                     db_strategy = existing[11]
                     final_strategy = db_strategy
                     if db_strategy == 'Other' and t['strategy'] != 'Other':
@@ -508,7 +507,7 @@ def update_journal(edited_df):
             tags = str(row['Tags'])
             pid = str(row['Parent ID'])
             new_lot = int(row['lot_size']) if 'lot_size' in row and row['lot_size'] > 0 else 1
-            new_strat = str(row['Strategy']) # Capture manual strategy change
+            new_strat = str(row['Strategy']) 
             
             c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=?, strategy=? WHERE id=?", (notes, tags, pid, new_lot, new_strat, t_id))
             count += 1
@@ -537,16 +536,18 @@ def reprocess_other_trades():
     c = conn.cursor()
     config_dict = load_strategy_config()
     
-    c.execute("SELECT id, name, strategy FROM trades")
+    # Reprocess everything to ensure strict matching
+    c.execute("SELECT id, name, parent_id FROM trades") # parent_id isn't strategy but we need name
     all_trades = c.fetchall()
     
     updated_count = 0
     
-    for t_id, t_name, current_strat in all_trades:
-        # Reprocess logic now uses robust matching
+    for t_id, t_name, _ in all_trades:
+        # Group isn't stored in DB, but name usually has it. 
+        # Future files will catch group. This fixes history based on Name.
         new_strat = get_strategy_dynamic(t_name, "", config_dict) 
         
-        if new_strat != "Other" and new_strat != current_strat:
+        if new_strat != "Other":
             c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
             updated_count += 1
             
@@ -604,7 +605,6 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # Stability Ratio (Theta vs Risk)
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -771,6 +771,8 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
     if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
     
+    # UPDATED v123: Use DB config if available, else hardcoded base
+    # (Since we seeded DB with base, this now pulls from DB)
     bench = benchmarks_dict.get(strat, {})
     
     hist_avg_pnl = bench.get('pnl', 1000)
@@ -867,6 +869,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
 # --- MAIN APP ---
 df = load_data()
+# BASE_CONFIG is now a fallback, real config comes from DB via load_strategy_config
 BASE_CONFIG = {
     '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
     '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
@@ -1243,9 +1246,62 @@ with tab_dash:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# 3. ANALYTICS
+# --- NEW: STRATEGY CONFIG TAB CONTENT ---
+with tab_strategies:
+    st.markdown("### ⚙️ Strategy Configuration Manager")
+    st.caption("Define rules to auto-detect your trades, set specific targets, and define Lot Size.")
+    
+    conn = get_db_connection()
+    try:
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Display as editable DF
+        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
+        
+        edited_strats = st.data_editor(
+            strat_df, 
+            num_rows="dynamic", 
+            key="strat_editor_main",
+            use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
+                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d", help="PER LOT Target"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d", help="Used to auto-calculate Lot Size"),
+                "Description": st.column_config.TextColumn("Notes")
+            }
+        )
+        
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button("💾 Save Changes"):
+                if update_strategy_config(edited_strats):
+                    st.success("Configuration Saved!")
+                    st.cache_data.clear()
+                    st.rerun()
+        with c2:
+            if st.button("🔄 Reprocess All Trades"):
+                count = reprocess_other_trades()
+                st.success(f"Reprocessed {count} trades!")
+                st.cache_data.clear()
+                st.rerun()
+        with c3:
+            if st.button("🧨 Reset to Defaults", type="secondary"):
+                seed_default_strategies(force_reset=True)
+                st.cache_data.clear()
+                st.rerun()
+
+    except Exception as e:
+        st.error(f"Error loading strategies: {e}")
+    finally:
+        conn.close()
+    
+    st.info("💡 **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
+
+# 3. ANALYTICS (Updated v125)
 with tab_analytics:
-    # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
     # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
@@ -1629,4 +1685,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v128.0 (Robust Strategy Matching & Manual Override)")
+    st.caption("Allantis Trade Guardian v129.0 (Strategy Repair & Strict Matching)")
