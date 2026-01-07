@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v125.0 (Lot Size Awareness & Profit Anatomy)")
+st.info("✅ RUNNING VERSION: v126.0 (Fix: Group Name Strategy Detection)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -68,7 +68,7 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
-    # 3. STRATEGY CONFIG TABLE (Updated v125 with typical_debit)
+    # 3. STRATEGY CONFIG TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
                     name TEXT PRIMARY KEY,
                     identifier TEXT,
@@ -101,7 +101,6 @@ def seed_default_strategies():
     c = conn.cursor()
     c.execute("SELECT count(*) FROM strategy_config")
     if c.fetchone()[0] == 0:
-        # Defaults now include 'typical_debit' for lot calculation
         defaults = [
             ('130/160', '130', 500, 36, 0.8, 'Income Discipline', 4000),
             ('160/190', '160', 700, 44, 0.8, 'Patience Training', 5200),
@@ -134,10 +133,13 @@ def load_strategy_config():
     finally: conn.close()
 
 # --- HELPER FUNCTIONS ---
-def get_strategy_dynamic(trade_name, config_dict):
-    name_upper = str(trade_name).upper()
+def get_strategy_dynamic(trade_name, group_name, config_dict):
+    # Search in both Trade Name AND Group Name
+    # Combine them to search once
+    search_text = (str(trade_name) + " " + str(group_name)).upper()
+    
     for strat_name, details in config_dict.items():
-        if details['id'].upper() in name_upper:
+        if details['id'].upper() in search_text:
             return strat_name
     return "Other"
 
@@ -236,11 +238,14 @@ def parse_optionstrat_file(file, file_type, config_dict):
             if not trade_data.any(): return None
             
             name = str(trade_data.get('Name', ''))
+            group = str(trade_data.get('Group', '')) # Capture Group
             created = trade_data.get('Created At', '')
             try: start_dt = pd.to_datetime(created)
             except: return None 
 
-            strat = get_strategy_dynamic(name, config_dict)
+            # DYNAMIC STRATEGY DETECTION (Pass both name and group)
+            strat = get_strategy_dynamic(name, group, config_dict)
+            
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
             
@@ -267,11 +272,9 @@ def parse_optionstrat_file(file, file_type, config_dict):
             if days_held < 1: days_held = 1
 
             # --- INTELLIGENT LOT SIZE DETECTION ---
-            # Defaults to 1. Uses Config 'Debit Per Lot' to estimate.
             strat_config = config_dict.get(strat, {})
             typical_debit = strat_config.get('debit_per_lot', 5000)
             
-            # Round to nearest whole number, min 1
             lot_size = int(round(debit / typical_debit))
             if lot_size < 1: lot_size = 1
 
@@ -341,7 +344,6 @@ def sync_data(file_list, file_type):
         except: pass
     file_found_ids = set()
     
-    # Load dynamic config for parser
     config_dict = load_strategy_config()
 
     for file in file_list:
@@ -392,10 +394,8 @@ def sync_data(file_list, file_type):
                          t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link']))
                     count_new += 1
                 else:
-                    # Maintain existing manual Lot Size if it differs from heuristic
                     db_lot_size = existing[10]
                     final_lot_size = t['lot_size']
-                    # Trust manual override if it exists and is > 0
                     if db_lot_size and db_lot_size > 0:
                         final_lot_size = db_lot_size
 
@@ -468,8 +468,6 @@ def update_journal(edited_df):
             notes = str(row['Notes'])
             tags = str(row['Tags'])
             pid = str(row['Parent ID'])
-            
-            # v125: Allow editing lot size manually
             new_lot = int(row['lot_size']) if 'lot_size' in row and row['lot_size'] > 0 else 1
             
             c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=? WHERE id=?", (notes, tags, pid, new_lot, t_id))
@@ -485,7 +483,6 @@ def update_strategy_config(edited_df):
     try:
         c.execute("DELETE FROM strategy_config")
         for i, row in edited_df.iterrows():
-            # v125: Save typical_debit
             c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", 
                       (row['Name'], row['Identifier'], row['Target PnL'], row['Target Days'], row['Min Stability'], row['Description'], row['Typical Debit']))
         conn.commit()
@@ -533,7 +530,6 @@ def load_data():
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
         
-        # Ensure Lot Size is at least 1
         df['lot_size'] = pd.to_numeric(df['lot_size'], errors='coerce').fillna(1).astype(int)
         df['lot_size'] = df['lot_size'].apply(lambda x: 1 if x < 1 else x)
         
@@ -546,7 +542,6 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # Stability Ratio (Theta vs Risk)
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -648,14 +643,12 @@ with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
 with st.sidebar.expander("🛠️ Maintenance", expanded=False):
     st.caption("Fix Duplicates / Rename Issues")
     
-    # 1. Vacuum
     if st.button("🧹 Vacuum DB"):
         conn = get_db_connection()
         conn.execute("VACUUM")
         conn.close()
         st.success("Optimized.")
         
-    # 2. Delete Trades
     st.markdown("---")
     conn = get_db_connection()
     try:
@@ -679,7 +672,6 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
     except: pass
     conn.close()
     
-    # 3. Hard Reset
     st.markdown("---")
     if st.button("🧨 Hard Reset (Delete All Data)"):
         conn = get_db_connection()
@@ -708,7 +700,6 @@ def calculate_decision_ladder(row, benchmarks_dict):
     stability = row['Stability']
     debit = row['Debit']
     
-    # LOT SIZE AWARENESS (v125)
     lot_size = row.get('lot_size', 1)
     if lot_size < 1: lot_size = 1
     
@@ -717,11 +708,9 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
     if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
     
-    # UPDATED v125: Scale Targets by Lots
     bench = benchmarks_dict.get(strat, {})
     
     hist_avg_pnl = bench.get('pnl', 1000)
-    # Target Profit is PER LOT. Total target = (Avg * Regime) * Lots
     target_profit = (hist_avg_pnl * regime_mult) * lot_size
     
     hist_avg_days = bench.get('dit', 40)
@@ -762,7 +751,6 @@ def calculate_decision_ladder(row, benchmarks_dict):
             score += 35
             reason = f"Empty Tank (<${100*lot_size})"
 
-    # 1. PROFIT SCORING (Scaled)
     if pnl >= target_profit:
         return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
     elif pnl >= target_profit * 0.8:
@@ -816,7 +804,6 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
 # --- MAIN APP ---
 df = load_data()
-# BASE_CONFIG is now a fallback, real config comes from DB via load_strategy_config
 BASE_CONFIG = {
     '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
     '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
@@ -1190,77 +1177,44 @@ with tab_dash:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# --- NEW: STRATEGY CONFIG TAB CONTENT ---
-with tab_strategies:
-    st.markdown("### ⚙️ Strategy Configuration Manager")
-    st.caption("Define rules to auto-detect your trades, set specific targets, and define Lot Size.")
-    
-    conn = get_db_connection()
-    try:
-        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        
-        # Display as editable DF
-        edit_cols = ['name', 'identifier', 'target_pnl', 'target_days', 'min_stability', 'description', 'typical_debit']
-        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
-        
-        edited_strats = st.data_editor(
-            strat_df, 
-            num_rows="dynamic", 
-            key="strat_editor_main",
-            use_container_width=True,
-            column_config={
-                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
-                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
-                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d", help="PER LOT Target"),
-                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
-                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
-                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d", help="Used to auto-calculate Lot Size"),
-                "Description": st.column_config.TextColumn("Notes")
-            }
-        )
-        
-        c1, c2 = st.columns([1, 4])
-        with c1:
-            if st.button("💾 Save Changes"):
-                if update_strategy_config(edited_strats):
-                    st.success("Configuration Saved!")
-                    st.cache_data.clear()
-                    st.rerun()
-    except Exception as e:
-        st.error(f"Error loading strategies: {e}")
-    finally:
-        conn.close()
-    
-    st.info("💡 **How to use:** \n1. Add a new row. \n2. Enter a Name and Keyword. \n3. Set 'Typical Debit' (e.g., 5000). The app will divide actual debit by this number to find Lot Size. \n4. Set 'Target PnL' PER LOT. \n5. Click Save.")
-
-# 3. ANALYTICS (Updated v125)
+# 3. ANALYTICS
 with tab_analytics:
+    # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
-    # --- NEW: CLOSED TRADE PERFORMANCE ---
+    # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
         
+        # Aggregate Performance by Strategy
+        # Add Capital-Days Calculation: Debit * Days Held
         expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
         
         perf_agg = expired_df.groupby('Strategy').agg({
             'P&L': 'sum',
             'Debit': 'sum',
             'Cap_Days': 'sum',
-            'ROI': 'mean', 
+            'ROI': 'mean', # Average Return per Trade
             'id': 'count'
         }).reset_index()
         
+        # Win Rate Calculation
         wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
         perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
         perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
         
+        # Time-Weighted Annualized Return Calculation
+        # Formula: (Total PnL / Total Capital-Days) * 365
         perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
+        
+        # Simple Return on Cycled Capital (Total PnL / Total Debit)
         perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
         
+        # Formatting for Display
         perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
         perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
         
+        # Add Total Row
         total_pnl = perf_display['Total P&L'].sum()
         total_vol = perf_display['Total Volume'].sum()
         total_cap_days = perf_agg['Cap_Days'].sum()
@@ -1618,4 +1572,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v125.0 (Lot Size Awareness & Profit Anatomy)")
+    st.caption("Allantis Trade Guardian v126.0 (Fix: Group Name Strategy Detection)")
