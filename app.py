@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v129.0 (Strategy Repair & Strict Matching)")
+st.info("✅ RUNNING VERSION: v130.0 (Persistent Group Memory & Safe Reprocess)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -52,7 +52,8 @@ def init_db():
                     put_pnl REAL,
                     call_pnl REAL,
                     iv REAL,
-                    link TEXT
+                    link TEXT,
+                    original_group TEXT
                 )''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
@@ -91,6 +92,9 @@ def init_db():
     add_column_safe('snapshots', 'vega', 'REAL')
     add_column_safe('strategy_config', 'typical_debit', 'REAL')
     
+    # v130 New Column: Store the OptionStrat Group permanently
+    add_column_safe('trades', 'original_group', 'TEXT')
+    
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
     conn.close()
@@ -109,7 +113,6 @@ def seed_default_strategies(force_reset=False):
         count = c.fetchone()[0]
         
         if count == 0:
-            # UPDATED DEFAULTS v129: Longer identifiers to prevent collision
             defaults = [
                 ('130/160', '130/160', 500, 36, 0.8, 'Income Discipline', 4000),
                 ('160/190', '160/190', 700, 44, 0.8, 'Patience Training', 5200),
@@ -131,7 +134,6 @@ def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
     conn = get_db_connection()
     try:
-        # Check if table exists
         c = conn.cursor()
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_config'")
         if not c.fetchone(): return {}
@@ -157,10 +159,10 @@ def get_strategy_dynamic(trade_name, group_name, config_dict):
     """
     Robust Matching: Checks longest identifiers first.
     """
-    t_name = str(trade_name).upper()
-    g_name = str(group_name).upper()
+    t_name = str(trade_name).upper().strip()
+    g_name = str(group_name).upper().strip()
     
-    # Sort by length of ID descending (Longest match wins)
+    # Sort by length of ID descending
     sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
     
     # 1. Priority: Trade Name
@@ -335,7 +337,8 @@ def parse_optionstrat_file(file, file_type, config_dict):
                 'exit_dt': exit_dt, 'days_held': days_held, 'debit': debit,
                 'lot_size': lot_size, 'pnl': pnl, 
                 'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
-                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link
+                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link,
+                'group': group
             }
 
         cols = df_raw.columns
@@ -403,7 +406,8 @@ def sync_data(file_list, file_type):
                         old_id, old_name = link_match
                         try:
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
-                            c.execute("UPDATE trades SET id=?, name=?, strategy=? WHERE id=?", (trade_id, t['name'], t['strategy'], old_id))
+                            # NOTE: Do NOT auto-update strategy on rename if ID existed, to preserve manual override
+                            c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
                             log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
                             c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                             existing = c.fetchone()
@@ -418,12 +422,12 @@ def sync_data(file_list, file_type):
                 
                 if existing is None:
                     c.execute('''INSERT INTO trades 
-                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id, put_pnl, call_pnl, iv, link)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id, put_pnl, call_pnl, iv, link, original_group)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (trade_id, t['name'], t['strategy'], status, t['start_dt'].date(), 
                          t['exit_dt'].date() if t['exit_dt'] else None, 
                          t['days_held'], t['debit'], t['lot_size'], t['pnl'], 
-                         t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link']))
+                         t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link'], t['group']))
                     count_new += 1
                 else:
                     db_lot_size = existing[10]
@@ -431,7 +435,9 @@ def sync_data(file_list, file_type):
                     if db_lot_size and db_lot_size > 0:
                         final_lot_size = db_lot_size
 
-                    # Update strategy only if existing is Other and new is specific
+                    # SAFE UPDATE LOGIC v130: 
+                    # Only update strategy if the current one is 'Other' 
+                    # This prevents overwriting manual fixes (e.g. if user set 'SMSF' but auto thinks 'Other')
                     db_strategy = existing[11]
                     final_strategy = db_strategy
                     if db_strategy == 'Other' and t['strategy'] != 'Other':
@@ -454,19 +460,20 @@ def sync_data(file_list, file_type):
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
                     final_link = t['link'] if t['link'] != "" else old_link
 
+                    # Always update original_group if available (self-healing)
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?, strategy=?
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?, strategy=?, original_group=?
                             WHERE id=?''', 
                             (t['pnl'], status, t['exit_dt'].date() if t['exit_dt'] else None, t['days_held'], 
-                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, final_lot_size, final_strategy, trade_id))
+                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, final_lot_size, final_strategy, t['group'], trade_id))
                         count_update += 1
                     elif old_status in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?, lot_size=?, strategy=?
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?, lot_size=?, strategy=?, original_group=?
                             WHERE id=?''', 
                             (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, final_link, 
-                             t['exit_dt'].date() if t['exit_dt'] else None, final_lot_size, final_strategy, trade_id))
+                             t['exit_dt'].date() if t['exit_dt'] else None, final_lot_size, final_strategy, t['group'], trade_id))
                         count_update += 1
                 if file_type == "Active":
                     today = datetime.now().date()
@@ -536,20 +543,26 @@ def reprocess_other_trades():
     c = conn.cursor()
     config_dict = load_strategy_config()
     
-    # Reprocess everything to ensure strict matching
-    c.execute("SELECT id, name, parent_id FROM trades") # parent_id isn't strategy but we need name
+    # Try to fetch group if available
+    try:
+        c.execute("SELECT id, name, original_group, strategy FROM trades")
+    except:
+        # Fallback if column empty
+        c.execute("SELECT id, name, '', strategy FROM trades")
+        
     all_trades = c.fetchall()
     
     updated_count = 0
     
-    for t_id, t_name, _ in all_trades:
-        # Group isn't stored in DB, but name usually has it. 
-        # Future files will catch group. This fixes history based on Name.
-        new_strat = get_strategy_dynamic(t_name, "", config_dict) 
-        
-        if new_strat != "Other":
-            c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
-            updated_count += 1
+    for t_id, t_name, t_group, current_strat in all_trades:
+        # SAFE REPROCESS: Only touch trades marked as 'Other'
+        if current_strat == "Other":
+            group_val = t_group if t_group else ""
+            new_strat = get_strategy_dynamic(t_name, group_val, config_dict) 
+            
+            if new_strat != "Other":
+                c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
+                updated_count += 1
             
     conn.commit()
     conn.close()
@@ -605,6 +618,7 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
+        # Stability Ratio (Theta vs Risk)
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -869,7 +883,6 @@ def calculate_decision_ladder(row, benchmarks_dict):
 
 # --- MAIN APP ---
 df = load_data()
-# BASE_CONFIG is now a fallback, real config comes from DB via load_strategy_config
 BASE_CONFIG = {
     '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
     '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
@@ -1125,7 +1138,12 @@ with tab_dash:
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
                 sorted_strats = sorted(list(dynamic_benchmarks.keys()))
-                strat_tabs_inner = st.tabs(["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats])
+                # v130: Add 'Other' tab explicitly
+                tabs_list = ["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats]
+                if "Other" not in sorted_strats:
+                    tabs_list.append("📁 Other / Unclassified")
+                
+                strat_tabs_inner = st.tabs(tabs_list)
 
                 with strat_tabs_inner[0]:
                     strat_agg = active_df.groupby('Strategy').agg({
@@ -1180,6 +1198,7 @@ with tab_dash:
 
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 
+                # Render standard strategies
                 for i, strat_name in enumerate(sorted_strats):
                     with strat_tabs_inner[i+1]:
                         subset = active_df[active_df['Strategy'] == strat_name].copy()
@@ -1242,6 +1261,15 @@ with tab_dash:
                                 }
                             )
                         else: st.info("No active trades.")
+                
+                # Render "Other" tab if needed
+                if "Other" not in sorted_strats:
+                    with strat_tabs_inner[-1]: # The last tab
+                        subset = active_df[active_df['Strategy'] == "Other"].copy()
+                        if not subset.empty:
+                            st.dataframe(subset[cols], use_container_width=True)
+                        else:
+                            st.info("No unclassified trades.")
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
@@ -1282,7 +1310,7 @@ with tab_strategies:
                     st.cache_data.clear()
                     st.rerun()
         with c2:
-            if st.button("🔄 Reprocess All Trades"):
+            if st.button("🔄 Reprocess 'Other' Trades"):
                 count = reprocess_other_trades()
                 st.success(f"Reprocessed {count} trades!")
                 st.cache_data.clear()
@@ -1685,4 +1713,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v129.0 (Strategy Repair & Strict Matching)")
+    st.caption("Allantis Trade Guardian v130.0 (Persistent Group Memory & Safe Reprocess)")
