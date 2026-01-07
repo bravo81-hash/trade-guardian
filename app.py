@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v127.0 (Self-Healing Database & Reprocess Feature)")
+st.info("✅ RUNNING VERSION: v128.0 (Robust Strategy Matching & Manual Override)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -77,40 +77,33 @@ def init_db():
                     typical_debit REAL
                 )''')
     
-    # 2. ROBUST COLUMN MIGRATION (PRAGMA CHECK)
-    # This ensures we don't crash if columns already exist or failed to add previously
+    # 2. ROBUST COLUMN MIGRATION
     def add_column_safe(table, col_name, col_type):
         try:
             c.execute(f"SELECT {col_name} FROM {table} LIMIT 1")
         except:
             try:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
-                # print(f"Migrated: Added {col_name} to {table}")
             except: pass
 
-    # Snapshots migrations
     add_column_safe('snapshots', 'theta', 'REAL')
     add_column_safe('snapshots', 'delta', 'REAL')
     add_column_safe('snapshots', 'vega', 'REAL')
-    
-    # Strategy Config migrations (Critical for v125+)
     add_column_safe('strategy_config', 'typical_debit', 'REAL')
     
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
     conn.close()
     
-    # 3. SEED DEFAULTS IF EMPTY
+    # 3. SEED DEFAULTS
     seed_default_strategies()
 
 def seed_default_strategies():
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        # Check if table is empty
         c.execute("SELECT count(*) FROM strategy_config")
         count = c.fetchone()[0]
-        
         if count == 0:
             defaults = [
                 ('130/160', '130', 500, 36, 0.8, 'Income Discipline', 4000),
@@ -132,7 +125,6 @@ def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
     conn = get_db_connection()
     try:
-        # Check if table exists first to avoid crash on fresh/old DB
         c = conn.cursor()
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_config'")
         if not c.fetchone(): return {}
@@ -140,7 +132,6 @@ def load_strategy_config():
         df = pd.read_sql("SELECT * FROM strategy_config", conn)
         config = {}
         for _, row in df.iterrows():
-            # Handle missing column if migration failed silently (fallback)
             typ_debit = row['typical_debit'] if 'typical_debit' in row and pd.notnull(row['typical_debit']) else 5000
             
             config[row['name']] = {
@@ -156,10 +147,29 @@ def load_strategy_config():
 
 # --- HELPER FUNCTIONS ---
 def get_strategy_dynamic(trade_name, group_name, config_dict):
-    search_text = (str(trade_name) + " " + str(group_name)).upper()
-    for strat_name, details in config_dict.items():
-        if str(details['id']).upper() in search_text:
+    """
+    Robust Matching: Checks longest identifiers first to prevent '160' triggering inside '130/160'.
+    Prioritizes Name match, then Group match.
+    """
+    t_name = str(trade_name).upper()
+    g_name = str(group_name).upper()
+    
+    # Sort strategies by length of identifier (Longest first = Most Specific)
+    # This prevents short keys like "160" from grabbing "130/160" trades
+    sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
+    
+    # 1. Check Trade Name First (Highest Precision)
+    for strat_name, details in sorted_strats:
+        key = str(details['id']).upper()
+        if key in t_name:
             return strat_name
+            
+    # 2. Check Group Name Second (Broad Classification)
+    for strat_name, details in sorted_strats:
+        key = str(details['id']).upper()
+        if key in g_name:
+            return strat_name
+            
     return "Other"
 
 def clean_num(x):
@@ -257,12 +267,11 @@ def parse_optionstrat_file(file, file_type, config_dict):
             if not trade_data.any(): return None
             
             name = str(trade_data.get('Name', ''))
-            group = str(trade_data.get('Group', '')) # Capture Group
+            group = str(trade_data.get('Group', '')) 
             created = trade_data.get('Created At', '')
             try: start_dt = pd.to_datetime(created)
             except: return None 
 
-            # DYNAMIC STRATEGY DETECTION (Pass both name and group)
             strat = get_strategy_dynamic(name, group, config_dict)
             
             link = str(trade_data.get('Link', ''))
@@ -290,7 +299,6 @@ def parse_optionstrat_file(file, file_type, config_dict):
                   days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
 
-            # --- INTELLIGENT LOT SIZE DETECTION ---
             strat_config = config_dict.get(strat, {})
             typical_debit = strat_config.get('debit_per_lot', 5000)
             
@@ -379,7 +387,8 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size FROM trades WHERE id = ?", (trade_id,))
+                # Check match on ID
+                c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
                 # Rename Logic
@@ -390,9 +399,10 @@ def sync_data(file_list, file_type):
                         old_id, old_name = link_match
                         try:
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
-                            c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
-                            log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
-                            c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size FROM trades WHERE id = ?", (trade_id,))
+                            # Note: t['strategy'] here is the NEWLY detected strategy
+                            c.execute("UPDATE trades SET id=?, name=?, strategy=? WHERE id=?", (trade_id, t['name'], t['strategy'], old_id))
+                            log.append(f"🔄 Renamed & Updated Strat: '{old_name}' -> '{t['name']}'")
+                            c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                             existing = c.fetchone()
                             if file_type == "Active":
                                 file_found_ids.add(trade_id)
@@ -418,6 +428,16 @@ def sync_data(file_list, file_type):
                     if db_lot_size and db_lot_size > 0:
                         final_lot_size = db_lot_size
 
+                    # Preserve existing strategy unless it was 'Other' or we want to force updates?
+                    # Ideally, if file parser detects a specific strategy, we might want to update it if the DB has 'Other'
+                    # But if user manually set it, we should respect that.
+                    # For now, let's trust the FILE parser unless manual override exists (which we can't easily track without a flag).
+                    # Actually, let's ONLY update strategy if the existing one is 'Other' and new one is specific.
+                    db_strategy = existing[11]
+                    final_strategy = db_strategy
+                    if db_strategy == 'Other' and t['strategy'] != 'Other':
+                         final_strategy = t['strategy']
+
                     old_put = existing[6] if existing[6] else 0.0
                     old_call = existing[7] if existing[7] else 0.0
                     old_iv = existing[8] if existing[8] else 0.0
@@ -437,17 +457,17 @@ def sync_data(file_list, file_type):
 
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?, strategy=?
                             WHERE id=?''', 
                             (t['pnl'], status, t['exit_dt'].date() if t['exit_dt'] else None, t['days_held'], 
-                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, final_lot_size, trade_id))
+                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, final_lot_size, final_strategy, trade_id))
                         count_update += 1
                     elif old_status in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?, lot_size=?
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?, lot_size=?, strategy=?
                             WHERE id=?''', 
                             (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, final_link, 
-                             t['exit_dt'].date() if t['exit_dt'] else None, final_lot_size, trade_id))
+                             t['exit_dt'].date() if t['exit_dt'] else None, final_lot_size, final_strategy, trade_id))
                         count_update += 1
                 if file_type == "Active":
                     today = datetime.now().date()
@@ -488,8 +508,9 @@ def update_journal(edited_df):
             tags = str(row['Tags'])
             pid = str(row['Parent ID'])
             new_lot = int(row['lot_size']) if 'lot_size' in row and row['lot_size'] > 0 else 1
+            new_strat = str(row['Strategy']) # Capture manual strategy change
             
-            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=? WHERE id=?", (notes, tags, pid, new_lot, t_id))
+            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=?, strategy=? WHERE id=?", (notes, tags, pid, new_lot, new_strat, t_id))
             count += 1
         conn.commit()
         return count
@@ -512,22 +533,18 @@ def update_strategy_config(edited_df):
     finally: conn.close()
 
 def reprocess_other_trades():
-    # Force re-check of all trades marked as 'Other' against current config
     conn = get_db_connection()
     c = conn.cursor()
     config_dict = load_strategy_config()
     
-    # Fetch all trades currently marked 'Other' or where we suspect a mismatch
-    # Just fetch all for safety but only update if different
     c.execute("SELECT id, name, strategy FROM trades")
     all_trades = c.fetchall()
     
     updated_count = 0
     
     for t_id, t_name, current_strat in all_trades:
-        # We don't have group info in DB usually, but we check name match
-        # If 'Group' was crucial, we might miss it here, but name usually contains strat too
-        new_strat = get_strategy_dynamic(t_name, "", config_dict) # Pass empty group for now
+        # Reprocess logic now uses robust matching
+        new_strat = get_strategy_dynamic(t_name, "", config_dict) 
         
         if new_strat != "Other" and new_strat != current_strat:
             c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
@@ -1048,13 +1065,16 @@ with tab_dash:
 
             with sub_journal:
                 st.caption("Trades sorted by Urgency. 'Gauge' shows either Remaining Profit ($) or Days to Breakeven (d).")
-
+                
+                # --- NEW IN V128: STRATEGY OVERRIDE ---
+                strategy_options = sorted(list(dynamic_benchmarks.keys())) + ["Other"]
+                
                 display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
                     "Link": st.column_config.LinkColumn("OS Link", display_text="Open 🔗"),
-                    "Strategy": st.column_config.TextColumn("Strat", disabled=True, width="small"),
+                    "Strategy": st.column_config.SelectboxColumn("Strat", width="medium", options=strategy_options, required=True),
                     "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
                     "Urgency Score": st.column_config.ProgressColumn("⚠️ Urgency Ladder", min_value=0, max_value=100, format="%d", help="0=Safe, 100=Act Now"),
                     "Action": st.column_config.TextColumn("Decision", disabled=True),
@@ -1223,60 +1243,12 @@ with tab_dash:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# --- NEW: STRATEGY CONFIG TAB CONTENT ---
-with tab_strategies:
-    st.markdown("### ⚙️ Strategy Configuration Manager")
-    st.caption("Define rules to auto-detect your trades, set specific targets, and define Lot Size.")
-    
-    conn = get_db_connection()
-    try:
-        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        
-        # Display as editable DF
-        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
-        
-        edited_strats = st.data_editor(
-            strat_df, 
-            num_rows="dynamic", 
-            key="strat_editor_main",
-            use_container_width=True,
-            column_config={
-                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
-                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
-                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d", help="PER LOT Target"),
-                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
-                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
-                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d", help="Used to auto-calculate Lot Size"),
-                "Description": st.column_config.TextColumn("Notes")
-            }
-        )
-        
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            if st.button("💾 Save Changes"):
-                if update_strategy_config(edited_strats):
-                    st.success("Configuration Saved!")
-                    st.cache_data.clear()
-                    st.rerun()
-        with c2:
-            if st.button("🔄 Reprocess 'Other' Trades"):
-                count = reprocess_other_trades()
-                st.success(f"Reprocessed {count} trades!")
-                st.cache_data.clear()
-                st.rerun()
-
-    except Exception as e:
-        st.error(f"Error loading strategies: {e}")
-    finally:
-        conn.close()
-    
-    st.info("💡 **How to use:** \n1. Add a new row. \n2. Enter a Name and Keyword. \n3. Set 'Typical Debit' (e.g., 5000). The app will divide actual debit by this number to find Lot Size. \n4. Set 'Target PnL' PER LOT. \n5. Click Save. \n6. Click 'Reprocess' to fix old trades marked as 'Other'.")
-
-# 3. ANALYTICS (Updated v125)
+# 3. ANALYTICS
 with tab_analytics:
+    # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
-    # --- NEW: CLOSED TRADE PERFORMANCE ---
+    # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
         
@@ -1657,4 +1629,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v127.0 (Self-Healing Database & Reprocess Feature)")
+    st.caption("Allantis Trade Guardian v128.0 (Robust Strategy Matching & Manual Override)")
