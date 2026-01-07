@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v124.0 (Strategy Manager Tab)")
+st.info("✅ RUNNING VERSION: v125.0 (Lot Size Awareness & Profit Anatomy)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -30,7 +30,7 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. TRADES TABLE (Existing)
+    # 1. TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -55,7 +55,7 @@ def init_db():
                     link TEXT
                 )''')
     
-    # 2. SNAPSHOTS TABLE (Existing)
+    # 2. SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -68,14 +68,15 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
-    # 3. STRATEGY CONFIG TABLE (New in v123)
+    # 3. STRATEGY CONFIG TABLE (Updated v125 with typical_debit)
     c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
                     name TEXT PRIMARY KEY,
                     identifier TEXT,
                     target_pnl REAL,
                     target_days INTEGER,
                     min_stability REAL,
-                    description TEXT
+                    description TEXT,
+                    typical_debit REAL
                 )''')
     
     # Run migrations
@@ -84,6 +85,8 @@ def init_db():
     try: c.execute("ALTER TABLE snapshots ADD COLUMN delta REAL")
     except: pass
     try: c.execute("ALTER TABLE snapshots ADD COLUMN vega REAL")
+    except: pass
+    try: c.execute("ALTER TABLE strategy_config ADD COLUMN typical_debit REAL")
     except: pass
     
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
@@ -96,17 +99,16 @@ def init_db():
 def seed_default_strategies():
     conn = get_db_connection()
     c = conn.cursor()
-    # Check if empty
     c.execute("SELECT count(*) FROM strategy_config")
     if c.fetchone()[0] == 0:
-        # Insert the "Classic" strategies automatically so user loses nothing
+        # Defaults now include 'typical_debit' for lot calculation
         defaults = [
-            ('130/160', '130', 500, 36, 0.8, 'Income Discipline'),
-            ('160/190', '160', 700, 44, 0.8, 'Patience Training'),
-            ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery'),
-            ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder')
+            ('130/160', '130', 500, 36, 0.8, 'Income Discipline', 4000),
+            ('160/190', '160', 700, 44, 0.8, 'Patience Training', 5200),
+            ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery', 8000),
+            ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder', 5000)
         ]
-        c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?)", defaults)
+        c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
         conn.commit()
         st.toast("Updated Database with Strategy Manager logic.")
     conn.close()
@@ -124,7 +126,8 @@ def load_strategy_config():
                 'id': row['identifier'],
                 'pnl': row['target_pnl'],
                 'dit': row['target_days'],
-                'stability': row['min_stability']
+                'stability': row['min_stability'],
+                'debit_per_lot': row['typical_debit'] if 'typical_debit' in row and row['typical_debit'] > 0 else 5000
             }
         return config
     except: return {}
@@ -133,7 +136,6 @@ def load_strategy_config():
 # --- HELPER FUNCTIONS ---
 def get_strategy_dynamic(trade_name, config_dict):
     name_upper = str(trade_name).upper()
-    # 1. Look for matches in config
     for strat_name, details in config_dict.items():
         if details['id'].upper() in name_upper:
             return strat_name
@@ -238,9 +240,7 @@ def parse_optionstrat_file(file, file_type, config_dict):
             try: start_dt = pd.to_datetime(created)
             except: return None 
 
-            # DYNAMIC STRATEGY DETECTION
             strat = get_strategy_dynamic(name, config_dict)
-            
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
             
@@ -266,9 +266,14 @@ def parse_optionstrat_file(file, file_type, config_dict):
                   days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
 
-            lot_size = 1
-            # Simple heuristic for now, can be updated later
-            if debit > 5000: lot_size = 2
+            # --- INTELLIGENT LOT SIZE DETECTION ---
+            # Defaults to 1. Uses Config 'Debit Per Lot' to estimate.
+            strat_config = config_dict.get(strat, {})
+            typical_debit = strat_config.get('debit_per_lot', 5000)
+            
+            # Round to nearest whole number, min 1
+            lot_size = int(round(debit / typical_debit))
+            if lot_size < 1: lot_size = 1
 
             put_pnl = 0.0
             call_pnl = 0.0
@@ -353,11 +358,10 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     file_found_ids.add(trade_id)
                 
-                # Check 1: Exact Match on ID
-                c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
+                c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
-                # Check 2: Rename Detection (Same Link, Different ID/Name)
+                # Rename Logic
                 if existing is None and t['link'] and len(t['link']) > 15:
                     c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
                     link_match = c.fetchone()
@@ -367,7 +371,7 @@ def sync_data(file_list, file_type):
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
                             c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
                             log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
-                            c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link FROM trades WHERE id = ?", (trade_id,))
+                            c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size FROM trades WHERE id = ?", (trade_id,))
                             existing = c.fetchone()
                             if file_type == "Active":
                                 file_found_ids.add(trade_id)
@@ -388,16 +392,25 @@ def sync_data(file_list, file_type):
                          t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link']))
                     count_new += 1
                 else:
-                    old_id_val, old_status, old_theta, old_delta, old_gamma, old_vega, old_put, old_call, old_iv, old_link = existing
-                    old_put = old_put if old_put else 0.0
-                    old_call = old_call if old_call else 0.0
-                    old_iv = old_iv if old_iv else 0.0
-                    old_link = old_link if old_link else ""
+                    # Maintain existing manual Lot Size if it differs from heuristic
+                    db_lot_size = existing[10]
+                    final_lot_size = t['lot_size']
+                    # Trust manual override if it exists and is > 0
+                    if db_lot_size and db_lot_size > 0:
+                        final_lot_size = db_lot_size
+
+                    old_put = existing[6] if existing[6] else 0.0
+                    old_call = existing[7] if existing[7] else 0.0
+                    old_iv = existing[8] if existing[8] else 0.0
+                    old_link = existing[9] if existing[9] else ""
+                    
+                    old_status = existing[1]
+                    old_theta = existing[2]
 
                     final_theta = t['theta'] if t['theta'] != 0 else old_theta
-                    final_delta = t['delta'] if t['delta'] != 0 else old_delta
-                    final_gamma = t['gamma'] if t['gamma'] != 0 else old_gamma
-                    final_vega = t['vega'] if t['vega'] != 0 else old_vega
+                    final_delta = t['delta'] if t['delta'] != 0 else 0
+                    final_gamma = t['gamma'] if t['gamma'] != 0 else 0
+                    final_vega = t['vega'] if t['vega'] != 0 else 0
                     final_iv = t['iv'] if t['iv'] != 0 else old_iv
                     final_put = t['put_pnl'] if t['put_pnl'] != 0 else old_put
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
@@ -405,17 +418,17 @@ def sync_data(file_list, file_type):
 
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
-                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?
                             WHERE id=?''', 
                             (t['pnl'], status, t['exit_dt'].date() if t['exit_dt'] else None, t['days_held'], 
-                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, trade_id))
+                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, final_lot_size, trade_id))
                         count_update += 1
                     elif old_status in ["Active", "Missing"]: 
                         c.execute('''UPDATE trades SET 
-                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?, lot_size=?
                             WHERE id=?''', 
                             (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, final_link, 
-                             t['exit_dt'].date() if t['exit_dt'] else None, trade_id))
+                             t['exit_dt'].date() if t['exit_dt'] else None, final_lot_size, trade_id))
                         count_update += 1
                 if file_type == "Active":
                     today = datetime.now().date()
@@ -455,7 +468,11 @@ def update_journal(edited_df):
             notes = str(row['Notes'])
             tags = str(row['Tags'])
             pid = str(row['Parent ID'])
-            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=? WHERE id=?", (notes, tags, pid, t_id))
+            
+            # v125: Allow editing lot size manually
+            new_lot = int(row['lot_size']) if 'lot_size' in row and row['lot_size'] > 0 else 1
+            
+            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=? WHERE id=?", (notes, tags, pid, new_lot, t_id))
             count += 1
         conn.commit()
         return count
@@ -468,8 +485,9 @@ def update_strategy_config(edited_df):
     try:
         c.execute("DELETE FROM strategy_config")
         for i, row in edited_df.iterrows():
-            c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?)", 
-                      (row['Name'], row['Identifier'], row['Target PnL'], row['Target Days'], row['Min Stability'], row['Description']))
+            # v125: Save typical_debit
+            c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", 
+                      (row['Name'], row['Identifier'], row['Target PnL'], row['Target Days'], row['Min Stability'], row['Description'], row['Typical Debit']))
         conn.commit()
         return True
     except Exception as e:
@@ -514,7 +532,12 @@ def load_data():
 
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
-        df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
+        
+        # Ensure Lot Size is at least 1
+        df['lot_size'] = pd.to_numeric(df['lot_size'], errors='coerce').fillna(1).astype(int)
+        df['lot_size'] = df['lot_size'].apply(lambda x: 1 if x < 1 else x)
+        
+        df['Debit/Lot'] = df['Debit'] / df['lot_size']
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         df['Ann. ROI'] = df['Daily Yield %'] * 365
@@ -685,17 +708,21 @@ def calculate_decision_ladder(row, benchmarks_dict):
     stability = row['Stability']
     debit = row['Debit']
     
+    # LOT SIZE AWARENESS (v125)
+    lot_size = row.get('lot_size', 1)
+    if lot_size < 1: lot_size = 1
+    
     juice_val = 0.0
     juice_type = "Neutral"
 
     if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
     
-    # UPDATED v123: Use DB config if available, else hardcoded base
-    # (Since we seeded DB with base, this now pulls from DB)
+    # UPDATED v125: Scale Targets by Lots
     bench = benchmarks_dict.get(strat, {})
     
     hist_avg_pnl = bench.get('pnl', 1000)
-    target_profit = hist_avg_pnl * regime_mult
+    # Target Profit is PER LOT. Total target = (Avg * Regime) * Lots
+    target_profit = (hist_avg_pnl * regime_mult) * lot_size
     
     hist_avg_days = bench.get('dit', 40)
     
@@ -731,10 +758,11 @@ def calculate_decision_ladder(row, benchmarks_dict):
         if debit > 0 and (left_in_tank / debit) < 0.05:
             score += 40
             reason = "Squeezed Dry (Risk > Reward)"
-        elif left_in_tank < 100:
+        elif left_in_tank < (100 * lot_size):
             score += 35
-            reason = "Empty Tank (<$100)"
+            reason = f"Empty Tank (<${100*lot_size})"
 
+    # 1. PROFIT SCORING (Scaled)
     if pnl >= target_profit:
         return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
     elif pnl >= target_profit * 0.8:
@@ -746,7 +774,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
     
     if strat == '130/160':
         limit_130 = min(stale_threshold, 30) 
-        if days > limit_130 and pnl < 100:
+        if days > limit_130 and pnl < (100 * lot_size):
             return "KILL", 95, f"Stale (> {limit_130:.0f}d)", juice_val, juice_type
         elif days > (limit_130 * 0.8):
             score += 20
@@ -988,7 +1016,7 @@ with tab_dash:
             with sub_journal:
                 st.caption("Trades sorted by Urgency. 'Gauge' shows either Remaining Profit ($) or Days to Breakeven (d).")
 
-                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'Theta Eff.', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, 
                     "Name": st.column_config.TextColumn("Trade Name", disabled=True),
@@ -1002,6 +1030,7 @@ with tab_dash:
                     "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True, help="Ratio of P&L to Total Theta Potential. >1.0 is excellent."),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
+                    "lot_size": st.column_config.NumberColumn("Lots", min_value=1, step=1, help="Auto-calculated. Edit if wrong."),
                     "Notes": st.column_config.TextColumn("📝 Notes", width="large"),
                     "Tags": st.column_config.SelectboxColumn("🏷️ Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
                     "Parent ID": st.column_config.TextColumn("🔗 Link ID", help="Paste ID of previous leg to link campaigns."),
@@ -1039,7 +1068,6 @@ with tab_dash:
 
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
-                # Get unique strategies from config to create dynamic tabs
                 sorted_strats = sorted(list(dynamic_benchmarks.keys()))
                 strat_tabs_inner = st.tabs(["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats])
 
@@ -1096,7 +1124,6 @@ with tab_dash:
 
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 
-                # Dynamic rendering of sub-tabs
                 for i, strat_name in enumerate(sorted_strats):
                     with strat_tabs_inner[i+1]:
                         subset = active_df[active_df['Strategy'] == strat_name].copy()
@@ -1163,44 +1190,77 @@ with tab_dash:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# 3. ANALYTICS
+# --- NEW: STRATEGY CONFIG TAB CONTENT ---
+with tab_strategies:
+    st.markdown("### ⚙️ Strategy Configuration Manager")
+    st.caption("Define rules to auto-detect your trades, set specific targets, and define Lot Size.")
+    
+    conn = get_db_connection()
+    try:
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Display as editable DF
+        edit_cols = ['name', 'identifier', 'target_pnl', 'target_days', 'min_stability', 'description', 'typical_debit']
+        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
+        
+        edited_strats = st.data_editor(
+            strat_df, 
+            num_rows="dynamic", 
+            key="strat_editor_main",
+            use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
+                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d", help="PER LOT Target"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d", help="Used to auto-calculate Lot Size"),
+                "Description": st.column_config.TextColumn("Notes")
+            }
+        )
+        
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            if st.button("💾 Save Changes"):
+                if update_strategy_config(edited_strats):
+                    st.success("Configuration Saved!")
+                    st.cache_data.clear()
+                    st.rerun()
+    except Exception as e:
+        st.error(f"Error loading strategies: {e}")
+    finally:
+        conn.close()
+    
+    st.info("💡 **How to use:** \n1. Add a new row. \n2. Enter a Name and Keyword. \n3. Set 'Typical Debit' (e.g., 5000). The app will divide actual debit by this number to find Lot Size. \n4. Set 'Target PnL' PER LOT. \n5. Click Save.")
+
+# 3. ANALYTICS (Updated v125)
 with tab_analytics:
-    # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
-    # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
+    # --- NEW: CLOSED TRADE PERFORMANCE ---
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
         
-        # Aggregate Performance by Strategy
-        # Add Capital-Days Calculation: Debit * Days Held
         expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
         
         perf_agg = expired_df.groupby('Strategy').agg({
             'P&L': 'sum',
             'Debit': 'sum',
             'Cap_Days': 'sum',
-            'ROI': 'mean', # Average Return per Trade
+            'ROI': 'mean', 
             'id': 'count'
         }).reset_index()
         
-        # Win Rate Calculation
         wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
         perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
         perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
         
-        # Time-Weighted Annualized Return Calculation
-        # Formula: (Total PnL / Total Capital-Days) * 365
         perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
-        
-        # Simple Return on Cycled Capital (Total PnL / Total Debit)
         perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
         
-        # Formatting for Display
         perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
         perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
         
-        # Add Total Row
         total_pnl = perf_display['Total P&L'].sum()
         total_vol = perf_display['Total Volume'].sum()
         total_cap_days = perf_agg['Cap_Days'].sum()
@@ -1244,6 +1304,21 @@ with tab_analytics:
                 "Simple Return %": st.column_config.NumberColumn("Simple Ret %", help="Total P&L / Total Debit. Measures raw return on cycled capital.")
             }
         )
+        
+        # --- NEW VISUAL: PROFIT ANATOMY (v125) ---
+        # Bar chart showing Puts vs Calls contribution per trade
+        st.subheader("💰 Profit Anatomy: Call vs Put Contribution")
+        
+        # Sort by Exit Date for chronological view
+        viz_df = expired_df.sort_values('Exit Date')
+        
+        fig_anatomy = go.Figure()
+        fig_anatomy.add_trace(go.Bar(x=viz_df['Name'], y=viz_df['Put P&L'], name='Put Side', marker_color='#EF553B'))
+        fig_anatomy.add_trace(go.Bar(x=viz_df['Name'], y=viz_df['Call P&L'], name='Call Side', marker_color='#00CC96'))
+        
+        fig_anatomy.update_layout(barmode='relative', title='PnL Breakdown per Trade (Red=Puts, Green=Calls)', xaxis_tickangle=-45)
+        st.plotly_chart(fig_anatomy, use_container_width=True)
+        
         st.divider()
 
     if not df.empty:
@@ -1495,48 +1570,6 @@ with tab_analytics:
             else:
                 st.info("No rolled trades linked via Parent ID yet. Use the 'Journal' tab to link trades.")
 
-# --- NEW: STRATEGY CONFIG TAB CONTENT ---
-with tab_strategies:
-    st.markdown("### ⚙️ Strategy Configuration Manager")
-    st.caption("Define rules to auto-detect your trades and set specific targets.")
-    
-    conn = get_db_connection()
-    try:
-        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        
-        # Display as editable DF
-        edit_cols = ['name', 'identifier', 'target_pnl', 'target_days', 'min_stability', 'description']
-        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description']
-        
-        edited_strats = st.data_editor(
-            strat_df, 
-            num_rows="dynamic", 
-            key="strat_editor_main",
-            use_container_width=True,
-            column_config={
-                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
-                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
-                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
-                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
-                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
-                "Description": st.column_config.TextColumn("Notes")
-            }
-        )
-        
-        c1, c2 = st.columns([1, 4])
-        with c1:
-            if st.button("💾 Save Changes"):
-                if update_strategy_config(edited_strats):
-                    st.success("Configuration Saved!")
-                    st.cache_data.clear()
-                    st.rerun()
-    except Exception as e:
-        st.error(f"Error loading strategies: {e}")
-    finally:
-        conn.close()
-    
-    st.info("💡 **How to use:** \n1. Add a new row. \n2. Enter a Name (e.g. 'Iron Fly'). \n3. Enter a Keyword (e.g. 'FLY') that you will use in OptionStrat trade names. \n4. Set your Targets. \n5. Click Save. The app will now auto-detect 'FLY' trades and apply these rules.")
-
 # 4. RULE BOOK
 with tab_rules:
     st.markdown("""
@@ -1585,4 +1618,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v124.0 (Strategy Manager Tab)")
+    st.caption("Allantis Trade Guardian v125.0 (Lot Size Awareness & Profit Anatomy)")
