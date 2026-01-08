@@ -315,7 +315,7 @@ with st.sidebar:
             (df_all['status'].isin(filter_status))
         ]
     else:
-        df_filtered = pd.DataFrame()
+        df_filtered = df_all # Keeps the column structure even if empty
 
     st.markdown("---")
     st.info(f"Loaded **{len(df_filtered)}** trades matching criteria.")
