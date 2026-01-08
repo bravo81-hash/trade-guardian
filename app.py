@@ -492,6 +492,43 @@ with tab_trades:
 # TAB 3: OPERATIONS (IMPORT & MANUAL ADD)
 # ==============================================================================
 with tab_import:
+    # --- DATABASE MANAGEMENT SECTION ---
+    with st.expander("💾 Database Backup & Restore", expanded=True):
+        col_db1, col_db2 = st.columns(2)
+        
+        with col_db1:
+            st.markdown("### ☁️ Backup")
+            st.markdown("Download your current database file to keep a safe copy.")
+            if os.path.exists(DB_NAME):
+                with open(DB_NAME, "rb") as f:
+                    db_bytes = f.read()
+                st.download_button(
+                    label="⬇️ Download Database (.db)",
+                    data=db_bytes,
+                    file_name="trade_guardian_backup.db",
+                    mime="application/x-sqlite3"
+                )
+            else:
+                st.warning("No database found to backup.")
+
+        with col_db2:
+            st.markdown("### 🔄 Restore")
+            st.markdown("Upload a `.db` file to replace the current database.")
+            uploaded_db = st.file_uploader("Upload Database File", type=['db'], key="db_upload")
+            
+            if uploaded_db:
+                if st.button("⚠️ Overwrite & Restore Database", type="secondary"):
+                    try:
+                        # Write new file
+                        with open(DB_NAME, "wb") as f:
+                            f.write(uploaded_db.getbuffer())
+                        st.success("Database restored successfully! Reloading...")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error restoring database: {e}")
+    
+    st.divider()
+
     col_imp1, col_imp2 = st.columns([1, 1], gap="large")
     
     # --- SECTION: FILE UPLOAD ---
