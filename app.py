@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CUSTOM CSS FOR CLEAN LOOK ---
+# --- CUSTOM CSS FOR MODERN UI ---
 st.markdown("""
 <style>
     .metric-card {
@@ -28,20 +28,25 @@ st.markdown("""
         border-radius: 10px;
         padding: 15px;
         text-align: center;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
     }
     .stProgress > div > div > div > div {
         background-color: #4CAF50;
     }
     div[data-testid="stExpander"] div[role="button"] p {
-        font-size: 1.1rem;
+        font-size: 1.0rem;
         font-weight: 600;
+    }
+    h1, h2, h3 {
+        color: #1E3A8A;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # --- DEBUG BANNER ---
-# st.info("✅ RUNNING VERSION: v131.0 (Modern UI/UX Overhaul)") 
-# Commented out for cleaner look, uncomment if needed for version check
+st.info("✅ RUNNING VERSION: v131.0 (Full UI/UX Overhaul & Universal Calculator Tab)")
+
+st.title("🛡️ Allantis Trade Guardian")
 
 # --- DATABASE ENGINE ---
 DB_NAME = "trade_guardian_v4.db"
@@ -53,7 +58,7 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. CREATE TABLES
+    # 1. TRADES TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -79,6 +84,7 @@ def init_db():
                     original_group TEXT
                 )''')
     
+    # 2. SNAPSHOTS TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT,
@@ -91,6 +97,7 @@ def init_db():
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
+    # 3. STRATEGY CONFIG TABLE
     c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
                     name TEXT PRIMARY KEY,
                     identifier TEXT,
@@ -101,7 +108,7 @@ def init_db():
                     typical_debit REAL
                 )''')
     
-    # 2. MIGRATIONS
+    # 4. MIGRATIONS (Self-Healing)
     def add_column_safe(table, col_name, col_type):
         try:
             c.execute(f"SELECT {col_name} FROM {table} LIMIT 1")
@@ -141,11 +148,14 @@ def seed_default_strategies(force_reset=False):
             ]
             c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
             conn.commit()
+            if force_reset:
+                st.toast("Strategies Reset to Factory Defaults.")
     except Exception as e:
         print(f"Seeding error: {e}")
     finally:
         conn.close()
 
+# --- LOAD CONFIG ---
 @st.cache_data(ttl=60)
 def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
@@ -173,14 +183,21 @@ def load_strategy_config():
 
 # --- HELPER FUNCTIONS ---
 def get_strategy_dynamic(trade_name, group_name, config_dict):
+    """
+    Robust Matching: Checks longest identifiers first. Prioritizes Name then Group.
+    """
     t_name = str(trade_name).upper().strip()
     g_name = str(group_name).upper().strip()
+    
+    # Sort by length of ID descending (Longest match wins)
     sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
     
+    # 1. Check Trade Name
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in t_name: return strat_name
             
+    # 2. Check Group Name
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in g_name: return strat_name
@@ -196,12 +213,6 @@ def clean_num(x):
         return val
     except: return 0.0
 
-def safe_fmt(val, fmt_str):
-    try:
-        if isinstance(val, (int, float)): return fmt_str.format(val)
-        return str(val)
-    except: return str(val)
-
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     safe_name = re.sub(r'\W+', '', str(name))
@@ -212,8 +223,7 @@ def extract_ticker(name):
         parts = str(name).split(' ')
         if parts:
             ticker = parts[0].replace('.', '').upper()
-            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']:
-                return "UNKNOWN"
+            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']: return "UNKNOWN"
             return ticker
         return "UNKNOWN"
     except: return "UNKNOWN"
@@ -314,6 +324,7 @@ def parse_optionstrat_file(file, file_type, config_dict):
                   days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
 
+            # LOT SIZE DETECTION
             strat_config = config_dict.get(strat, {})
             typical_debit = strat_config.get('debit_per_lot', 5000)
             
@@ -373,6 +384,7 @@ def parse_optionstrat_file(file, file_type, config_dict):
         print(f"Parser Error: {e}")
         return []
 
+# --- SYNC ENGINE ---
 def sync_data(file_list, file_type):
     log = []
     if not isinstance(file_list, list): file_list = [file_list]
@@ -413,6 +425,7 @@ def sync_data(file_list, file_type):
                         old_id, old_name = link_match
                         try:
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
+                            # Do NOT update strategy on rename if already specific (User Manual Override Protection)
                             c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
                             log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
                             c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
@@ -443,6 +456,7 @@ def sync_data(file_list, file_type):
 
                     db_strategy = existing[11]
                     final_strategy = db_strategy
+                    # Only overwrite if current is 'Other'
                     if db_strategy == 'Other' and t['strategy'] != 'Other':
                          final_strategy = t['strategy']
 
@@ -554,6 +568,7 @@ def reprocess_other_trades():
     updated_count = 0
     
     for t_id, t_name, t_group, current_strat in all_trades:
+        # Only touch 'Other'
         if current_strat == "Other":
             group_val = t_group if t_group else ""
             new_strat = get_strategy_dynamic(t_name, group_val, config_dict) 
@@ -638,46 +653,6 @@ def load_data():
         df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
     return df
 
-@st.cache_data(ttl=300)
-def load_snapshots():
-    if not os.path.exists(DB_NAME): return pd.DataFrame()
-    conn = get_db_connection()
-    try:
-        q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
-               t.strategy, t.name, t.id, t.theta as initial_theta
-        FROM snapshots s
-        JOIN trades t ON s.trade_id = t.id
-        """
-        df = pd.read_sql(q, conn)
-        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
-        df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
-        df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
-        df['theta'] = pd.to_numeric(df['theta'], errors='coerce').fillna(0)
-        df['delta'] = pd.to_numeric(df['delta'], errors='coerce').fillna(0)
-        df['vega'] = pd.to_numeric(df['vega'], errors='coerce').fillna(0)
-        df['initial_theta'] = pd.to_numeric(df['initial_theta'], errors='coerce').fillna(0)
-        return df
-    except: return pd.DataFrame()
-    finally: conn.close()
-
-# --- HELPER: FIND SIMILAR TRADES ---
-def find_similar_trades(current_trade, historical_df, top_n=3):
-    if historical_df.empty:
-        return pd.DataFrame()
-    features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
-    for f in features:
-        if f not in current_trade or f not in historical_df.columns:
-            return pd.DataFrame()
-    curr_vec = np.nan_to_num(current_trade[features].values.astype(float)).reshape(1, -1)
-    hist_vecs = np.nan_to_num(historical_df[features].values.astype(float))
-    distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
-    similar_idx = np.argsort(distances)[:top_n]
-    similar = historical_df.iloc[similar_idx].copy()
-    max_dist = distances.max() if distances.max() > 0 else 1
-    similar['Similarity %'] = 100 * (1 - distances[similar_idx] / max_dist)
-    return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
-
 # --- INITIALIZE DB ---
 init_db()
 
@@ -709,7 +684,7 @@ with st.sidebar:
         with open(DB_NAME, "rb") as f:
             st.download_button("Download .db Backup", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-    # --- NEW: TRADE MANAGER (Manual Fix) ---
+    # --- TRADE MANAGER ---
     with st.expander("🛠️ Maintenance", expanded=False):
         st.caption("Fix Duplicates / Rename Issues")
         
@@ -789,6 +764,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
     action = "HOLD"
     reason = "Normal"
     
+    # ZOMBIE & JUICE
     if pnl < 0:
         juice_type = "Recovery Days"
         if theta > 0:
@@ -821,6 +797,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
             score += 35
             reason = f"Empty Tank (<${100*lot_size})"
 
+    # PROFIT SCORING
     if pnl >= target_profit:
         return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
     elif pnl >= target_profit * 0.8:
@@ -901,7 +878,7 @@ if not df.empty:
             dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
-tab_dash, tab_analytics, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "⚙️ Strategies", "📖 Rules"])
+tab_dash, tab_calculator, tab_analytics, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "✈️ Calculator", "📈 Analytics", "⚙️ Strategies", "📖 Rules"])
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
@@ -926,7 +903,6 @@ with tab_dash:
                             "🟡 REVIEW" if allocation_score > 60 and total_delta_pct < 5 and avg_age < 35 else \
                             "🔴 CRITICAL"
             
-            # Use columns to center the banner content
             st.markdown(f"### {health_status} Portfolio Status")
             hb1, hb2, hb3 = st.columns(3)
             hb1.metric("Allocation Score", f"{allocation_score:.0f}/100")
@@ -962,7 +938,7 @@ with tab_dash:
             
             active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
 
-            # --- PRIORITY ACTION QUEUE (Only show if urgent) ---
+            # --- PRIORITY ACTION QUEUE ---
             todo_df = active_df[active_df['Urgency Score'] >= 70]
             if not todo_df.empty:
                 st.subheader(f"🔥 Action Queue ({len(todo_df)})")
@@ -984,7 +960,6 @@ with tab_dash:
                 st.divider()
 
             # --- TABS FOR DATA ---
-            # Pre-flight is now its own main tab, so here we just have Journal + Strategy Detail
             sub_journal, sub_strat = st.tabs(["📝 Active Journal", "🏛️ Strategy Detail"])
 
             with sub_journal:
@@ -1054,7 +1029,6 @@ with tab_dash:
                     
                     st.dataframe(final_agg.style.format({'P&L': '${:,.0f}', 'Debit': '${:,.0f}', 'Theta': '{:,.0f}', 'Delta': '{:,.1f}'}), use_container_width=True)
 
-                # Individual Tabs
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'Debit', 'Days Held']
                 for i, strat_name in enumerate(sorted_strats):
                     with strat_tabs_inner[i+1]:
@@ -1064,7 +1038,6 @@ with tab_dash:
                         else:
                             st.info("No active trades.")
                 
-                # Unclassified Tab
                 if "Other" not in sorted_strats:
                     with strat_tabs_inner[-1]:
                         subset = active_df[active_df['Strategy'] == "Other"].copy()
@@ -1077,7 +1050,84 @@ with tab_dash:
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# 2. ANALYTICS TAB
+# 2. CALCULATOR TAB
+with tab_calculator:
+    st.markdown("### ✈️ Universal Pre-Flight Calculator")
+    pf_c1, pf_c2, pf_c3 = st.columns(3)
+    with pf_c1:
+        pf_goal = st.selectbox("Strategy Profile", [
+            "🛡️ Hedged Income (Butterflies, Calendars, M200)", 
+            "🏰 Standard Income (Credit Spreads, Iron Condors)", 
+            "🚀 Directional (Long Calls/Puts, Verticals)", 
+            "⚡ Speculative Vol (Straddles, Earnings)"
+        ])
+        pf_dte = st.number_input("DTE (Days)", min_value=1, value=45, step=1)
+    with pf_c2:
+        pf_price = st.number_input("Net Price ($)", value=5000.0, step=100.0, help="Total Debit or Credit (Risk Amount)")
+        pf_theta = st.number_input("Theta ($)", value=15.0, step=1.0)
+    with pf_c3:
+        pf_delta = st.number_input("Net Delta", value=-10.0, step=1.0, format="%.2f")
+        pf_vega = st.number_input("Vega", value=100.0, step=1.0, format="%.2f")
+        
+    if st.button("Run Pre-Flight Check"):
+        st.markdown("---")
+        res_c1, res_c2, res_c3 = st.columns(3)
+        
+        if "Hedged Income" in pf_goal:
+            stability = pf_theta / (abs(pf_delta) + 1)
+            yield_pct = (pf_theta / abs(pf_price)) * 100
+            annualized_roi = (yield_pct * 365)
+            vega_cushion = pf_vega / pf_theta if pf_theta != 0 else 0
+            
+            with res_c1:
+                if stability > 1.0: st.success(f"🛡️ Stability: {stability:.2f} (Fortress)")
+                elif stability > 0.5: st.info(f"⚖️ Stability: {stability:.2f} (Good)")
+                else: st.error(f"🎲 Stability: {stability:.2f} (Coin Flip)")
+            with res_c2:
+                if annualized_roi > 50: st.success(f"💰 Ann. ROI: {annualized_roi:.0f}%")
+                elif annualized_roi > 25: st.info(f"💵 Ann. ROI: {annualized_roi:.0f}%")
+                else: st.error(f"📉 Ann. ROI: {annualized_roi:.0f}%")
+            with res_c3:
+                if pf_dte < 21: st.warning("⚠️ High Gamma Risk (Low DTE)")
+                elif pf_vega > 0: st.success(f"💎 Hedge: {vega_cushion:.1f}x (Good)")
+                else: st.error(f"⚠️ Hedge: {pf_vega:.0f} (Negative Vega)")
+
+        elif "Standard Income" in pf_goal:
+            stability = pf_theta / (abs(pf_delta) + 1)
+            yield_pct = (pf_theta / abs(pf_price)) * 100
+            annualized_roi = (yield_pct * 365)
+            fragility = abs(pf_vega) / pf_theta if pf_theta != 0 else 999
+            
+            with res_c1:
+                if stability > 0.5: st.success(f"🛡️ Stability: {stability:.2f} (Good)")
+                else: st.error(f"🎲 Stability: {stability:.2f} (Unstable)")
+            with res_c2:
+                if annualized_roi > 40: st.success(f"💰 Ann. ROI: {annualized_roi:.0f}%")
+                else: st.warning(f"📉 Ann. ROI: {annualized_roi:.0f}%")
+            with res_c3:
+                if pf_dte < 21: st.warning("⚠️ High Gamma Risk (Low DTE)")
+                elif pf_vega < 0 and fragility < 5: st.success(f"💎 Fragility: {fragility:.1f} (Robust)")
+                else: st.warning(f"⚠️ Fragility: {fragility:.1f} (High)")
+
+        elif "Directional" in pf_goal:
+            leverage = abs(pf_delta) / abs(pf_price) * 100
+            theta_drag = (pf_theta / abs(pf_price)) * 100
+            with res_c1: st.metric("Leverage", f"{leverage:.2f} Δ/$100")
+            with res_c2:
+                if theta_drag > -0.1: st.success(f"🔥 Burn: {theta_drag:.2f}% (Low)")
+                else: st.warning(f"💸 Burn: {theta_drag:.2f}% (High)")
+            with res_c3:
+                proj_roi = (abs(pf_delta) * 5) / abs(pf_price) * 100 
+                st.metric("ROI on $5 Move", f"{proj_roi:.1f}%")
+
+        elif "Speculative Vol" in pf_goal:
+            vega_efficiency = abs(pf_vega) / abs(pf_price) * 100
+            move_needed = abs(pf_theta / pf_vega) if pf_vega != 0 else 0
+            with res_c1: st.metric("Vega Exposure", f"{vega_efficiency:.1f}%")
+            with res_c2: st.metric("Daily Cost", f"${pf_theta:.0f}")
+            with res_c3: st.info(f"Need {move_needed:.1f}% IV move to break even")
+
+# 3. ANALYTICS TAB
 with tab_analytics:
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
@@ -1108,7 +1158,7 @@ with tab_analytics:
             use_container_width=True
         )
 
-# 3. STRATEGIES CONFIG TAB
+# 4. STRATEGIES CONFIG TAB
 with tab_strategies:
     st.markdown("### ⚙️ Strategy Configuration Manager")
     
@@ -1147,8 +1197,52 @@ with tab_strategies:
     finally:
         conn.close()
 
-# 4. RULES TAB
+# 5. RULES TAB
 with tab_rules:
-    st.markdown("### 📖 The Trader's Constitution")
-    # (Rules text can be shortened or moved to an expander if needed)
-    st.info("Rules text placeholder. (Copy previous content here if needed)")
+    st.markdown("""
+    # 📖 The Trader's Constitution
+    *Refined by Data Audit & Behavioral Analysis*
+
+    ### 1. 130/160 Strategy (Income Discipline)
+    * **Role:** Income Engine. Extracts time decay (Theta).
+    * **Entry:** Monday/Tuesday (Best liquidity/IV fit).
+    * **Debit Target:** `$3,500 - $4,500` per lot.
+        * *Stop Rule:* Never pay > `$4,800` per lot.
+    * **Management:** **Time Limit Rule.**
+        * Kill if trade is **25 days old** and P&L is flat/negative.
+        * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
+    * **Efficiency Check:** ROI-focused. Requires high velocity.
+    
+    ### 2. 160/190 Strategy (Patience Training)
+    * **Role:** Compounder. Expectancy focused.
+    * **Entry:** Friday (Captures weekend decay start).
+    * **Debit Target:** `~$5,200` per lot.
+    * **Sizing:** Trade **1 Lot**.
+    * **Exit:** Hold for **40-50 Days**. 
+    * **Golden Rule:** **Do not touch in first 30 days.** Early interference statistically worsens outcomes.
+    
+    ### 3. M200 Strategy (Emotional Mastery)
+    * **Role:** Whale. Variance-tolerant capital deployment.
+    * **Entry:** Wednesday.
+    * **Debit Target:** `$7,500 - $8,500` per lot.
+    * **The "Dip Valley":**
+        * P&L often looks worst between Day 15–40. This is structural.
+        * **Management:** Check at **Day 14**.
+            * Check **Greeks & VIX**, not just P&L.
+            * If Red/Flat: **HOLD.** Do not panic exit in the Valley. Wait for volatility to revert.
+            
+    ### 4. SMSF Strategy (Wealth Builder)
+    * **Role:** Long-term Growth.
+    * **Structure:** Multi-trade portfolio strategy.
+    
+    ---
+    ### 🛡️ Universal Execution Gates
+    1.  **Stability Check:** Monitor **Stability** Ratio.
+        * **> 1.0 (Green):** Fortress. Trade is safe.
+        * **< 0.25 (Red):** Coin Flip. Trade is directional gambling.
+    2.  **Volatility Gate:** Check VIX before entry. Ideal: 14–22. Skip if VIX exploded >10% in last 48h.
+    3.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
+    4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
+    """)
+    st.divider()
+    st.caption("Allantis Trade Guardian v131.0 (Modern UI/UX Overhaul)")
