@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v130.0 (Persistent Group Memory & Safe Reprocess)")
+st.info("✅ RUNNING VERSION: v130.1 (v130.0 + Correlation & MAE)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -406,7 +406,7 @@ def sync_data(file_list, file_type):
                         old_id, old_name = link_match
                         try:
                             c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
-                            # NOTE: Do NOT auto-update strategy on rename if ID existed, to preserve manual override
+                            # Do NOT auto-update strategy on rename if already specific (User Manual Override Protection)
                             c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
                             log.append(f"🔄 Renamed: '{old_name}' -> '{t['name']}'")
                             c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
@@ -435,11 +435,9 @@ def sync_data(file_list, file_type):
                     if db_lot_size and db_lot_size > 0:
                         final_lot_size = db_lot_size
 
-                    # SAFE UPDATE LOGIC v130: 
-                    # Only update strategy if the current one is 'Other' 
-                    # This prevents overwriting manual fixes (e.g. if user set 'SMSF' but auto thinks 'Other')
                     db_strategy = existing[11]
                     final_strategy = db_strategy
+                    # Only overwrite if current is 'Other'
                     if db_strategy == 'Other' and t['strategy'] != 'Other':
                          final_strategy = t['strategy']
 
@@ -460,7 +458,6 @@ def sync_data(file_list, file_type):
                     final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
                     final_link = t['link'] if t['link'] != "" else old_link
 
-                    # Always update original_group if available (self-healing)
                     if file_type == "History":
                         c.execute('''UPDATE trades SET 
                             pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?, strategy=?, original_group=?
@@ -543,23 +540,19 @@ def reprocess_other_trades():
     c = conn.cursor()
     config_dict = load_strategy_config()
     
-    # Try to fetch group if available
     try:
         c.execute("SELECT id, name, original_group, strategy FROM trades")
     except:
-        # Fallback if column empty
         c.execute("SELECT id, name, '', strategy FROM trades")
         
     all_trades = c.fetchall()
-    
     updated_count = 0
     
     for t_id, t_name, t_group, current_strat in all_trades:
-        # SAFE REPROCESS: Only touch trades marked as 'Other'
+        # Only touch 'Other'
         if current_strat == "Other":
             group_val = t_group if t_group else ""
             new_strat = get_strategy_dynamic(t_name, group_val, config_dict) 
-            
             if new_strat != "Other":
                 c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
                 updated_count += 1
@@ -568,7 +561,6 @@ def reprocess_other_trades():
     conn.close()
     return updated_count
 
-# --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
@@ -618,7 +610,6 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # Stability Ratio (Theta vs Risk)
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -687,80 +678,78 @@ def find_similar_trades(current_trade, historical_df, top_n=3):
 init_db()
 
 # --- SIDEBAR ---
-st.sidebar.markdown("### 🚦 Daily Workflow")
-with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
-    restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
-    if restore:
-        with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
-        st.cache_data.clear()
-        st.success("Restored.")
-        if 'restored' not in st.session_state:
-            st.session_state['restored'] = True
+with st.sidebar:
+    st.markdown("### 🗂️ Data Management")
+    
+    with st.expander("📥 Sync & Restore", expanded=True):
+        restore = st.file_uploader("1. Restore .db file", type=['db'], key='restore')
+        if restore:
+            with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+            st.cache_data.clear()
+            st.success("Database Restored.")
             st.rerun()
 
-st.sidebar.markdown("⬇️ *then...*")
-with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
-    active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
-    history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
-    if st.button("🔄 Process & Reconcile"):
-        logs = []
-        if active_up: logs.extend(sync_data(active_up, "Active"))
-        if history_up: logs.extend(sync_data(history_up, "History"))
-        if logs:
-            for l in logs: st.write(l)
-            st.cache_data.clear()
-            st.success("Sync Complete!")
-
-st.sidebar.markdown("⬇️ *finally...*")
-with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
-    with open(DB_NAME, "rb") as f:
-        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
-
-# --- NEW: TRADE MANAGER (Manual Fix) ---
-with st.sidebar.expander("🛠️ Maintenance", expanded=False):
-    st.caption("Fix Duplicates / Rename Issues")
-    
-    if st.button("🧹 Vacuum DB"):
-        conn = get_db_connection()
-        conn.execute("VACUUM")
-        conn.close()
-        st.success("Optimized.")
+        active_up = st.file_uploader("2. Active Trades (OS)", accept_multiple_files=True, key="act")
+        history_up = st.file_uploader("3. Closed Trades (OS)", accept_multiple_files=True, key="hist")
         
-    st.markdown("---")
-    conn = get_db_connection()
-    try:
-        all_trades = pd.read_sql("SELECT id, name, status, pnl, days_held FROM trades ORDER BY status, entry_date DESC", conn)
-        if not all_trades.empty:
-            st.write("🗑️ **Delete Specific Trades**")
-            all_trades['Label'] = all_trades['name'] + " (" + all_trades['status'] + ", $" + all_trades['pnl'].astype(str) + ")"
-            trades_to_del = st.multiselect("Select trades to delete:", all_trades['Label'].tolist())
+        if st.button("🔄 Process & Sync", type="primary"):
+            logs = []
+            if active_up: logs.extend(sync_data(active_up, "Active"))
+            if history_up: logs.extend(sync_data(history_up, "History"))
+            if logs:
+                for l in logs: st.write(l)
+                st.cache_data.clear()
+                st.success("Sync Complete!")
+
+    with st.expander("💾 Backup", expanded=False):
+        with open(DB_NAME, "rb") as f:
+            st.download_button("Download .db Backup", f, "trade_guardian_v4.db", "application/x-sqlite3")
+
+    # --- TRADE MANAGER ---
+    with st.expander("🛠️ Maintenance", expanded=False):
+        st.caption("Fix Duplicates / Rename Issues")
+        
+        if st.button("🧹 Vacuum DB"):
+            conn = get_db_connection()
+            conn.execute("VACUUM")
+            conn.close()
+            st.success("Optimized.")
             
-            if st.button("🔥 Delete Selected Trades"):
-                if trades_to_del:
-                    ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
-                    placeholders = ','.join('?' for _ in ids_to_del)
-                    
-                    conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
-                    conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
-                    conn.commit()
-                    st.success(f"Deleted {len(ids_to_del)} trades!")
-                    st.cache_data.clear()
-                    st.rerun()
-    except: pass
-    conn.close()
-    
-    st.markdown("---")
-    if st.button("🧨 Hard Reset (Delete All Data)"):
+        st.markdown("---")
         conn = get_db_connection()
-        conn.execute("DROP TABLE IF EXISTS trades")
-        conn.execute("DROP TABLE IF EXISTS snapshots")
-        conn.execute("DROP TABLE IF EXISTS strategy_config")
-        conn.commit()
+        try:
+            all_trades = pd.read_sql("SELECT id, name, status, pnl, days_held FROM trades ORDER BY status, entry_date DESC", conn)
+            if not all_trades.empty:
+                st.write("🗑️ **Delete Specific Trades**")
+                all_trades['Label'] = all_trades['name'] + " (" + all_trades['status'] + ", $" + all_trades['pnl'].astype(str) + ")"
+                trades_to_del = st.multiselect("Select trades to delete:", all_trades['Label'].tolist())
+                
+                if st.button("🔥 Delete Selected Trades"):
+                    if trades_to_del:
+                        ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
+                        placeholders = ','.join('?' for _ in ids_to_del)
+                        
+                        conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
+                        conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
+                        conn.commit()
+                        st.success(f"Deleted {len(ids_to_del)} trades!")
+                        st.cache_data.clear()
+                        st.rerun()
+        except: pass
         conn.close()
-        init_db()
-        st.cache_data.clear()
-        st.success("Wiped & Reset.")
-        st.rerun()
+        
+        st.markdown("---")
+        if st.button("🧨 Hard Reset (Delete All Data)"):
+            conn = get_db_connection()
+            conn.execute("DROP TABLE IF EXISTS trades")
+            conn.execute("DROP TABLE IF EXISTS snapshots")
+            conn.execute("DROP TABLE IF EXISTS strategy_config")
+            conn.commit()
+            conn.close()
+            init_db()
+            st.cache_data.clear()
+            st.success("Wiped & Reset.")
+            st.rerun()
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Strategy Settings")
@@ -798,6 +787,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
     action = "HOLD"
     reason = "Normal"
     
+    # ZOMBIE & JUICE
     if pnl < 0:
         juice_type = "Recovery Days"
         if theta > 0:
@@ -830,6 +820,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
             score += 35
             reason = f"Empty Tank (<${100*lot_size})"
 
+    # PROFIT SCORING
     if pnl >= target_profit:
         return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
     elif pnl >= target_profit * 0.8:
@@ -1031,7 +1022,7 @@ with tab_dash:
             c2.metric("Portfolio Yield (Theta/Cap)", f"{eff_score:.2f}%", help="How hard is your capital working? Higher is better.")
             c3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
             
-            target_days = dynamic_benchmarks.get('130/160', {}).get('dit', 36)
+            target_days = benchmarks.get('130/160', {}).get('dit', 36)
             c4.metric("Capital Velocity", f"{active_df['Days Held'].mean():.0f} days avg", help="Lower = faster capital recycling", delta=f"Target: {target_days:.0f}d")
             
             stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
@@ -1040,7 +1031,7 @@ with tab_dash:
 
             st.divider()
 
-            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
+            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks), axis=1)
             active_df['Action'] = [x[0] for x in ladder_results]
             active_df['Urgency Score'] = [x[1] for x in ladder_results]
             active_df['Reason'] = [x[2] for x in ladder_results]
@@ -1138,12 +1129,7 @@ with tab_dash:
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
                 sorted_strats = sorted(list(dynamic_benchmarks.keys()))
-                # v130: Add 'Other' tab explicitly
-                tabs_list = ["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats]
-                if "Other" not in sorted_strats:
-                    tabs_list.append("📁 Other / Unclassified")
-                
-                strat_tabs_inner = st.tabs(tabs_list)
+                strat_tabs_inner = st.tabs(["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats])
 
                 with strat_tabs_inner[0]:
                     strat_agg = active_df.groupby('Strategy').agg({
@@ -1198,7 +1184,6 @@ with tab_dash:
 
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 
-                # Render standard strategies
                 for i, strat_name in enumerate(sorted_strats):
                     with strat_tabs_inner[i+1]:
                         subset = active_df[active_df['Strategy'] == strat_name].copy()
@@ -1261,101 +1246,48 @@ with tab_dash:
                                 }
                             )
                         else: st.info("No active trades.")
-                
-                # Render "Other" tab if needed
-                if "Other" not in sorted_strats:
-                    with strat_tabs_inner[-1]: # The last tab
-                        subset = active_df[active_df['Strategy'] == "Other"].copy()
-                        if not subset.empty:
-                            st.dataframe(subset[cols], use_container_width=True)
-                        else:
-                            st.info("No unclassified trades.")
 
     else:
         st.info("👋 Database is empty. Sync your first file.")
 
-# --- NEW: STRATEGY CONFIG TAB CONTENT ---
-with tab_strategies:
-    st.markdown("### ⚙️ Strategy Configuration Manager")
-    st.caption("Define rules to auto-detect your trades, set specific targets, and define Lot Size.")
-    
-    conn = get_db_connection()
-    try:
-        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        
-        # Display as editable DF
-        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
-        
-        edited_strats = st.data_editor(
-            strat_df, 
-            num_rows="dynamic", 
-            key="strat_editor_main",
-            use_container_width=True,
-            column_config={
-                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name (e.g. Iron Fly)"),
-                "Identifier": st.column_config.TextColumn("Keyword Match", help="Text to find in OptionStrat name (e.g. FLY)"),
-                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d", help="PER LOT Target"),
-                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
-                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f", help="Minimum Theta/Delta ratio"),
-                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d", help="Used to auto-calculate Lot Size"),
-                "Description": st.column_config.TextColumn("Notes")
-            }
-        )
-        
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            if st.button("💾 Save Changes"):
-                if update_strategy_config(edited_strats):
-                    st.success("Configuration Saved!")
-                    st.cache_data.clear()
-                    st.rerun()
-        with c2:
-            if st.button("🔄 Reprocess 'Other' Trades"):
-                count = reprocess_other_trades()
-                st.success(f"Reprocessed {count} trades!")
-                st.cache_data.clear()
-                st.rerun()
-        with c3:
-            if st.button("🧨 Reset to Defaults", type="secondary"):
-                seed_default_strategies(force_reset=True)
-                st.cache_data.clear()
-                st.rerun()
-
-    except Exception as e:
-        st.error(f"Error loading strategies: {e}")
-    finally:
-        conn.close()
-    
-    st.info("💡 **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
-
-# 3. ANALYTICS (Updated v125)
+# 3. ANALYTICS
 with tab_analytics:
+    # Always create tabs first to ensure they exist even if content fails
     an1, an2, an3, an4 = st.tabs(["🔍 Diagnostics", "📈 Trends", "⚠️ Risk & Optimization", "🔄 Rolls"])
 
     # --- NEW: CLOSED TRADE PERFORMANCE (v122.0) ---
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
         
+        # Aggregate Performance by Strategy
+        # Add Capital-Days Calculation: Debit * Days Held
         expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
         
         perf_agg = expired_df.groupby('Strategy').agg({
             'P&L': 'sum',
             'Debit': 'sum',
             'Cap_Days': 'sum',
-            'ROI': 'mean', 
+            'ROI': 'mean', # Average Return per Trade
             'id': 'count'
         }).reset_index()
         
+        # Win Rate Calculation
         wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
         perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
         perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
         
+        # Time-Weighted Annualized Return Calculation
+        # Formula: (Total PnL / Total Capital-Days) * 365
         perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
+        
+        # Simple Return on Cycled Capital (Total PnL / Total Debit)
         perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
         
+        # Formatting for Display
         perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
         perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
         
+        # Add Total Row
         total_pnl = perf_display['Total P&L'].sum()
         total_vol = perf_display['Total Volume'].sum()
         total_cap_days = perf_agg['Cap_Days'].sum()
@@ -1628,6 +1560,53 @@ with tab_analytics:
                         st.warning("Insufficient data after filtering. Upload more daily snapshots.")
             else:
                 st.info("Upload daily active files to build decay history.")
+                
+            st.divider()
+            
+            # --- NEW RISK METRICS: CORRELATION & MAE (v130.1) ---
+            st.markdown("### ⚠️ Advanced Risk Analytics")
+            r1, r2 = st.columns(2)
+            
+            with r1:
+                st.subheader("🔗 Portfolio Correlation Matrix")
+                # Daily PnL Change Correlation
+                daily_strat = snaps.groupby(['snapshot_date', 'strategy'])['pnl'].sum().reset_index()
+                if not daily_strat.empty:
+                    pivot_strat = daily_strat.pivot(index='snapshot_date', columns='strategy', values='pnl').fillna(0)
+                    daily_change = pivot_strat.diff().fillna(0)
+                    if not daily_change.empty:
+                        corr_matrix = daily_change.corr()
+                        fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", title="Strategy Daily P&L Correlation")
+                        st.plotly_chart(fig_corr, use_container_width=True)
+                    else:
+                        st.info("Not enough daily data for correlation.")
+                else:
+                    st.info("No snapshot data available.")
+
+            with r2:
+                st.subheader("📉 Max Adverse Excursion (MAE)")
+                # MAE Calculation: Lowest PnL point vs Final PnL
+                mae_data = snaps.groupby('trade_id')['pnl'].min().reset_index()
+                mae_data.rename(columns={'pnl': 'MAE'}, inplace=True)
+                
+                # Merge with Final PnL from trades table
+                mae_analysis = pd.merge(mae_data, df[['id', 'Name', 'Strategy', 'P&L', 'Status']], left_on='trade_id', right_on='id')
+                mae_analysis.rename(columns={'P&L': 'Final PnL'}, inplace=True)
+                
+                if not mae_analysis.empty:
+                    fig_mae = px.scatter(mae_analysis, x='MAE', y='Final PnL', color='Strategy', hover_data=['Name'],
+                                        title="MAE Distribution (Pain vs Gain)", labels={'MAE': 'Deepest Drawdown ($)', 'Final PnL': 'Final Result ($)'})
+                    # Add breakeven line
+                    fig_mae.add_shape(type="line", line=dict(dash="dash", width=1, color="grey"), x0=mae_analysis['MAE'].min(), y0=0, x1=0, y1=0)
+                    st.plotly_chart(fig_mae, use_container_width=True)
+                    
+                    # Insight
+                    avg_mae_winners = mae_analysis[mae_analysis['Final PnL'] > 0]['MAE'].mean()
+                    st.caption(f"💡 Insight: Winning trades typically draw down to **${avg_mae_winners:.0f}** before recovering.")
+                else:
+                    st.info("Insufficient data for MAE analysis.")
+
+            st.divider()
 
         with an4: 
             st.subheader("🔄 Roll Campaign Analysis")
@@ -1713,4 +1692,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v130.0 (Persistent Group Memory & Safe Reprocess)")
+    st.caption("Allantis Trade Guardian v130.1 (Correlation & MAE Added)")
