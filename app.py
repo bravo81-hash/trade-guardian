@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v135.0 (New: Active vs Historical Efficiency Comparison)")
+st.info("✅ RUNNING VERSION: v135.1 (Fix: ROI KeyError Resolved)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1258,7 +1258,8 @@ with tab_analytics:
             
             # --- RENDER TABLE ---
             st.markdown("### 🏆 Closed Trade Performance")
-            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']].copy()
+            # --- FIX: Correct column name from 'Avg Trade ROI' to 'ROI' ---
+            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
             perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
             
             total_pnl = perf_display['Total P&L'].sum()
@@ -1546,4 +1547,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v135.0 (New: Active vs Historical Efficiency Comparison)")
+    st.caption("Allantis Trade Guardian v135.1 (Fix: ROI KeyError Resolved)")
