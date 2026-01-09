@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v134.0 (New Feature: Capital Efficiency / ROI per Dollar-Day Visuals)")
+st.info("✅ RUNNING VERSION: v135.0 (New: Active vs Historical Efficiency Comparison)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1243,8 +1243,9 @@ with tab_analytics:
             except Exception as e: st.error(f"Error calculating metrics: {e}")
             st.divider()
 
+        # --- CLOSED TRADE PERFORMANCE (Logic) ---
+        perf_agg = pd.DataFrame()
         if not expired_df.empty:
-            st.markdown("### 🏆 Closed Trade Performance")
             expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
             perf_agg = expired_df.groupby('Strategy').agg({
                 'P&L': 'sum', 'Debit': 'sum', 'Cap_Days': 'sum', 'ROI': 'mean', 'id': 'count'
@@ -1255,7 +1256,9 @@ with tab_analytics:
             perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
             perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
             
-            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
+            # --- RENDER TABLE ---
+            st.markdown("### 🏆 Closed Trade Performance")
+            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']].copy()
             perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
             
             total_pnl = perf_display['Total P&L'].sum()
@@ -1277,17 +1280,45 @@ with tab_analytics:
 
             st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
             
-            # --- NEW: CAPITAL EFFICIENCY CHART (v134.0) ---
-            st.subheader("🚀 Capital Efficiency (Return per $ Invested per Year)")
-            st.caption("Which strategy works your money the hardest? (Annualized Time-Weighted Return)")
+        # --- NEW: ACTIVE VS HISTORICAL COMPARISON ---
+        st.subheader("🚀 Efficiency Showdown: Active vs Historical")
+        st.caption("Are current campaigns outperforming your historical average? (Metric: Annualized Return on Invested Capital)")
+
+        # 1. Calculate Active Efficiency
+        active_eff_df = pd.DataFrame()
+        if not active_df.empty:
+            active_df['Cap_Days'] = active_df['Debit'] * active_df['Days Held'].clip(lower=1)
+            active_agg = active_df.groupby('Strategy')[['P&L', 'Cap_Days']].sum().reset_index()
+            # Calculate TWR-equivalent for Active
+            active_agg['Return %'] = (active_agg['P&L'] / active_agg['Cap_Days']) * 365 * 100
+            active_agg['Type'] = 'Active (Current)'
+            active_eff_df = active_agg[['Strategy', 'Return %', 'Type']]
+
+        # 2. Calculate Historical Efficiency (using perf_agg from above)
+        hist_eff_df = pd.DataFrame()
+        if not perf_agg.empty:
+            hist_eff = perf_agg[['Strategy', 'Ann. TWR %']].copy()
+            hist_eff.rename(columns={'Ann. TWR %': 'Return %'}, inplace=True)
+            hist_eff['Type'] = 'Historical (Closed)'
+            hist_eff_df = hist_eff
+
+        # 3. Combine and Plot
+        if not active_eff_df.empty or not hist_eff_df.empty:
+            combined_eff = pd.concat([active_eff_df, hist_eff_df], ignore_index=True)
+            combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
             
-            plot_perf = perf_agg[perf_agg['Strategy'] != 'TOTAL'].sort_values('Ann. TWR %', ascending=False)
-            if not plot_perf.empty:
-                fig_eff = px.bar(plot_perf, x='Strategy', y='Ann. TWR %', color='Strategy',
-                                text='Ann. TWR %', labels={'Ann. TWR %': 'Annualized Return (%)'})
-                fig_eff.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-                st.plotly_chart(fig_eff, use_container_width=True)
-            
+            fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group',
+                                    title="Capital Efficiency Comparison (Annualized Return)",
+                                    color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'},
+                                    text='Return %')
+            fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+            fig_compare.update_yaxes(title="Annualized Return (%)")
+            st.plotly_chart(fig_compare, use_container_width=True)
+        else:
+            st.info("Insufficient data for comparison.")
+
+        # --- PROFIT ANATOMY ---
+        if not expired_df.empty:
             st.subheader("💰 Profit Anatomy: Call vs Put Contribution")
             viz_df = expired_df.sort_values('Exit Date')
             fig_anatomy = go.Figure()
@@ -1515,4 +1546,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v134.0 (Layout Optimized: DNA Tab & Smart Collapse)")
+    st.caption("Allantis Trade Guardian v135.0 (New: Active vs Historical Efficiency Comparison)")
