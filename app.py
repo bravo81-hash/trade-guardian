@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v136.0 (AI Intelligence: Probability Engine, Rot Detector & Dynamic Exits)")
+st.info("✅ RUNNING VERSION: v136.1 (AI Visuals: Scatter Plots, Efficiency Bars & Strategy Filter)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -733,6 +733,8 @@ def check_rot_and_efficiency(active_df, history_df):
                 'Strategy': strat,
                 'Current Speed': f"${curr_eff:.1f}/day",
                 'Baseline Speed': f"${base:.1f}/day",
+                'Raw Current': curr_eff, 
+                'Raw Baseline': base,    
                 'Status': '⚠️ ROTTING' if row['P&L'] > 0 else '💀 DEAD MONEY'
             })
             
@@ -1309,6 +1311,7 @@ with tab_analytics:
             
             # --- RENDER TABLE ---
             st.markdown("### 🏆 Closed Trade Performance")
+            # --- FIX: Correct column name from 'Avg Trade ROI' to 'ROI' ---
             perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
             perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
             
@@ -1562,15 +1565,44 @@ with tab_ai:
         
         # 1. Predictive Engine
         st.subheader("🔮 Win Probability Forecast (KNN Model)")
-        if not active_trades.empty:
-            preds = generate_trade_predictions(active_trades, expired_df)
+        
+        # Filter Logic
+        strategies_avail = sorted(active_trades['Strategy'].unique().tolist())
+        selected_strat_ai = st.selectbox("Filter by Strategy", ["All"] + strategies_avail, key="ai_strat_filter")
+        
+        if selected_strat_ai != "All":
+            ai_view_df = active_trades[active_trades['Strategy'] == selected_strat_ai].copy()
+        else:
+            ai_view_df = active_trades.copy()
+
+        if not ai_view_df.empty:
+            preds = generate_trade_predictions(ai_view_df, expired_df)
             if not preds.empty:
-                st.dataframe(
-                    preds.style.format({
-                        'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%"
-                    }).map(lambda v: 'color: green; font-weight: bold' if v > 60 else ('color: red; font-weight: bold' if v < 40 else 'color: orange'), subset=['Win Prob %']),
-                    use_container_width=True
-                )
+                # Visual 1: Scatter of Probability vs Reward
+                c_p1, c_p2 = st.columns([2, 1])
+                with c_p1:
+                    fig_pred = px.scatter(
+                        preds, 
+                        x="Win Prob %", 
+                        y="Expected PnL", 
+                        color="Confidence",
+                        size="Confidence",
+                        hover_data=["Trade Name", "Strategy"],
+                        color_continuous_scale="RdYlGn",
+                        title="Risk/Reward Map: Probability vs. Expected Payoff"
+                    )
+                    # Add quadrants
+                    fig_pred.add_vline(x=50, line_dash="dash", line_color="gray")
+                    fig_pred.add_hline(y=0, line_dash="dash", line_color="gray")
+                    st.plotly_chart(fig_pred, use_container_width=True)
+                
+                with c_p2:
+                    st.dataframe(
+                        preds.style.format({
+                            'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%"
+                        }).map(lambda v: 'color: green; font-weight: bold' if v > 60 else ('color: red; font-weight: bold' if v < 40 else 'color: orange'), subset=['Win Prob %']),
+                        use_container_width=True
+                    )
             else: st.info("Not enough closed trades with matching Greek profiles for prediction.")
         else: st.info("No active trades to forecast.")
         
@@ -1583,14 +1615,28 @@ with tab_ai:
             if not active_trades.empty:
                 rot_df = check_rot_and_efficiency(active_trades, expired_df)
                 if not rot_df.empty:
-                    st.warning(f"⚠️ Detected {len(rot_df)} stagnating trades.")
-                    st.dataframe(rot_df, use_container_width=True)
+                    # Visual 2: Efficiency Comparison
+                    rot_viz = rot_df.copy()
+                    fig_rot = go.Figure()
+                    fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Current'], name='Current Speed', marker_color='#EF553B'))
+                    fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Baseline'], name='Baseline Speed', marker_color='gray'))
+                    fig_rot.update_layout(title="Capital Velocity Lag ($/Day/1k)", barmode='group')
+                    
+                    st.plotly_chart(fig_rot, use_container_width=True)
+                    st.dataframe(rot_df[['Trade', 'Strategy', 'Current Speed', 'Baseline Speed', 'Status']], use_container_width=True)
                 else: st.success("✅ Capital is moving efficiently. No rot detected.")
         
         with c_ai_2:
-            st.subheader("🎯 Optimal Exit Zones (Historical)")
+            st.subheader("🎯 Optimal Exit Zones")
             targets = get_dynamic_targets(expired_df)
             if targets:
+                # Visual 3: Distribution of Wins
+                winners = expired_df[expired_df['P&L'] > 0]
+                if not winners.empty:
+                    fig_exit = px.box(winners, x="Strategy", y="P&L", points="all", title="Historical Win Distribution & Targets")
+                    st.plotly_chart(fig_exit, use_container_width=True)
+                
+                # Table below
                 target_data = []
                 for s, v in targets.items():
                     target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit (75%)': v['Optimal Exit (75%)']})
@@ -1645,4 +1691,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v136.0 (AI Intelligence: Probability Engine, Rot Detector & Dynamic Exits)")
+    st.caption("Allantis Trade Guardian v136.1 (AI Visuals: Scatter Plots, Efficiency Bars & Strategy Filter)")
