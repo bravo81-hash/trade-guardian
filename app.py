@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v133.0 (Layout Optimized: DNA Tab & Smart Collapse)")
+st.info("✅ RUNNING VERSION: v134.0 (New Feature: Capital Efficiency / ROI per Dollar-Day Visuals)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1277,6 +1277,17 @@ with tab_analytics:
 
             st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
             
+            # --- NEW: CAPITAL EFFICIENCY CHART (v134.0) ---
+            st.subheader("🚀 Capital Efficiency (Return per $ Invested per Year)")
+            st.caption("Which strategy works your money the hardest? (Annualized Time-Weighted Return)")
+            
+            plot_perf = perf_agg[perf_agg['Strategy'] != 'TOTAL'].sort_values('Ann. TWR %', ascending=False)
+            if not plot_perf.empty:
+                fig_eff = px.bar(plot_perf, x='Strategy', y='Ann. TWR %', color='Strategy',
+                                text='Ann. TWR %', labels={'Ann. TWR %': 'Annualized Return (%)'})
+                fig_eff.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                st.plotly_chart(fig_eff, use_container_width=True)
+            
             st.subheader("💰 Profit Anatomy: Call vs Put Contribution")
             viz_df = expired_df.sort_values('Exit Date')
             fig_anatomy = go.Figure()
@@ -1504,4 +1515,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v133.0 (Layout Optimized: DNA Tab & Smart Collapse)")
+    st.caption("Allantis Trade Guardian v134.0 (Layout Optimized: DNA Tab & Smart Collapse)")
