@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v137.0 (Layout Fix 40:60, Manual AI Parameters & Explanations)")
+st.info("✅ RUNNING VERSION: v137.1 (Fix: Strategies Tab Blank Screen Resolved)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1113,7 +1113,7 @@ with tab_dash:
             st.divider()
 
             # --- NEW LAYOUT: DNA Tool in its own tab ---
-            sub_journal, sub_strat = st.tabs(["📝 Journal", "🏛️ Strategy Detail"])
+            sub_journal, sub_strat, sub_dna = st.tabs(["📝 Journal", "🏛️ Strategy Detail", "🧬 DNA Tool"])
             
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
@@ -1143,6 +1143,20 @@ with tab_dash:
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
             
+            with sub_dna:
+                st.subheader("🧬 Trade DNA Fingerprinting")
+                st.caption("Find historical trades that match the Greek profile of your current active trade.")
+                if not expired_df.empty:
+                    selected_dna_trade = st.selectbox("Select Active Trade to Analyze", active_df['Name'].unique())
+                    curr_row = active_df[active_df['Name'] == selected_dna_trade].iloc[0]
+                    similar = find_similar_trades(curr_row, expired_df)
+                    if not similar.empty:
+                        best_match = similar.iloc[0]
+                        st.info(f"🎯 **Best Match:** {best_match['Name']} ({best_match['Similarity %']:.0f}% similar) → Made ${best_match['P&L']:,.0f} in {best_match['Days Held']:.0f} days")
+                        st.dataframe(similar.style.format({'P&L': '${:,.0f}', 'ROI': '{:.1f}%', 'Similarity %': '{:.0f}%'}))
+                    else: st.info("No similar historical trades found.")
+                else: st.info("Need closed trade history for DNA analysis.")
+
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
                 sorted_strats = sorted(list(dynamic_benchmarks.keys()))
@@ -1233,7 +1247,58 @@ with tab_dash:
                         else: st.info("No unclassified trades.")
     else: st.info("👋 Database is empty. Sync your first file.")
 
-# 3. ANALYTICS (Updated v125)
+with tab_strategies:
+    st.markdown("### ⚙️ Strategy Configuration Manager")
+    conn = get_db_connection()
+    try:
+        # Robust fetch to handle potential extra/missing columns gracefully
+        # First ensure we get the data
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Expected columns map
+        expected_cols = {
+            'name': 'Name',
+            'identifier': 'Identifier',
+            'target_pnl': 'Target PnL',
+            'target_days': 'Target Days',
+            'min_stability': 'Min Stability',
+            'description': 'Description',
+            'typical_debit': 'Typical Debit'
+        }
+        
+        # Ensure all expected columns exist in DF
+        for db_col in expected_cols.keys():
+            if db_col not in strat_df.columns:
+                strat_df[db_col] = 0.0 if 'pnl' in db_col or 'debit' in db_col else (0 if 'days' in db_col else "")
+        
+        # Select and rename
+        strat_df = strat_df[list(expected_cols.keys())].rename(columns=expected_cols)
+        
+        # Render Editor
+        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name"),
+                "Identifier": st.column_config.TextColumn("Keyword Match"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d"),
+                "Description": st.column_config.TextColumn("Notes")
+            })
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button("💾 Save Changes"):
+                if update_strategy_config(edited_strats): st.success("Configuration Saved!"); st.cache_data.clear(); st.rerun()
+        with c2:
+            if st.button("🔄 Reprocess 'Other' Trades"):
+                count = reprocess_other_trades(); st.success(f"Reprocessed {count} trades!"); st.cache_data.clear(); st.rerun()
+        with c3:
+            if st.button("🧨 Reset to Defaults", type="secondary"): seed_default_strategies(force_reset=True); st.cache_data.clear(); st.rerun()
+    except Exception as e: st.error(f"Error loading strategies: {e}")
+    finally: conn.close()
+    
+    st.info("💡 **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
+
 with tab_analytics:
     an_overview, an_trends, an_risk, an_decay, an_rolls = st.tabs(["📊 Overview", "📈 Trends & Seasonality", "⚠️ Risk & Excursion", "🧬 Decay & DNA", "🔄 Rolls"])
 
@@ -1275,6 +1340,7 @@ with tab_analytics:
                     avg_loss = abs(losses.mean()) if not losses.empty else 0
                     expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
                     
+                    # --- NEW: PROFIT FACTOR ---
                     gross_profit = wins.sum() if not wins.empty else 0
                     gross_loss = abs(losses.sum()) if not losses.empty else 1 
                     profit_factor = gross_profit / gross_loss
@@ -1293,9 +1359,8 @@ with tab_analytics:
             except Exception as e: st.error(f"Error calculating metrics: {e}")
             st.divider()
 
-        # --- CLOSED TRADE PERFORMANCE (Logic) ---
-        perf_agg = pd.DataFrame()
         if not expired_df.empty:
+            st.markdown("### 🏆 Closed Trade Performance")
             expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
             perf_agg = expired_df.groupby('Strategy').agg({
                 'P&L': 'sum', 'Debit': 'sum', 'Cap_Days': 'sum', 'ROI': 'mean', 'id': 'count'
@@ -1306,9 +1371,6 @@ with tab_analytics:
             perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
             perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
             
-            # --- RENDER TABLE ---
-            st.markdown("### 🏆 Closed Trade Performance")
-            # --- FIX: Correct column name from 'Avg Trade ROI' to 'ROI' ---
             perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
             perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
             
@@ -1331,45 +1393,43 @@ with tab_analytics:
 
             st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
             
-        # --- NEW: ACTIVE VS HISTORICAL COMPARISON ---
-        st.subheader("🚀 Efficiency Showdown: Active vs Historical")
-        st.caption("Are current campaigns outperforming your historical average? (Metric: Annualized Return on Invested Capital)")
+            # --- NEW: CAPITAL EFFICIENCY CHART (v134.0) ---
+            st.subheader("🚀 Efficiency Showdown: Active vs Historical")
+            st.caption("Are current campaigns outperforming your historical average? (Metric: Annualized Return on Invested Capital)")
 
-        # 1. Calculate Active Efficiency
-        active_eff_df = pd.DataFrame()
-        if not active_df.empty:
-            active_df['Cap_Days'] = active_df['Debit'] * active_df['Days Held'].clip(lower=1)
-            active_agg = active_df.groupby('Strategy')[['P&L', 'Cap_Days']].sum().reset_index()
-            # Calculate TWR-equivalent for Active
-            active_agg['Return %'] = (active_agg['P&L'] / active_agg['Cap_Days']) * 365 * 100
-            active_agg['Type'] = 'Active (Current)'
-            active_eff_df = active_agg[['Strategy', 'Return %', 'Type']]
+            # 1. Calculate Active Efficiency
+            active_eff_df = pd.DataFrame()
+            if not active_df.empty:
+                active_df['Cap_Days'] = active_df['Debit'] * active_df['Days Held'].clip(lower=1)
+                active_agg = active_df.groupby('Strategy')[['P&L', 'Cap_Days']].sum().reset_index()
+                # Calculate TWR-equivalent for Active
+                active_agg['Return %'] = (active_agg['P&L'] / active_agg['Cap_Days']) * 365 * 100
+                active_agg['Type'] = 'Active (Current)'
+                active_eff_df = active_agg[['Strategy', 'Return %', 'Type']]
 
-        # 2. Calculate Historical Efficiency (using perf_agg from above)
-        hist_eff_df = pd.DataFrame()
-        if not perf_agg.empty:
-            hist_eff = perf_agg[['Strategy', 'Ann. TWR %']].copy()
-            hist_eff.rename(columns={'Ann. TWR %': 'Return %'}, inplace=True)
-            hist_eff['Type'] = 'Historical (Closed)'
-            hist_eff_df = hist_eff
+            # 2. Calculate Historical Efficiency (using perf_agg from above)
+            hist_eff_df = pd.DataFrame()
+            if not perf_agg.empty:
+                hist_eff = perf_agg[['Strategy', 'Ann. TWR %']].copy()
+                hist_eff.rename(columns={'Ann. TWR %': 'Return %'}, inplace=True)
+                hist_eff['Type'] = 'Historical (Closed)'
+                hist_eff_df = hist_eff
 
-        # 3. Combine and Plot
-        if not active_eff_df.empty or not hist_eff_df.empty:
-            combined_eff = pd.concat([active_eff_df, hist_eff_df], ignore_index=True)
-            combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
-            
-            fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group',
-                                    title="Capital Efficiency Comparison (Annualized Return)",
-                                    color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'},
-                                    text='Return %')
-            fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-            fig_compare.update_yaxes(title="Annualized Return (%)")
-            st.plotly_chart(fig_compare, use_container_width=True)
-        else:
-            st.info("Insufficient data for comparison.")
+            # 3. Combine and Plot
+            if not active_eff_df.empty or not hist_eff_df.empty:
+                combined_eff = pd.concat([active_eff_df, hist_eff_df], ignore_index=True)
+                combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
+                
+                fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group',
+                                        title="Capital Efficiency Comparison (Annualized Return)",
+                                        color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'},
+                                        text='Return %')
+                fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_compare.update_yaxes(title="Annualized Return (%)")
+                st.plotly_chart(fig_compare, use_container_width=True)
+            else:
+                st.info("Insufficient data for comparison.")
 
-        # --- PROFIT ANATOMY ---
-        if not expired_df.empty:
             st.subheader("💰 Profit Anatomy: Call vs Put Contribution")
             viz_df = expired_df.sort_values('Exit Date')
             fig_anatomy = go.Figure()
@@ -1450,6 +1510,7 @@ with tab_analytics:
             mae_view = st.radio("View:", ["Closed Trades Only (Final Result)", "Include Active Trades (Current Drawdown)"], horizontal=True)
             
             if not snaps.empty and not df.empty:
+                # 1. Calculate MAE & MFE
                 excursion_df = snaps.groupby('trade_id')['pnl'].agg(['min', 'max']).reset_index()
                 excursion_df.rename(columns={'min': 'MAE', 'max': 'MFE'}, inplace=True)
                 
@@ -1466,9 +1527,12 @@ with tab_analytics:
                         st.plotly_chart(fig_mae_scat, use_container_width=True)
                     
                     with mae_c2:
+                        # --- NEW: MFE SCATTER ---
+                        # Filter MFE to only show positive MFE (otherwise it's just a losing trade that never went green)
                         viz_mfe = viz_mae[viz_mae['MFE'] > 0]
                         fig_mfe = px.scatter(viz_mfe, x='MFE', y='P&L', color='Strategy',
                             hover_data=['Name'], title="Potential (MFE) vs Final P&L", labels={'MFE': 'Max Profit Reached ($)', 'P&L': 'Realized Profit ($)'})
+                        # Add perfect execution line (y=x)
                         if not viz_mfe.empty:
                              max_val = max(viz_mfe['MFE'].max(), viz_mfe['P&L'].max())
                              fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
@@ -1487,9 +1551,12 @@ with tab_analytics:
                 fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})", labels={'days_held': 'Days Held', 'pnl': 'P&L ($)'}, markers=True)
                 st.plotly_chart(fig_pnl, use_container_width=True)
                 
+                # --- NEW: GAMMA RISK PROFILE ---
                 st.markdown("##### ☢️ Gamma Risk Profile")
                 
                 if 'gamma' in strat_snaps.columns and strat_snaps['gamma'].abs().sum() > 0:
+                    # Calculate Gamma/Theta Ratio
+                    # We want absolute ratio: Risk per unit of income
                     strat_snaps['Gamma/Theta'] = np.where(strat_snaps['theta'] != 0, 
                                                           (strat_snaps['gamma'] * 100) / strat_snaps['theta'], 
                                                           0)
@@ -1502,6 +1569,7 @@ with tab_analytics:
                 else:
                     st.warning("⚠️ Gamma history unavailable. This chart will populate as you sync new daily data.")
 
+                # Standard Decay Analysis
                 def get_theta_anchor(group):
                     earliest = group.sort_values('days_held').iloc[0]
                     return earliest['theta'] if earliest['theta'] > 0 else group['theta'].max()
@@ -1550,113 +1618,6 @@ with tab_analytics:
                 else: st.warning(f"⚠️ Rolling HURTS: Consider taking losses earlier.")
         else: st.info("No rolled trades linked via Parent ID yet. Use the 'Journal' tab to link trades.")
 
-# --- NEW TAB: AI & INTELLIGENCE ---
-with tab_ai:
-    st.markdown("### 🧠 The Quant Brain (Beta)")
-    st.caption("Self-learning insights based on your specific trading history.")
-    
-    if df.empty or expired_df.empty:
-        st.info("👋 Need more historical data to power the AI engine.")
-    else:
-        active_trades = df[df['Status'].isin(['Active', 'Missing'])].copy()
-        
-        # --- NEW: CALIBRATION CONTROLS (v137.0) ---
-        with st.expander("⚙️ Calibration & Thresholds", expanded=False):
-            c_set1, c_set2, c_set3 = st.columns(3)
-            with c_set1:
-                st.markdown("**📉 Rot Detector**")
-                rot_threshold = st.slider("Efficiency Drop Threshold %", 10, 90, 50, help="Alert if current efficiency is X% of historical average.") / 100.0
-                min_days_rot = st.number_input("Min Days to Check", 5, 60, 10)
-            with c_set2:
-                st.markdown("**🔮 Prediction Logic**")
-                prob_high = st.slider("High Confidence Threshold", 60, 95, 75, help="Trades above this % get 'PRESS WINNER' label.")
-                prob_low = st.slider("Low Confidence Threshold", 10, 50, 40)
-            with c_set3:
-                st.markdown("**🎯 Exit Targets**")
-                exit_percentile = st.slider("Optimal Exit Percentile", 50, 95, 75, help="Percentile of historical max wins to target.") / 100.0
-
-        # 1. Predictive Engine
-        st.subheader("🔮 Win Probability Forecast (KNN Model)")
-        
-        # Filter Logic
-        strategies_avail = sorted(active_trades['Strategy'].unique().tolist())
-        selected_strat_ai = st.selectbox("Filter by Strategy", ["All"] + strategies_avail, key="ai_strat_filter")
-        
-        if selected_strat_ai != "All":
-            ai_view_df = active_trades[active_trades['Strategy'] == selected_strat_ai].copy()
-        else:
-            ai_view_df = active_trades.copy()
-
-        if not ai_view_df.empty:
-            preds = generate_trade_predictions(ai_view_df, expired_df, prob_low, prob_high)
-            if not preds.empty:
-                # Visual 1: Scatter of Probability vs Reward (Layout Fix: 40:60 Ratio)
-                c_p1, c_p2 = st.columns([2, 3]) 
-                with c_p1:
-                    fig_pred = px.scatter(
-                        preds, 
-                        x="Win Prob %", 
-                        y="Expected PnL", 
-                        color="Confidence",
-                        size="Confidence",
-                        hover_data=["Trade Name", "Strategy"],
-                        color_continuous_scale="RdYlGn",
-                        title="Risk/Reward Map"
-                    )
-                    # Add quadrants
-                    fig_pred.add_vline(x=50, line_dash="dash", line_color="gray")
-                    fig_pred.add_hline(y=0, line_dash="dash", line_color="gray")
-                    st.plotly_chart(fig_pred, use_container_width=True)
-                
-                with c_p2:
-                    st.dataframe(
-                        preds.style.format({
-                            'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%"
-                        }).map(lambda v: 'color: green; font-weight: bold' if v > prob_high else ('color: red; font-weight: bold' if v < prob_low else 'color: orange'), subset=['Win Prob %']),
-                        use_container_width=True
-                    )
-                    st.info(f"💡 **'PRESS WINNER'**: Based on Greeks, these active trades match historical winners with >{prob_high}% win rate. Consider holding.")
-            else: st.info("Not enough closed trades with matching Greek profiles for prediction.")
-        else: st.info("No active trades to forecast.")
-        
-        st.divider()
-        
-        c_ai_1, c_ai_2 = st.columns(2)
-        
-        with c_ai_1:
-            st.subheader("📉 Capital Rot Detector")
-            if not active_trades.empty:
-                rot_df = check_rot_and_efficiency(active_trades, expired_df, rot_threshold, min_days_rot)
-                if not rot_df.empty:
-                    # Visual 2: Efficiency Comparison
-                    rot_viz = rot_df.copy()
-                    fig_rot = go.Figure()
-                    fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Current'], name='Current Speed', marker_color='#EF553B'))
-                    fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Baseline'], name='Baseline Speed', marker_color='gray'))
-                    fig_rot.update_layout(title="Capital Velocity Lag ($/Day/1k)", barmode='group')
-                    
-                    st.plotly_chart(fig_rot, use_container_width=True)
-                    st.dataframe(rot_df[['Trade', 'Strategy', 'Current Speed', 'Baseline Speed', 'Status']], use_container_width=True)
-                else: st.success("✅ Capital is moving efficiently. No rot detected.")
-        
-        with c_ai_2:
-            st.subheader(f"🎯 Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
-            targets = get_dynamic_targets(expired_df, exit_percentile)
-            if targets:
-                # Visual 3: Distribution of Wins
-                winners = expired_df[expired_df['P&L'] > 0]
-                if not winners.empty:
-                    fig_exit = px.box(winners, x="Strategy", y="P&L", points="all", title="Historical Win Distribution & Targets")
-                    st.plotly_chart(fig_exit, use_container_width=True)
-                
-                # Table below
-                target_data = []
-                for s, v in targets.items():
-                    target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit': v['Optimal Exit']})
-                t_df = pd.DataFrame(target_data)
-                st.dataframe(t_df.style.format({'Median Win': '${:,.0f}', 'Optimal Exit': '${:,.0f}'}), use_container_width=True)
-            else: st.info("Need more winning trades to calculate optimal zones.")
-
 with tab_rules:
     st.markdown("""
     # 📖 The Trader's Constitution
@@ -1704,4 +1665,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v137.0 (Layout Fix 40:60, Manual AI Parameters & Explanations)")
+    st.caption("Allantis Trade Guardian v137.1 (Fix: Strategies Tab Blank Screen Resolved)")
