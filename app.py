@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v132.1 (Fix: DataFrame Formatting & Gamma History Enabled)")
+st.info("✅ RUNNING VERSION: v133.0 (Layout Optimized: DNA Tab & Smart Collapse)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -30,7 +30,6 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. CREATE TABLES
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -79,7 +78,6 @@ def init_db():
                     typical_debit REAL
                 )''')
     
-    # 2. MIGRATIONS
     def add_column_safe(table, col_name, col_type):
         try:
             c.execute(f"SELECT {col_name} FROM {table} LIMIT 1")
@@ -91,14 +89,13 @@ def init_db():
     add_column_safe('snapshots', 'theta', 'REAL')
     add_column_safe('snapshots', 'delta', 'REAL')
     add_column_safe('snapshots', 'vega', 'REAL')
-    add_column_safe('snapshots', 'gamma', 'REAL') # Added v132.1
+    add_column_safe('snapshots', 'gamma', 'REAL')
     add_column_safe('strategy_config', 'typical_debit', 'REAL')
     add_column_safe('trades', 'original_group', 'TEXT')
     
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
     conn.commit()
     conn.close()
-    
     seed_default_strategies()
 
 def seed_default_strategies(force_reset=False):
@@ -626,9 +623,6 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
-        # UPDATED: Including gamma in fetch
-        # Need to check if column exists first or handle error gracefully if older DB
-        # But 'add_column_safe' should have handled it.
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, s.gamma,
                t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
@@ -1009,7 +1003,10 @@ with tab_dash:
             active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
 
             todo_df = active_df[active_df['Urgency Score'] >= 70]
-            with st.expander(f"🔥 Priority Action Queue ({len(todo_df)})", expanded=True):
+            
+            # --- SMART COLLAPSE: Only expand if action needed ---
+            is_expanded = len(todo_df) > 0
+            with st.expander(f"🔥 Priority Action Queue ({len(todo_df)})", expanded=is_expanded):
                 if not todo_df.empty:
                     for _, row in todo_df.iterrows():
                         u_score = row['Urgency Score']
@@ -1024,7 +1021,9 @@ with tab_dash:
                 else: st.success("✅ No critical actions required. Portfolio is healthy.")
             st.divider()
 
-            sub_journal, sub_strat = st.tabs(["📝 Journal & Overview", "🏛️ Strategy Detail"])
+            # --- NEW LAYOUT: DNA Tool in its own tab ---
+            sub_journal, sub_strat, sub_dna = st.tabs(["📝 Journal", "🏛️ Strategy Detail", "🧬 DNA Tool"])
+            
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
                 strategy_options = sorted(list(dynamic_benchmarks.keys())) + ["Other"]
@@ -1052,18 +1051,20 @@ with tab_dash:
                     if changes: 
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
-                
-                with st.expander("🧬 Trade DNA Fingerprinting (Find Similar)", expanded=False):
-                    if not expired_df.empty:
-                        selected_dna_trade = st.selectbox("Select Active Trade to Analyze", active_df['Name'].unique())
-                        curr_row = active_df[active_df['Name'] == selected_dna_trade].iloc[0]
-                        similar = find_similar_trades(curr_row, expired_df)
-                        if not similar.empty:
-                            best_match = similar.iloc[0]
-                            st.info(f"🎯 **Best Match:** {best_match['Name']} ({best_match['Similarity %']:.0f}% similar) → Made ${best_match['P&L']:,.0f} in {best_match['Days Held']:.0f} days")
-                            st.dataframe(similar.style.format({'P&L': '${:,.0f}', 'ROI': '{:.1f}%', 'Similarity %': '{:.0f}%'}))
-                        else: st.info("No similar historical trades found.")
-                    else: st.info("Need closed trade history for DNA analysis.")
+            
+            with sub_dna:
+                st.subheader("🧬 Trade DNA Fingerprinting")
+                st.caption("Find historical trades that match the Greek profile of your current active trade.")
+                if not expired_df.empty:
+                    selected_dna_trade = st.selectbox("Select Active Trade to Analyze", active_df['Name'].unique())
+                    curr_row = active_df[active_df['Name'] == selected_dna_trade].iloc[0]
+                    similar = find_similar_trades(curr_row, expired_df)
+                    if not similar.empty:
+                        best_match = similar.iloc[0]
+                        st.info(f"🎯 **Best Match:** {best_match['Name']} ({best_match['Similarity %']:.0f}% similar) → Made ${best_match['P&L']:,.0f} in {best_match['Days Held']:.0f} days")
+                        st.dataframe(similar.style.format({'P&L': '${:,.0f}', 'ROI': '{:.1f}%', 'Similarity %': '{:.0f}%'}))
+                    else: st.info("No similar historical trades found.")
+                else: st.info("Need closed trade history for DNA analysis.")
 
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
@@ -1094,7 +1095,6 @@ with tab_dash:
                     def highlight_trend(val): return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
                     def style_total(row): return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
 
-                    # FIXED: Use lambda with safe_fmt to handle '-' or string values in numeric columns without crashing
                     st.dataframe(
                         display_agg.style
                         .format({
@@ -1225,7 +1225,6 @@ with tab_analytics:
                     avg_loss = abs(losses.mean()) if not losses.empty else 0
                     expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
                     
-                    # --- NEW: PROFIT FACTOR ---
                     gross_profit = wins.sum() if not wins.empty else 0
                     gross_loss = abs(losses.sum()) if not losses.empty else 1 
                     profit_factor = gross_profit / gross_loss
@@ -1358,7 +1357,6 @@ with tab_analytics:
             mae_view = st.radio("View:", ["Closed Trades Only (Final Result)", "Include Active Trades (Current Drawdown)"], horizontal=True)
             
             if not snaps.empty and not df.empty:
-                # 1. Calculate MAE & MFE
                 excursion_df = snaps.groupby('trade_id')['pnl'].agg(['min', 'max']).reset_index()
                 excursion_df.rename(columns={'min': 'MAE', 'max': 'MFE'}, inplace=True)
                 
@@ -1375,12 +1373,9 @@ with tab_analytics:
                         st.plotly_chart(fig_mae_scat, use_container_width=True)
                     
                     with mae_c2:
-                        # --- NEW: MFE SCATTER ---
-                        # Filter MFE to only show positive MFE (otherwise it's just a losing trade that never went green)
                         viz_mfe = viz_mae[viz_mae['MFE'] > 0]
                         fig_mfe = px.scatter(viz_mfe, x='MFE', y='P&L', color='Strategy',
                             hover_data=['Name'], title="Potential (MFE) vs Final P&L", labels={'MFE': 'Max Profit Reached ($)', 'P&L': 'Realized Profit ($)'})
-                        # Add perfect execution line (y=x)
                         if not viz_mfe.empty:
                              max_val = max(viz_mfe['MFE'].max(), viz_mfe['P&L'].max())
                              fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
@@ -1399,12 +1394,9 @@ with tab_analytics:
                 fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})", labels={'days_held': 'Days Held', 'pnl': 'P&L ($)'}, markers=True)
                 st.plotly_chart(fig_pnl, use_container_width=True)
                 
-                # --- NEW: GAMMA RISK PROFILE ---
                 st.markdown("##### ☢️ Gamma Risk Profile")
                 
                 if 'gamma' in strat_snaps.columns and strat_snaps['gamma'].abs().sum() > 0:
-                    # Calculate Gamma/Theta Ratio
-                    # We want absolute ratio: Risk per unit of income
                     strat_snaps['Gamma/Theta'] = np.where(strat_snaps['theta'] != 0, 
                                                           (strat_snaps['gamma'] * 100) / strat_snaps['theta'], 
                                                           0)
@@ -1417,7 +1409,6 @@ with tab_analytics:
                 else:
                     st.warning("⚠️ Gamma history unavailable. This chart will populate as you sync new daily data.")
 
-                # Standard Decay Analysis
                 def get_theta_anchor(group):
                     earliest = group.sort_values('days_held').iloc[0]
                     return earliest['theta'] if earliest['theta'] > 0 else group['theta'].max()
@@ -1513,4 +1504,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v132.1 (Fix: DataFrame Formatting & Gamma History Enabled)")
+    st.caption("Allantis Trade Guardian v133.0 (Layout Optimized: DNA Tab & Smart Collapse)")
