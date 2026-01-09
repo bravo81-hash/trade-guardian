@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v135.1 (Fix: ROI KeyError Resolved)")
+st.info("✅ RUNNING VERSION: v136.0 (AI Intelligence: Probability Engine, Rot Detector & Dynamic Exits)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -632,7 +632,6 @@ def load_snapshots():
         try:
             df = pd.read_sql(q, conn)
         except:
-            # Fallback if gamma col missing in table despite migration attempt
             q_fallback = """
             SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
                    t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
@@ -654,22 +653,114 @@ def load_snapshots():
     except: return pd.DataFrame()
     finally: conn.close()
 
-# --- HELPER: FIND SIMILAR TRADES ---
-def find_similar_trades(current_trade, historical_df, top_n=3):
-    if historical_df.empty:
-        return pd.DataFrame()
+# --- INTELLIGENCE FUNCTIONS ---
+def generate_trade_predictions(active_df, history_df):
+    """
+    Predictive Model: Finds K-Nearest Neighbors for active trades
+    based on Delta, Theta, and Debit to forecast outcome.
+    """
+    if active_df.empty or history_df.empty: return pd.DataFrame()
+    
     features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
-    for f in features:
-        if f not in current_trade or f not in historical_df.columns:
-            return pd.DataFrame()
-    curr_vec = np.nan_to_num(current_trade[features].values.astype(float)).reshape(1, -1)
-    hist_vecs = np.nan_to_num(historical_df[features].values.astype(float))
-    distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
-    similar_idx = np.argsort(distances)[:top_n]
-    similar = historical_df.iloc[similar_idx].copy()
-    max_dist = distances.max() if distances.max() > 0 else 1
-    similar['Similarity %'] = 100 * (1 - distances[similar_idx] / max_dist)
-    return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
+    
+    # Filter only closed trades that have valid feature data
+    train_df = history_df.dropna(subset=features).copy()
+    if len(train_df) < 5: return pd.DataFrame()
+    
+    predictions = []
+    
+    for _, row in active_df.iterrows():
+        # Get current trade vector
+        curr_vec = np.nan_to_num(row[features].values.astype(float)).reshape(1, -1)
+        hist_vecs = np.nan_to_num(train_df[features].values.astype(float))
+        
+        # Calculate distances (Similarity)
+        distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
+        
+        # Get Top 7 similar trades
+        top_k_idx = np.argsort(distances)[:7]
+        nearest_neighbors = train_df.iloc[top_k_idx]
+        
+        # Forecast Logic
+        win_prob = (nearest_neighbors['P&L'] > 0).mean() * 100
+        avg_pnl = nearest_neighbors['P&L'].mean()
+        
+        # Confidence logic (based on how close the neighbors actually are)
+        avg_dist = distances[top_k_idx].mean()
+        confidence = max(0, 100 - (avg_dist * 10)) # Simple heuristic
+        
+        rec = "HOLD"
+        if win_prob < 40: rec = "REDUCE/CLOSE"
+        elif win_prob > 75: rec = "PRESS WINNER"
+        
+        predictions.append({
+            'Trade Name': row['Name'],
+            'Strategy': row['Strategy'],
+            'Win Prob %': win_prob,
+            'Expected PnL': avg_pnl,
+            'AI Rec': rec,
+            'Confidence': confidence
+        })
+        
+    return pd.DataFrame(predictions)
+
+def check_rot_and_efficiency(active_df, history_df):
+    """
+    Time-Decay Intelligence: Checks if active trades are 'rotting'
+    (Capital efficiency dropping below historical average).
+    """
+    if active_df.empty or history_df.empty: return pd.DataFrame()
+    
+    # 1. Calculate Historical Efficiency Baseline (PnL per Day per $1k Capital)
+    history_df['Eff_Score'] = (history_df['P&L'] / history_df['Days Held'].clip(lower=1)) / (history_df['Debit'] / 1000)
+    baseline_eff = history_df.groupby('Strategy')['Eff_Score'].median().to_dict()
+    
+    rot_alerts = []
+    
+    for _, row in active_df.iterrows():
+        strat = row['Strategy']
+        days = row['Days Held']
+        # Only check trades that have been held for a while (> 10 days)
+        if days < 10: continue
+        
+        curr_eff = (row['P&L'] / days) / (row['Debit'] / 1000) if row['Debit'] > 0 else 0
+        base = baseline_eff.get(strat, 0)
+        
+        # Threshold: If current efficiency is < 50% of baseline
+        if base > 0 and curr_eff < (base * 0.5):
+            rot_alerts.append({
+                'Trade': row['Name'],
+                'Strategy': strat,
+                'Current Speed': f"${curr_eff:.1f}/day",
+                'Baseline Speed': f"${base:.1f}/day",
+                'Status': '⚠️ ROTTING' if row['P&L'] > 0 else '💀 DEAD MONEY'
+            })
+            
+    return pd.DataFrame(rot_alerts)
+
+def get_dynamic_targets(history_df):
+    """
+    Dynamic Exits: Calculates 75th Percentile MFE (Max Favorable Excursion)
+    to find the 'Sweet Spot' for profit taking.
+    """
+    if history_df.empty: return {}
+    
+    # We need MFE data. Since trades table only has Final PnL, 
+    # we approximate MFE using Final PnL of *Winning* trades for now.
+    # (Ideally this uses snapshot MFE, but this is a good proxy for 'Winning Potential')
+    
+    winners = history_df[history_df['P&L'] > 0]
+    if winners.empty: return {}
+    
+    targets = {}
+    for strat, grp in winners.groupby('Strategy'):
+        # Conservative Target: Median of Winners
+        # Aggressive Target: 75th Percentile
+        targets[strat] = {
+            'Median Win': grp['P&L'].median(),
+            'Optimal Exit (75%)': grp['P&L'].quantile(0.75)
+        }
+    return targets
 
 # --- INITIALIZE DB ---
 init_db()
@@ -877,7 +968,8 @@ if not df.empty:
             dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
-tab_dash, tab_analytics, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "⚙️ Strategies", "📖 Rules"])
+# v136: Added "🧠 AI & Insights" as a separate main tab
+tab_dash, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "🧠 AI & Insights", "⚙️ Strategies", "📖 Rules"])
 
 # 1. ACTIVE DASHBOARD
 with tab_dash:
@@ -1022,7 +1114,7 @@ with tab_dash:
             st.divider()
 
             # --- NEW LAYOUT: DNA Tool in its own tab ---
-            sub_journal, sub_strat, sub_dna = st.tabs(["📝 Journal", "🏛️ Strategy Detail", "🧬 DNA Tool"])
+            sub_journal, sub_strat = st.tabs(["📝 Journal", "🏛️ Strategy Detail"])
             
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
@@ -1052,20 +1144,6 @@ with tab_dash:
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
             
-            with sub_dna:
-                st.subheader("🧬 Trade DNA Fingerprinting")
-                st.caption("Find historical trades that match the Greek profile of your current active trade.")
-                if not expired_df.empty:
-                    selected_dna_trade = st.selectbox("Select Active Trade to Analyze", active_df['Name'].unique())
-                    curr_row = active_df[active_df['Name'] == selected_dna_trade].iloc[0]
-                    similar = find_similar_trades(curr_row, expired_df)
-                    if not similar.empty:
-                        best_match = similar.iloc[0]
-                        st.info(f"🎯 **Best Match:** {best_match['Name']} ({best_match['Similarity %']:.0f}% similar) → Made ${best_match['P&L']:,.0f} in {best_match['Days Held']:.0f} days")
-                        st.dataframe(similar.style.format({'P&L': '${:,.0f}', 'ROI': '{:.1f}%', 'Similarity %': '{:.0f}%'}))
-                    else: st.info("No similar historical trades found.")
-                else: st.info("Need closed trade history for DNA analysis.")
-
             with sub_strat:
                 st.markdown("### 🏛️ Strategy Performance")
                 sorted_strats = sorted(list(dynamic_benchmarks.keys()))
@@ -1156,34 +1234,7 @@ with tab_dash:
                         else: st.info("No unclassified trades.")
     else: st.info("👋 Database is empty. Sync your first file.")
 
-with tab_strategies:
-    st.markdown("### ⚙️ Strategy Configuration Manager")
-    conn = get_db_connection()
-    try:
-        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
-        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True,
-            column_config={
-                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name"),
-                "Identifier": st.column_config.TextColumn("Keyword Match"),
-                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
-                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
-                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f"),
-                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d"),
-                "Description": st.column_config.TextColumn("Notes")
-            })
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            if st.button("💾 Save Changes"):
-                if update_strategy_config(edited_strats): st.success("Configuration Saved!"); st.cache_data.clear(); st.rerun()
-        with c2:
-            if st.button("🔄 Reprocess 'Other' Trades"):
-                count = reprocess_other_trades(); st.success(f"Reprocessed {count} trades!"); st.cache_data.clear(); st.rerun()
-        with c3:
-            if st.button("🧨 Reset to Defaults", type="secondary"): seed_default_strategies(force_reset=True); st.cache_data.clear(); st.rerun()
-    except Exception as e: st.error(f"Error loading strategies: {e}")
-    finally: conn.close()
-
+# 3. ANALYTICS (Updated v125)
 with tab_analytics:
     an_overview, an_trends, an_risk, an_decay, an_rolls = st.tabs(["📊 Overview", "📈 Trends & Seasonality", "⚠️ Risk & Excursion", "🧬 Decay & DNA", "🔄 Rolls"])
 
@@ -1258,7 +1309,6 @@ with tab_analytics:
             
             # --- RENDER TABLE ---
             st.markdown("### 🏆 Closed Trade Performance")
-            # --- FIX: Correct column name from 'Avg Trade ROI' to 'ROI' ---
             perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
             perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
             
@@ -1500,6 +1550,54 @@ with tab_analytics:
                 else: st.warning(f"⚠️ Rolling HURTS: Consider taking losses earlier.")
         else: st.info("No rolled trades linked via Parent ID yet. Use the 'Journal' tab to link trades.")
 
+# --- NEW TAB: AI & INTELLIGENCE ---
+with tab_ai:
+    st.markdown("### 🧠 The Quant Brain (Beta)")
+    st.caption("Self-learning insights based on your specific trading history.")
+    
+    if df.empty or expired_df.empty:
+        st.info("👋 Need more historical data to power the AI engine.")
+    else:
+        active_trades = df[df['Status'].isin(['Active', 'Missing'])].copy()
+        
+        # 1. Predictive Engine
+        st.subheader("🔮 Win Probability Forecast (KNN Model)")
+        if not active_trades.empty:
+            preds = generate_trade_predictions(active_trades, expired_df)
+            if not preds.empty:
+                st.dataframe(
+                    preds.style.format({
+                        'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%"
+                    }).map(lambda v: 'color: green; font-weight: bold' if v > 60 else ('color: red; font-weight: bold' if v < 40 else 'color: orange'), subset=['Win Prob %']),
+                    use_container_width=True
+                )
+            else: st.info("Not enough closed trades with matching Greek profiles for prediction.")
+        else: st.info("No active trades to forecast.")
+        
+        st.divider()
+        
+        c_ai_1, c_ai_2 = st.columns(2)
+        
+        with c_ai_1:
+            st.subheader("📉 Capital Rot Detector")
+            if not active_trades.empty:
+                rot_df = check_rot_and_efficiency(active_trades, expired_df)
+                if not rot_df.empty:
+                    st.warning(f"⚠️ Detected {len(rot_df)} stagnating trades.")
+                    st.dataframe(rot_df, use_container_width=True)
+                else: st.success("✅ Capital is moving efficiently. No rot detected.")
+        
+        with c_ai_2:
+            st.subheader("🎯 Optimal Exit Zones (Historical)")
+            targets = get_dynamic_targets(expired_df)
+            if targets:
+                target_data = []
+                for s, v in targets.items():
+                    target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit (75%)': v['Optimal Exit (75%)']})
+                t_df = pd.DataFrame(target_data)
+                st.dataframe(t_df.style.format({'Median Win': '${:,.0f}', 'Optimal Exit (75%)': '${:,.0f}'}), use_container_width=True)
+            else: st.info("Need more winning trades to calculate optimal zones.")
+
 with tab_rules:
     st.markdown("""
     # 📖 The Trader's Constitution
@@ -1547,4 +1645,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v135.1 (Fix: ROI KeyError Resolved)")
+    st.caption("Allantis Trade Guardian v136.0 (AI Intelligence: Probability Engine, Rot Detector & Dynamic Exits)")
