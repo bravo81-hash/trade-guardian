@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v130.1 (v130.0 + Correlation/MAE + Safety Fixes)")
+st.info("✅ RUNNING VERSION: v130.2 (Fix: Regime Multiplier Scope Error)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -387,6 +387,7 @@ def sync_data(file_list, file_type):
                 c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
+                # Rename Logic
                 if existing is None and t['link'] and len(t['link']) > 15:
                     c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
                     link_match = c.fetchone()
@@ -425,6 +426,7 @@ def sync_data(file_list, file_type):
 
                     db_strategy = existing[11]
                     final_strategy = db_strategy
+                    # Only overwrite if current is 'Other'
                     if db_strategy == 'Other' and t['strategy'] != 'Other':
                          final_strategy = t['strategy']
 
@@ -624,39 +626,89 @@ def load_data():
 # --- INITIALIZE DB ---
 init_db()
 
-# --- CONFIG (Defaults + DB) ---
-BASE_CONFIG = {
-    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
-    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
-    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
-    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
-}
+# --- SIDEBAR ---
+st.sidebar.markdown("### 🚦 Daily Workflow")
+with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
+    restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
+    if restore:
+        with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+        st.cache_data.clear()
+        st.success("Restored.")
+        if 'restored' not in st.session_state:
+            st.session_state['restored'] = True
+            st.rerun()
 
-# Fix: Initialize variables safely
-benchmarks = BASE_CONFIG.copy()
-dynamic_benchmarks = load_strategy_config() 
-if dynamic_benchmarks: 
-    benchmarks.update(dynamic_benchmarks)
+st.sidebar.markdown("⬇️ *then...*")
+with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
+    active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
+    history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
+    if st.button("🔄 Process & Reconcile"):
+        logs = []
+        if active_up: logs.extend(sync_data(active_up, "Active"))
+        if history_up: logs.extend(sync_data(history_up, "History"))
+        if logs:
+            for l in logs: st.write(l)
+            st.cache_data.clear()
+            st.success("Sync Complete!")
 
-df = load_data()
-expired_df = pd.DataFrame() 
+st.sidebar.markdown("⬇️ *finally...*")
+with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
+    with open(DB_NAME, "rb") as f:
+        st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-if not df.empty:
-    expired_df = df[df['Status'] == 'Expired']
-    if not expired_df.empty:
-        hist_grp = expired_df.groupby('Strategy')
-        for strat, grp in hist_grp:
-            winners = grp[grp['P&L'] > 0]
-            current_bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}).copy())
-            if not winners.empty:
-                current_bench['pnl'] = winners['P&L'].mean()
-                current_bench['dit'] = winners['Days Held'].mean()
-                current_bench['yield'] = grp['Daily Yield %'].mean()
-                current_bench['roi'] = winners['ROI'].mean()
-            benchmarks[strat] = current_bench
+# --- NEW: TRADE MANAGER (Manual Fix) ---
+with st.sidebar.expander("🛠️ Maintenance", expanded=False):
+    st.caption("Fix Duplicates / Rename Issues")
+    
+    if st.button("🧹 Vacuum DB"):
+        conn = get_db_connection()
+        conn.execute("VACUUM")
+        conn.close()
+        st.success("Optimized.")
+        
+    st.markdown("---")
+    conn = get_db_connection()
+    try:
+        all_trades = pd.read_sql("SELECT id, name, status, pnl, days_held FROM trades ORDER BY status, entry_date DESC", conn)
+        if not all_trades.empty:
+            st.write("🗑️ **Delete Specific Trades**")
+            all_trades['Label'] = all_trades['name'] + " (" + all_trades['status'] + ", $" + all_trades['pnl'].astype(str) + ")"
+            trades_to_del = st.multiselect("Select trades to delete:", all_trades['Label'].tolist())
+            
+            if st.button("🔥 Delete Selected Trades"):
+                if trades_to_del:
+                    ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
+                    placeholders = ','.join('?' for _ in ids_to_del)
+                    
+                    conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
+                    conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
+                    conn.commit()
+                    st.success(f"Deleted {len(ids_to_del)} trades!")
+                    st.cache_data.clear()
+                    st.rerun()
+    except: pass
+    conn.close()
+    
+    st.markdown("---")
+    if st.button("🧨 Hard Reset (Delete All Data)"):
+        conn = get_db_connection()
+        conn.execute("DROP TABLE IF EXISTS trades")
+        conn.execute("DROP TABLE IF EXISTS snapshots")
+        conn.execute("DROP TABLE IF EXISTS strategy_config")
+        conn.commit()
+        conn.close()
+        init_db()
+        st.cache_data.clear()
+        st.success("Wiped & Reset.")
+        st.rerun()
+
+st.sidebar.divider()
+st.sidebar.header("⚙️ Strategy Settings")
+market_regime = st.sidebar.selectbox("Current Market Regime", ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"], index=0)
+regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in market_regime else 1.0
 
 # --- SMART ADAPTIVE EXIT ENGINE ---
-def calculate_decision_ladder(row, benchmarks_dict):
+def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
     strat = row['Strategy']
     days = row['Days Held']
     pnl = row['P&L']
@@ -684,7 +736,6 @@ def calculate_decision_ladder(row, benchmarks_dict):
     action = "HOLD"
     reason = "Normal"
     
-    # ZOMBIE & JUICE
     if pnl < 0:
         juice_type = "Recovery Days"
         if theta > 0:
@@ -717,7 +768,6 @@ def calculate_decision_ladder(row, benchmarks_dict):
             score += 35
             reason = f"Empty Tank (<${100*lot_size})"
 
-    # PROFIT SCORING
     if pnl >= target_profit:
         return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
     elif pnl >= target_profit * 0.8:
@@ -768,6 +818,37 @@ def calculate_decision_ladder(row, benchmarks_dict):
     elif score <= 30: action = "COOKING"
     
     return action, score, reason, juice_val, juice_type
+
+# --- CONFIG (Defaults + DB) ---
+BASE_CONFIG = {
+    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
+    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
+    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
+    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
+}
+
+# Fix: Initialize variables safely
+benchmarks = BASE_CONFIG.copy()
+dynamic_benchmarks = load_strategy_config() 
+if dynamic_benchmarks: 
+    benchmarks.update(dynamic_benchmarks)
+
+df = load_data()
+expired_df = pd.DataFrame() 
+
+if not df.empty:
+    expired_df = df[df['Status'] == 'Expired']
+    if not expired_df.empty:
+        hist_grp = expired_df.groupby('Strategy')
+        for strat, grp in hist_grp:
+            winners = grp[grp['P&L'] > 0]
+            current_bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}).copy())
+            if not winners.empty:
+                current_bench['pnl'] = winners['P&L'].mean()
+                current_bench['dit'] = winners['Days Held'].mean()
+                current_bench['yield'] = grp['Daily Yield %'].mean()
+                current_bench['roi'] = winners['ROI'].mean()
+            benchmarks[strat] = current_bench
 
 # --- TABS ---
 tab_dash, tab_analytics, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "⚙️ Strategies", "📖 Rules"])
@@ -820,7 +901,8 @@ with tab_dash:
             m4.metric("Velocity", f"{active_df['Days Held'].mean():.0f}d avg", delta=f"Target: {target_days:.0f}d")
             
             # --- CALCULATE LADDER ---
-            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks), axis=1)
+            # Fix: Pass regime_mult explicitly
+            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks, regime_mult), axis=1)
             active_df['Action'] = [x[0] for x in ladder_results]
             active_df['Urgency Score'] = [x[1] for x in ladder_results]
             active_df['Reason'] = [x[2] for x in ladder_results]
