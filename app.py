@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v130.2 (Fix: Regime Multiplier Scope Error)")
+st.info("✅ RUNNING VERSION: v130.3 (Fixed: Snaps NameError & Regime Scope)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -125,7 +125,6 @@ def seed_default_strategies(force_reset=False):
     finally:
         conn.close()
 
-# --- LOAD STRATEGY CONFIG ---
 @st.cache_data(ttl=60)
 def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
@@ -156,12 +155,15 @@ def get_strategy_dynamic(trade_name, group_name, config_dict):
     t_name = str(trade_name).upper().strip()
     g_name = str(group_name).upper().strip()
     
+    # Sort by length of ID descending to ensure specific matches (130/160) beat generic ones (160)
     sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
     
+    # 1. Priority: Trade Name
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in t_name: return strat_name
             
+    # 2. Priority: Group Name
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in g_name: return strat_name
@@ -177,12 +179,6 @@ def clean_num(x):
         return val
     except: return 0.0
 
-def safe_fmt(val, fmt_str):
-    try:
-        if isinstance(val, (int, float)): return fmt_str.format(val)
-        return str(val)
-    except: return str(val)
-
 def generate_id(name, strategy, entry_date):
     d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
     safe_name = re.sub(r'\W+', '', str(name))
@@ -193,8 +189,7 @@ def extract_ticker(name):
         parts = str(name).split(' ')
         if parts:
             ticker = parts[0].replace('.', '').upper()
-            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']:
-                return "UNKNOWN"
+            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']: return "UNKNOWN"
             return ticker
         return "UNKNOWN"
     except: return "UNKNOWN"
@@ -214,7 +209,6 @@ def parse_optionstrat_file(file, file_type, config_dict):
                         break
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
-                
                 if 'Link' in df_raw.columns:
                     try:
                         file.seek(0)
@@ -256,10 +250,8 @@ def parse_optionstrat_file(file, file_type, config_dict):
             df_raw = pd.read_csv(file, skiprows=header_row)
 
         parsed_trades = []
-        current_trade = None
-        current_legs = []
-
-        def finalize_trade(trade_data, legs, f_type):
+        
+        def finalize_trade(trade_data, legs):
             if not trade_data.any(): return None
             
             name = str(trade_data.get('Name', ''))
@@ -269,7 +261,6 @@ def parse_optionstrat_file(file, file_type, config_dict):
             except: return None 
 
             strat = get_strategy_dynamic(name, group, config_dict)
-            
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
             
@@ -330,16 +321,14 @@ def parse_optionstrat_file(file, file_type, config_dict):
                 'group': group
             }
 
-        cols = df_raw.columns
-        col_names = [str(c) for c in cols]
-        if 'Name' not in col_names or 'Total Return $' not in col_names:
-            return []
-
+        current_trade = None
+        current_legs = []
+        
         for index, row in df_raw.iterrows():
             name_val = str(row['Name'])
             if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
                 if current_trade is not None:
-                    res = finalize_trade(current_trade, current_legs, file_type)
+                    res = finalize_trade(current_trade, current_legs)
                     if res: parsed_trades.append(res)
                 current_trade = row
                 current_legs = []
@@ -347,7 +336,7 @@ def parse_optionstrat_file(file, file_type, config_dict):
                 current_legs.append(row)
         
         if current_trade is not None:
-             res = finalize_trade(current_trade, current_legs, file_type)
+             res = finalize_trade(current_trade, current_legs)
              if res: parsed_trades.append(res)
         return parsed_trades
     except Exception as e:
@@ -426,7 +415,7 @@ def sync_data(file_list, file_type):
 
                     db_strategy = existing[11]
                     final_strategy = db_strategy
-                    # Only overwrite if current is 'Other'
+                    # Only overwrite if current is 'Other' and new is Specific
                     if db_strategy == 'Other' and t['strategy'] != 'Other':
                          final_strategy = t['strategy']
 
@@ -556,6 +545,7 @@ def load_data():
     conn = get_db_connection()
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
+        # Snaps loaded here only for volatility calculation
         snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
@@ -576,8 +566,8 @@ def load_data():
             'put_pnl': 'Put P&L', 'call_pnl': 'Call P&L', 'iv': 'IV', 'link': 'Link'
         })
         
-        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link']
-        for col in required_cols:
+        # Ensure all columns exist
+        for col in ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link']:
             if col not in df.columns: df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
         
         numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
@@ -626,6 +616,40 @@ def load_data():
 # --- INITIALIZE DB ---
 init_db()
 
+# --- CONFIG ---
+BASE_CONFIG = {
+    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
+    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
+    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
+    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
+}
+
+dynamic_benchmarks = load_strategy_config() 
+if dynamic_benchmarks: 
+    BASE_CONFIG.update(dynamic_benchmarks)
+benchmarks = BASE_CONFIG.copy()
+
+# LOAD DATA
+df = load_data()
+expired_df = pd.DataFrame() 
+
+# FIX: Load snapshots globally for Analytics
+snaps = load_snapshots()
+
+if not df.empty:
+    expired_df = df[df['Status'] == 'Expired']
+    if not expired_df.empty:
+        hist_grp = expired_df.groupby('Strategy')
+        for strat, grp in hist_grp:
+            winners = grp[grp['P&L'] > 0]
+            current_bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}).copy())
+            if not winners.empty:
+                current_bench['pnl'] = winners['P&L'].mean()
+                current_bench['dit'] = winners['Days Held'].mean()
+                current_bench['yield'] = grp['Daily Yield %'].mean()
+                current_bench['roi'] = winners['ROI'].mean()
+            benchmarks[strat] = current_bench
+
 # --- SIDEBAR ---
 st.sidebar.markdown("### 🚦 Daily Workflow")
 with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
@@ -634,9 +658,7 @@ with st.sidebar.expander("1. 🟢 STARTUP (Restore)", expanded=True):
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         st.cache_data.clear()
         st.success("Restored.")
-        if 'restored' not in st.session_state:
-            st.session_state['restored'] = True
-            st.rerun()
+        st.rerun()
 
 st.sidebar.markdown("⬇️ *then...*")
 with st.sidebar.expander("2. 🔵 WORK (Sync Files)", expanded=True):
@@ -656,16 +678,13 @@ with st.sidebar.expander("3. 🔴 SHUTDOWN (Backup)", expanded=True):
     with open(DB_NAME, "rb") as f:
         st.download_button("💾 Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-# --- NEW: TRADE MANAGER (Manual Fix) ---
 with st.sidebar.expander("🛠️ Maintenance", expanded=False):
     st.caption("Fix Duplicates / Rename Issues")
-    
     if st.button("🧹 Vacuum DB"):
         conn = get_db_connection()
         conn.execute("VACUUM")
         conn.close()
         st.success("Optimized.")
-        
     st.markdown("---")
     conn = get_db_connection()
     try:
@@ -674,12 +693,10 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
             st.write("🗑️ **Delete Specific Trades**")
             all_trades['Label'] = all_trades['name'] + " (" + all_trades['status'] + ", $" + all_trades['pnl'].astype(str) + ")"
             trades_to_del = st.multiselect("Select trades to delete:", all_trades['Label'].tolist())
-            
-            if st.button("🔥 Delete Selected Trades"):
+            if st.button("🔥 Delete Selected"):
                 if trades_to_del:
                     ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
                     placeholders = ','.join('?' for _ in ids_to_del)
-                    
                     conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
                     conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
                     conn.commit()
@@ -688,7 +705,6 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
                     st.rerun()
     except: pass
     conn.close()
-    
     st.markdown("---")
     if st.button("🧨 Hard Reset (Delete All Data)"):
         conn = get_db_connection()
@@ -729,7 +745,6 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
     
     hist_avg_pnl = bench.get('pnl', 1000)
     target_profit = (hist_avg_pnl * regime_mult) * lot_size
-    
     hist_avg_days = bench.get('dit', 40)
     
     score = 50 
@@ -741,10 +756,8 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
         if theta > 0:
             recov_days = abs(pnl) / theta
             juice_val = recov_days
-            
             is_cooking = (strat == '160/190' and days < 30)
             is_young = days < 15
-            
             if not is_cooking and not is_young:
                 remaining_time_est = max(1, hist_avg_days - days)
                 if recov_days > remaining_time_est:
@@ -760,7 +773,6 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
         juice_type = "Left in Tank"
         left_in_tank = max(0, target_profit - pnl)
         juice_val = left_in_tank
-        
         if debit > 0 and (left_in_tank / debit) < 0.05:
             score += 40
             reason = "Squeezed Dry (Risk > Reward)"
@@ -776,7 +788,6 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
         reason = "Near Target"
         
     stale_threshold = hist_avg_days * 1.25 
-    
     if strat == '130/160':
         limit_130 = min(stale_threshold, 30) 
         if days > limit_130 and pnl < (100 * lot_size):
@@ -784,7 +795,6 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
         elif days > (limit_130 * 0.8):
             score += 20
             reason = "Aging"
-            
     elif strat == '160/190':
         cooking_limit = max(30, hist_avg_days * 0.7)
         if days < cooking_limit:
@@ -795,7 +805,6 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
             score += 25
             action = "WATCH"
             reason = f"Mature (>{stale_threshold:.0f}d)"
-            
     elif strat == 'M200':
         if 13 <= days <= 15:
             score += 10
@@ -806,69 +815,101 @@ def calculate_decision_ladder(row, benchmarks_dict, regime_mult):
         score += 25
         reason += " + Coin Flip (Unstable)"
         action = "RISK REVIEW"
-        
     if row['Theta Eff.'] < 0.2 and days > 10:
         score += 15
         reason += " + Bad Decay"
         
     score = min(100, max(0, score))
-    
     if score >= 90: action = "CRITICAL"
     elif score >= 70: action = "WATCH"
     elif score <= 30: action = "COOKING"
-    
     return action, score, reason, juice_val, juice_type
-
-# --- CONFIG (Defaults + DB) ---
-BASE_CONFIG = {
-    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
-    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
-    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
-    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
-}
-
-# Fix: Initialize variables safely
-benchmarks = BASE_CONFIG.copy()
-dynamic_benchmarks = load_strategy_config() 
-if dynamic_benchmarks: 
-    benchmarks.update(dynamic_benchmarks)
-
-df = load_data()
-expired_df = pd.DataFrame() 
-
-if not df.empty:
-    expired_df = df[df['Status'] == 'Expired']
-    if not expired_df.empty:
-        hist_grp = expired_df.groupby('Strategy')
-        for strat, grp in hist_grp:
-            winners = grp[grp['P&L'] > 0]
-            current_bench = benchmarks.get(strat, BASE_CONFIG.get(strat, {}).copy())
-            if not winners.empty:
-                current_bench['pnl'] = winners['P&L'].mean()
-                current_bench['dit'] = winners['Days Held'].mean()
-                current_bench['yield'] = grp['Daily Yield %'].mean()
-                current_bench['roi'] = winners['ROI'].mean()
-            benchmarks[strat] = current_bench
 
 # --- TABS ---
 tab_dash, tab_analytics, tab_strategies, tab_rules = st.tabs(["📊 Dashboard", "📈 Analytics", "⚙️ Strategies", "📖 Rules"])
 
-# 1. ACTIVE DASHBOARD
+# 1. DASHBOARD
 with tab_dash:
+    with st.expander("✈️ Universal Pre-Flight Calculator", expanded=False):
+        pf_c1, pf_c2, pf_c3 = st.columns(3)
+        with pf_c1:
+            pf_goal = st.selectbox("Strategy Profile", ["🛡️ Hedged Income (Butterflies, Calendars, M200)", "🏰 Standard Income (Credit Spreads, Iron Condors)", "🚀 Directional (Long Calls/Puts, Verticals)", "⚡ Speculative Vol (Straddles, Earnings)"])
+            pf_dte = st.number_input("DTE (Days)", min_value=1, value=45, step=1)
+        with pf_c2:
+            pf_price = st.number_input("Net Price ($)", value=5000.0, step=100.0)
+            pf_theta = st.number_input("Theta ($)", value=15.0, step=1.0)
+        with pf_c3:
+            pf_delta = st.number_input("Net Delta", value=-10.0, step=1.0, format="%.2f")
+            pf_vega = st.number_input("Vega", value=100.0, step=1.0, format="%.2f")
+            
+        if st.button("Run Pre-Flight Check"):
+            st.markdown("---")
+            res_c1, res_c2, res_c3 = st.columns(3)
+            
+            if "Hedged Income" in pf_goal:
+                stability = pf_theta / (abs(pf_delta) + 1)
+                yield_pct = (pf_theta / abs(pf_price)) * 100
+                annualized_roi = (yield_pct * 365)
+                vega_cushion = pf_vega / pf_theta if pf_theta != 0 else 0
+                with res_c1:
+                    if stability > 1.0: st.success(f"🛡️ Stability: {stability:.2f} (Fortress)")
+                    elif stability > 0.5: st.info(f"⚖️ Stability: {stability:.2f} (Good)")
+                    else: st.error(f"🎲 Stability: {stability:.2f} (Coin Flip)")
+                with res_c2:
+                    if annualized_roi > 50: st.success(f"💰 Ann. ROI: {annualized_roi:.0f}%")
+                    elif annualized_roi > 25: st.info(f"💵 Ann. ROI: {annualized_roi:.0f}%")
+                    else: st.error(f"📉 Ann. ROI: {annualized_roi:.0f}%")
+                with res_c3:
+                    if pf_dte < 21: st.warning("⚠️ High Gamma Risk (Low DTE)")
+                    elif pf_vega > 0: st.success(f"💎 Hedge: {vega_cushion:.1f}x (Good)")
+                    else: st.error(f"⚠️ Hedge: {pf_vega:.0f} (Negative Vega)")
+
+            elif "Standard Income" in pf_goal:
+                stability = pf_theta / (abs(pf_delta) + 1)
+                yield_pct = (pf_theta / abs(pf_price)) * 100
+                annualized_roi = (yield_pct * 365)
+                fragility = abs(pf_vega) / pf_theta if pf_theta != 0 else 999
+                with res_c1:
+                    if stability > 0.5: st.success(f"🛡️ Stability: {stability:.2f} (Good)")
+                    else: st.error(f"🎲 Stability: {stability:.2f} (Unstable)")
+                with res_c2:
+                    if annualized_roi > 40: st.success(f"💰 Ann. ROI: {annualized_roi:.0f}%")
+                    else: st.warning(f"📉 Ann. ROI: {annualized_roi:.0f}%")
+                with res_c3:
+                    if pf_dte < 21: st.warning("⚠️ High Gamma Risk (Low DTE)")
+                    elif pf_vega < 0 and fragility < 5: st.success(f"💎 Fragility: {fragility:.1f} (Robust)")
+                    else: st.warning(f"⚠️ Fragility: {fragility:.1f} (High)")
+
+            elif "Directional" in pf_goal:
+                leverage = abs(pf_delta) / abs(pf_price) * 100
+                theta_drag = (pf_theta / abs(pf_price)) * 100
+                with res_c1: st.metric("Leverage", f"{leverage:.2f} Δ/$100")
+                with res_c2:
+                    if theta_drag > -0.1: st.success(f"🔥 Burn: {theta_drag:.2f}% (Low)")
+                    else: st.warning(f"💸 Burn: {theta_drag:.2f}% (High)")
+                with res_c3:
+                    proj_roi = (abs(pf_delta) * 5) / abs(pf_price) * 100 
+                    st.metric("ROI on $5 Move", f"{proj_roi:.1f}%")
+
+            elif "Speculative Vol" in pf_goal:
+                vega_efficiency = abs(pf_vega) / abs(pf_price) * 100
+                move_needed = abs(pf_theta / pf_vega) if pf_vega != 0 else 0
+                with res_c1: st.metric("Vega Exposure", f"{vega_efficiency:.1f}%")
+                with res_c2: st.metric("Daily Cost", f"${pf_theta:.0f}")
+                with res_c3: st.info(f"Need {move_needed:.1f}% IV move to break even")
+
     if not df.empty:
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
         if active_df.empty:
             st.info("📭 No active trades.")
         else:
-            # --- PORTFOLIO HEALTH BANNER ---
             tot_debit = active_df['Debit'].sum()
             if tot_debit == 0: tot_debit = 1
             
             target_allocation = {'130/160': 0.30, '160/190': 0.40, 'M200': 0.20, 'SMSF': 0.10}
             actual_alloc = active_df.groupby('Strategy')['Debit'].sum() / tot_debit
             allocation_score = 100 - sum(abs(actual_alloc.get(s, 0) - target_allocation.get(s, 0)) * 100 for s in target_allocation)
-            
             total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
             avg_age = active_df['Days Held'].mean()
             
@@ -876,32 +917,9 @@ with tab_dash:
                             "🟡 REVIEW" if allocation_score > 60 and total_delta_pct < 5 and avg_age < 35 else \
                             "🔴 CRITICAL"
             
-            # Use columns to center the banner content
-            st.markdown(f"### {health_status} Portfolio Status")
-            hb1, hb2, hb3 = st.columns(3)
-            hb1.metric("Allocation Score", f"{allocation_score:.0f}/100")
-            hb2.metric("Net Delta Exp", f"{total_delta_pct:.1f}%")
-            hb3.metric("Avg Age", f"{avg_age:.0f} days")
+            st.markdown(f"### {health_status} Portfolio Status (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
             
-            st.divider()
-            
-            # --- METRICS ROW ---
-            tot_theta = active_df['Theta'].sum()
-            eff_score = (tot_theta / tot_debit * 100) if tot_debit > 0 else 0
-            
-            # SAFE ACCESS TO BENCHMARKS for Display
-            # Use '130/160' if available, otherwise safely default
-            base_130 = benchmarks.get('130/160', {})
-            target_days = base_130.get('dit', 36)
-            
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Daily Theta Income", f"${tot_theta:,.0f}")
-            m2.metric("Portfolio Yield", f"{eff_score:.2f}%")
-            m3.metric("Floating PnL", f"${active_df['P&L'].sum():,.0f}")
-            m4.metric("Velocity", f"{active_df['Days Held'].mean():.0f}d avg", delta=f"Target: {target_days:.0f}d")
-            
-            # --- CALCULATE LADDER ---
-            # Fix: Pass regime_mult explicitly
+            # CALCULATE LADDER
             ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, benchmarks, regime_mult), axis=1)
             active_df['Action'] = [x[0] for x in ladder_results]
             active_df['Urgency Score'] = [x[1] for x in ladder_results]
@@ -917,33 +935,32 @@ with tab_dash:
             
             active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
 
-            # --- PRIORITY ACTION QUEUE (Only show if urgent) ---
             todo_df = active_df[active_df['Urgency Score'] >= 70]
-            if not todo_df.empty:
-                st.subheader(f"🔥 Action Queue ({len(todo_df)})")
-                for _, row in todo_df.iterrows():
-                    u_score = row['Urgency Score']
-                    color = "red" if u_score >= 90 else "orange"
-                    is_valid_link = str(row['Link']).startswith('http')
-                    name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
-                    
-                    with st.container():
-                        ac1, ac2, ac3 = st.columns([3, 2, 1])
-                        ac1.markdown(f"**{name_display}** ({row['Strategy']})")
-                        ac2.markdown(f":{color}[**{row['Action']}**] ({row['Reason']})")
+            with st.expander(f"🔥 Priority Action Queue ({len(todo_df)})", expanded=True):
+                if not todo_df.empty:
+                    for _, row in todo_df.iterrows():
+                        u_score = row['Urgency Score']
+                        color = "red" if u_score >= 90 else "orange"
+                        is_valid_link = str(row['Link']).startswith('http')
+                        name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
+                        
+                        c_a, c_b, c_c = st.columns([2, 1, 1])
+                        c_a.markdown(f"**{name_display}** ({row['Strategy']})")
+                        c_b.markdown(f":{color}[**{row['Action']}**] ({row['Reason']})")
                         if row['Juice Type'] == 'Recovery Days':
-                            ac3.metric("Break Even", f"{row['Juice Val']:.0f}d", label_visibility="collapsed")
+                            c_c.metric("Break Even", f"{row['Juice Val']:.0f}d", delta_color="inverse")
                         else:
-                            ac3.metric("Left", f"${row['Juice Val']:.0f}", label_visibility="collapsed")
+                            c_c.metric("Left", f"${row['Juice Val']:.0f}")
                         st.progress(u_score / 100)
-                st.divider()
+                else:
+                    st.success("✅ No critical actions required. Portfolio is healthy.")
 
-            # --- TABS FOR DATA ---
+            st.divider()
+
             sub_journal, sub_strat = st.tabs(["📝 Active Journal", "🏛️ Strategy Detail"])
 
             with sub_journal:
                 strategy_options = sorted(list(benchmarks.keys())) + ["Other"]
-                
                 display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, 
@@ -979,10 +996,8 @@ with tab_dash:
             
             with sub_strat:
                 sorted_strats = sorted(list(benchmarks.keys()))
-                # Add 'Other' tab explicitly if present
                 tabs_list = ["📋 Overview"] + [f"🔹 {s}" for s in sorted_strats]
-                if "Other" not in sorted_strats:
-                    tabs_list.append("📁 Other / Unclassified")
+                if "Other" not in sorted_strats: tabs_list.append("📁 Unclassified")
                 
                 strat_tabs_inner = st.tabs(tabs_list)
 
@@ -1007,7 +1022,6 @@ with tab_dash:
                         'Trend': ['-']
                     })
                     final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
-                    
                     st.dataframe(final_agg.style.format({'P&L': '${:,.0f}', 'Debit': '${:,.0f}', 'Theta': '{:,.0f}', 'Delta': '{:,.1f}'}), use_container_width=True)
 
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L', 'Debit', 'Days Held']
@@ -1019,9 +1033,8 @@ with tab_dash:
                         else:
                             st.info("No active trades.")
                 
-                # Render "Other" tab if it wasn't in sorted_strats
                 if "Other" not in sorted_strats:
-                    with strat_tabs_inner[-1]: # The last tab
+                    with strat_tabs_inner[-1]:
                         subset = active_df[active_df['Strategy'] == "Other"].copy()
                         if not subset.empty:
                             st.warning("⚠️ These trades need classification. Edit 'Strategy' in the Journal tab.")
@@ -1038,125 +1051,57 @@ with tab_analytics:
 
     if not expired_df.empty:
         st.markdown("### 🏆 Closed Trade Performance")
-        
         expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
-        
-        perf_agg = expired_df.groupby('Strategy').agg({
-            'P&L': 'sum',
-            'Debit': 'sum',
-            'Cap_Days': 'sum',
-            'ROI': 'mean', 
-            'id': 'count'
-        }).reset_index()
-        
+        perf_agg = expired_df.groupby('Strategy').agg({'P&L': 'sum', 'Debit': 'sum', 'Cap_Days': 'sum', 'ROI': 'mean', 'id': 'count'}).reset_index()
         wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
         perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
         perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
-        
         perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
         perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
-        
         perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
         perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
-        
-        total_pnl = perf_display['Total P&L'].sum()
-        total_vol = perf_display['Total Volume'].sum()
-        total_cap_days = perf_agg['Cap_Days'].sum()
-        total_trades = perf_display['Trades'].sum()
-        total_wins = perf_agg['Wins'].sum()
-        
-        total_win_rate = total_wins / total_trades if total_trades > 0 else 0
-        total_simple_ret = (total_pnl / total_vol * 100) if total_vol > 0 else 0
-        total_twr = (total_pnl / total_cap_days * 365 * 100) if total_cap_days > 0 else 0
-        avg_trade_roi = expired_df['ROI'].mean()
-        
-        total_row = pd.DataFrame({
-            'Strategy': ['TOTAL'],
-            'Trades': [total_trades],
-            'Win Rate': [total_win_rate],
-            'Total P&L': [total_pnl],
-            'Total Volume': [total_vol],
-            'Simple Return %': [total_simple_ret],
-            'Ann. TWR %': [total_twr],
-            'Avg Trade ROI': [avg_trade_roi]
-        })
-        
-        perf_display = pd.concat([perf_display, total_row], ignore_index=True)
-
-        st.dataframe(
-            perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%"}),
-            use_container_width=True
-        )
+        st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%"}), use_container_width=True)
 
     if not df.empty:
-        # Re-establish active context for the health check breakdown
-        active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
-        
-        # --- NEW RISK METRICS: CORRELATION & MAE (v130.1) ---
         with an3:
             st.markdown("### ⚠️ Advanced Risk Analytics")
             r1, r2 = st.columns(2)
-            
             with r1:
                 st.subheader("🔗 Portfolio Correlation Matrix")
-                # Daily PnL Change Correlation
-                daily_strat = snaps.groupby(['snapshot_date', 'strategy'])['pnl'].sum().reset_index()
-                if not daily_strat.empty:
-                    pivot_strat = daily_strat.pivot(index='snapshot_date', columns='strategy', values='pnl').fillna(0)
-                    daily_change = pivot_strat.diff().fillna(0)
-                    if not daily_change.empty:
-                        corr_matrix = daily_change.corr()
-                        fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", title="Strategy Daily P&L Correlation")
-                        st.plotly_chart(fig_corr, use_container_width=True)
-                    else:
-                        st.info("Not enough daily data for correlation.")
-                else:
-                    st.info("No snapshot data available.")
+                if not snaps.empty:
+                    daily_strat = snaps.groupby(['snapshot_date', 'strategy'])['pnl'].sum().reset_index()
+                    if not daily_strat.empty:
+                        pivot_strat = daily_strat.pivot(index='snapshot_date', columns='strategy', values='pnl').fillna(0)
+                        daily_change = pivot_strat.diff().fillna(0)
+                        if not daily_change.empty and len(daily_change) > 1:
+                            corr_matrix = daily_change.corr()
+                            fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", title="Strategy Daily P&L Correlation")
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                        else: st.info("Not enough daily data points yet.")
+                else: st.info("No snapshot data available.")
 
             with r2:
                 st.subheader("📉 Max Adverse Excursion (MAE)")
-                # MAE Calculation: Lowest PnL point vs Final PnL
-                mae_data = snaps.groupby('trade_id')['pnl'].min().reset_index()
-                mae_data.rename(columns={'pnl': 'MAE'}, inplace=True)
-                
-                # Merge with Final PnL from trades table
-                mae_analysis = pd.merge(mae_data, df[['id', 'Name', 'Strategy', 'P&L', 'Status']], left_on='trade_id', right_on='id')
-                mae_analysis.rename(columns={'P&L': 'Final PnL'}, inplace=True)
-                
-                if not mae_analysis.empty:
-                    fig_mae = px.scatter(mae_analysis, x='MAE', y='Final PnL', color='Strategy', hover_data=['Name'],
-                                        title="MAE Distribution (Pain vs Gain)", labels={'MAE': 'Deepest Drawdown ($)', 'Final PnL': 'Final Result ($)'})
-                    # Add breakeven line
-                    fig_mae.add_shape(type="line", line=dict(dash="dash", width=1, color="grey"), x0=mae_analysis['MAE'].min(), y0=0, x1=0, y1=0)
-                    st.plotly_chart(fig_mae, use_container_width=True)
-                    
-                    # Insight
-                    avg_mae_winners = mae_analysis[mae_analysis['Final PnL'] > 0]['MAE'].mean()
-                    st.caption(f"💡 Insight: Winning trades typically draw down to **${avg_mae_winners:.0f}** before recovering.")
-                else:
-                    st.info("Insufficient data for MAE analysis.")
+                if not snaps.empty:
+                    mae_data = snaps.groupby('trade_id')['pnl'].min().reset_index()
+                    mae_data.rename(columns={'pnl': 'MAE'}, inplace=True)
+                    mae_analysis = pd.merge(mae_data, df[['id', 'Name', 'Strategy', 'P&L', 'Status']], left_on='trade_id', right_on='id')
+                    mae_analysis.rename(columns={'P&L': 'Final PnL'}, inplace=True)
+                    if not mae_analysis.empty:
+                        fig_mae = px.scatter(mae_analysis, x='MAE', y='Final PnL', color='Strategy', hover_data=['Name'], title="MAE Distribution (Pain vs Gain)", labels={'MAE': 'Deepest Drawdown ($)', 'Final PnL': 'Final Result ($)'})
+                        fig_mae.add_shape(type="line", line=dict(dash="dash", width=1, color="grey"), x0=mae_analysis['MAE'].min(), y0=0, x1=0, y1=0)
+                        st.plotly_chart(fig_mae, use_container_width=True)
+                    else: st.info("Insufficient data for MAE.")
+                else: st.info("No snapshot data.")
 
-# 4. STRATEGIES CONFIG TAB
+# 4. STRATEGIES TAB
 with tab_strategies:
     st.markdown("### ⚙️ Strategy Configuration Manager")
-    
     conn = get_db_connection()
     try:
-        # Robust load
         strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        # Handle new column if user just migrated
-        if 'typical_debit' not in strat_df.columns:
-            strat_df['typical_debit'] = 5000.0 # Default
-            
         strat_df.columns = ['Name', 'Identifier', 'Target PnL', 'Target Days', 'Min Stability', 'Description', 'Typical Debit']
-        
-        edited_strats = st.data_editor(
-            strat_df, 
-            num_rows="dynamic", 
-            key="strat_editor_main",
-            use_container_width=True
-        )
-        
+        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True)
         c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
             if st.button("💾 Save Changes"):
@@ -1177,14 +1122,9 @@ with tab_strategies:
                 st.rerun()
     except Exception as e:
         st.error(f"Error: {e}")
-    finally:
-        conn.close()
+    finally: conn.close()
 
 # 5. RULES TAB
 with tab_rules:
-    st.markdown("""
-    # 📖 The Trader's Constitution
-    *Refined by Data Audit & Behavioral Analysis*
-    
-    (Placeholder - Add your Rules text here if needed)
-    """)
+    st.markdown("### 📖 The Trader's Constitution")
+    st.info("Rules text placeholder.")
