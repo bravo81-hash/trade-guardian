@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v136.1 (AI Visuals: Scatter Plots, Efficiency Bars & Strategy Filter)")
+st.info("✅ RUNNING VERSION: v137.0 (Layout Fix 40:60, Manual AI Parameters & Explanations)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -654,7 +654,7 @@ def load_snapshots():
     finally: conn.close()
 
 # --- INTELLIGENCE FUNCTIONS ---
-def generate_trade_predictions(active_df, history_df):
+def generate_trade_predictions(active_df, history_df, prob_low, prob_high):
     """
     Predictive Model: Finds K-Nearest Neighbors for active trades
     based on Delta, Theta, and Debit to forecast outcome.
@@ -690,8 +690,8 @@ def generate_trade_predictions(active_df, history_df):
         confidence = max(0, 100 - (avg_dist * 10)) # Simple heuristic
         
         rec = "HOLD"
-        if win_prob < 40: rec = "REDUCE/CLOSE"
-        elif win_prob > 75: rec = "PRESS WINNER"
+        if win_prob < prob_low: rec = "REDUCE/CLOSE"
+        elif win_prob > prob_high: rec = "PRESS WINNER"
         
         predictions.append({
             'Trade Name': row['Name'],
@@ -704,7 +704,7 @@ def generate_trade_predictions(active_df, history_df):
         
     return pd.DataFrame(predictions)
 
-def check_rot_and_efficiency(active_df, history_df):
+def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
     """
     Time-Decay Intelligence: Checks if active trades are 'rotting'
     (Capital efficiency dropping below historical average).
@@ -720,14 +720,14 @@ def check_rot_and_efficiency(active_df, history_df):
     for _, row in active_df.iterrows():
         strat = row['Strategy']
         days = row['Days Held']
-        # Only check trades that have been held for a while (> 10 days)
-        if days < 10: continue
+        # Only check trades that have been held for a while
+        if days < min_days: continue
         
         curr_eff = (row['P&L'] / days) / (row['Debit'] / 1000) if row['Debit'] > 0 else 0
         base = baseline_eff.get(strat, 0)
         
-        # Threshold: If current efficiency is < 50% of baseline
-        if base > 0 and curr_eff < (base * 0.5):
+        # Threshold: If current efficiency is < threshold of baseline
+        if base > 0 and curr_eff < (base * threshold_pct):
             rot_alerts.append({
                 'Trade': row['Name'],
                 'Strategy': strat,
@@ -740,27 +740,24 @@ def check_rot_and_efficiency(active_df, history_df):
             
     return pd.DataFrame(rot_alerts)
 
-def get_dynamic_targets(history_df):
+def get_dynamic_targets(history_df, percentile):
     """
-    Dynamic Exits: Calculates 75th Percentile MFE (Max Favorable Excursion)
+    Dynamic Exits: Calculates MFE (Max Favorable Excursion) based on percentile
     to find the 'Sweet Spot' for profit taking.
     """
     if history_df.empty: return {}
     
     # We need MFE data. Since trades table only has Final PnL, 
     # we approximate MFE using Final PnL of *Winning* trades for now.
-    # (Ideally this uses snapshot MFE, but this is a good proxy for 'Winning Potential')
     
     winners = history_df[history_df['P&L'] > 0]
     if winners.empty: return {}
     
     targets = {}
     for strat, grp in winners.groupby('Strategy'):
-        # Conservative Target: Median of Winners
-        # Aggressive Target: 75th Percentile
         targets[strat] = {
             'Median Win': grp['P&L'].median(),
-            'Optimal Exit (75%)': grp['P&L'].quantile(0.75)
+            'Optimal Exit': grp['P&L'].quantile(percentile)
         }
     return targets
 
@@ -1563,6 +1560,21 @@ with tab_ai:
     else:
         active_trades = df[df['Status'].isin(['Active', 'Missing'])].copy()
         
+        # --- NEW: CALIBRATION CONTROLS (v137.0) ---
+        with st.expander("⚙️ Calibration & Thresholds", expanded=False):
+            c_set1, c_set2, c_set3 = st.columns(3)
+            with c_set1:
+                st.markdown("**📉 Rot Detector**")
+                rot_threshold = st.slider("Efficiency Drop Threshold %", 10, 90, 50, help="Alert if current efficiency is X% of historical average.") / 100.0
+                min_days_rot = st.number_input("Min Days to Check", 5, 60, 10)
+            with c_set2:
+                st.markdown("**🔮 Prediction Logic**")
+                prob_high = st.slider("High Confidence Threshold", 60, 95, 75, help="Trades above this % get 'PRESS WINNER' label.")
+                prob_low = st.slider("Low Confidence Threshold", 10, 50, 40)
+            with c_set3:
+                st.markdown("**🎯 Exit Targets**")
+                exit_percentile = st.slider("Optimal Exit Percentile", 50, 95, 75, help="Percentile of historical max wins to target.") / 100.0
+
         # 1. Predictive Engine
         st.subheader("🔮 Win Probability Forecast (KNN Model)")
         
@@ -1576,10 +1588,10 @@ with tab_ai:
             ai_view_df = active_trades.copy()
 
         if not ai_view_df.empty:
-            preds = generate_trade_predictions(ai_view_df, expired_df)
+            preds = generate_trade_predictions(ai_view_df, expired_df, prob_low, prob_high)
             if not preds.empty:
-                # Visual 1: Scatter of Probability vs Reward
-                c_p1, c_p2 = st.columns([2, 1])
+                # Visual 1: Scatter of Probability vs Reward (Layout Fix: 40:60 Ratio)
+                c_p1, c_p2 = st.columns([2, 3]) 
                 with c_p1:
                     fig_pred = px.scatter(
                         preds, 
@@ -1589,7 +1601,7 @@ with tab_ai:
                         size="Confidence",
                         hover_data=["Trade Name", "Strategy"],
                         color_continuous_scale="RdYlGn",
-                        title="Risk/Reward Map: Probability vs. Expected Payoff"
+                        title="Risk/Reward Map"
                     )
                     # Add quadrants
                     fig_pred.add_vline(x=50, line_dash="dash", line_color="gray")
@@ -1600,9 +1612,10 @@ with tab_ai:
                     st.dataframe(
                         preds.style.format({
                             'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%"
-                        }).map(lambda v: 'color: green; font-weight: bold' if v > 60 else ('color: red; font-weight: bold' if v < 40 else 'color: orange'), subset=['Win Prob %']),
+                        }).map(lambda v: 'color: green; font-weight: bold' if v > prob_high else ('color: red; font-weight: bold' if v < prob_low else 'color: orange'), subset=['Win Prob %']),
                         use_container_width=True
                     )
+                    st.info(f"💡 **'PRESS WINNER'**: Based on Greeks, these active trades match historical winners with >{prob_high}% win rate. Consider holding.")
             else: st.info("Not enough closed trades with matching Greek profiles for prediction.")
         else: st.info("No active trades to forecast.")
         
@@ -1613,7 +1626,7 @@ with tab_ai:
         with c_ai_1:
             st.subheader("📉 Capital Rot Detector")
             if not active_trades.empty:
-                rot_df = check_rot_and_efficiency(active_trades, expired_df)
+                rot_df = check_rot_and_efficiency(active_trades, expired_df, rot_threshold, min_days_rot)
                 if not rot_df.empty:
                     # Visual 2: Efficiency Comparison
                     rot_viz = rot_df.copy()
@@ -1627,8 +1640,8 @@ with tab_ai:
                 else: st.success("✅ Capital is moving efficiently. No rot detected.")
         
         with c_ai_2:
-            st.subheader("🎯 Optimal Exit Zones")
-            targets = get_dynamic_targets(expired_df)
+            st.subheader(f"🎯 Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
+            targets = get_dynamic_targets(expired_df, exit_percentile)
             if targets:
                 # Visual 3: Distribution of Wins
                 winners = expired_df[expired_df['P&L'] > 0]
@@ -1639,9 +1652,9 @@ with tab_ai:
                 # Table below
                 target_data = []
                 for s, v in targets.items():
-                    target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit (75%)': v['Optimal Exit (75%)']})
+                    target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit': v['Optimal Exit']})
                 t_df = pd.DataFrame(target_data)
-                st.dataframe(t_df.style.format({'Median Win': '${:,.0f}', 'Optimal Exit (75%)': '${:,.0f}'}), use_container_width=True)
+                st.dataframe(t_df.style.format({'Median Win': '${:,.0f}', 'Optimal Exit': '${:,.0f}'}), use_container_width=True)
             else: st.info("Need more winning trades to calculate optimal zones.")
 
 with tab_rules:
@@ -1691,4 +1704,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v136.1 (AI Visuals: Scatter Plots, Efficiency Bars & Strategy Filter)")
+    st.caption("Allantis Trade Guardian v137.0 (Layout Fix 40:60, Manual AI Parameters & Explanations)")
