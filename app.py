@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v131.0 (Correlation Matrix & MAE Analysis Added)")
+st.info("✅ RUNNING VERSION: v131.1 (Fix: MAE KeyError & Strategy Correlation)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -648,9 +648,10 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
+        # UPDATED SQL: Added alias 't.id as trade_id' to fix grouping KeyErrors
         q = """
         SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
-               t.strategy, t.name, t.id, t.theta as initial_theta
+               t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
@@ -1557,12 +1558,15 @@ with tab_analytics:
         with an3:
             st.subheader("⚠️ Risk, Correlation & Decay")
             
-            # --- FEATURE 1: PORTFOLIO CORRELATION MATRIX ---
-            st.markdown("##### 🔗 Portfolio Correlation Matrix (Daily P&L Changes)")
+            # --- FEATURE 1: PORTFOLIO CORRELATION MATRIX (STRATEGY BASED) ---
+            st.markdown("##### 🔗 Strategy Correlation Matrix (Daily P&L Changes)")
             snaps = load_snapshots()
             if not snaps.empty:
-                # Pivot to get trade PnL side-by-side by date
-                pivoted = snaps.pivot_table(index='snapshot_date', columns='name', values='pnl', aggfunc='sum')
+                # Group by DATE and STRATEGY to get total PnL per strategy per day
+                strat_daily = snaps.groupby(['snapshot_date', 'strategy'])['pnl'].sum().reset_index()
+                
+                # Pivot: Index=Date, Columns=Strategy, Values=PnL
+                pivoted = strat_daily.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
                 
                 # Calculate Daily Change (Movement) instead of absolute PnL to find true correlation
                 # FillNA(0) assumes no change on days with no data, but ideally we want overlapping days.
@@ -1575,11 +1579,11 @@ with tab_analytics:
                                         text_auto=".2f", 
                                         aspect="auto", 
                                         color_continuous_scale="RdBu", 
-                                        title="Daily P&L Movement Correlation",
+                                        title="Strategy Correlation (Daily P&L Movement)",
                                         labels=dict(color="Correlation"))
                     st.plotly_chart(fig_corr, use_container_width=True)
                 else:
-                    st.info("Not enough concurrent active trades to calculate correlation.")
+                    st.info("Not enough concurrent strategies to calculate correlation.")
             else:
                 st.info("Insufficient snapshot data for correlation.")
 
@@ -1591,6 +1595,7 @@ with tab_analytics:
             
             if not snaps.empty and not df.empty:
                 # 1. Calculate MAE (Min PnL) per trade from snapshots
+                # UPDATED: Uses 'trade_id' now explicitly available in snaps dataframe
                 mae_df = snaps.groupby('trade_id')['pnl'].min().reset_index()
                 mae_df.rename(columns={'pnl': 'MAE'}, inplace=True)
                 
@@ -1616,8 +1621,6 @@ with tab_analytics:
                         # Add quadrants/reference lines
                         fig_mae_scat.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.5)
                         fig_mae_scat.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.5)
-                        # Add diagonal line (1:1 risk/reward boundary approx)
-                        # fig_mae_scat.add_shape(type="line", x0=closed_mae['MAE'].min(), y0=closed_mae['MAE'].min(), x1=0, y1=0, line=dict(color="gray", dash="dot"))
                         
                         st.plotly_chart(fig_mae_scat, use_container_width=True)
                     
@@ -1658,8 +1661,9 @@ with tab_analytics:
                         earliest = group.sort_values('days_held').iloc[0]
                         return earliest['theta'] if earliest['theta'] > 0 else group['theta'].max()
                     
-                    anchor_map = strat_snaps.groupby('id').apply(get_theta_anchor)
-                    strat_snaps['Theta_Anchor'] = strat_snaps['id'].map(anchor_map)
+                    # UPDATED: Use 'trade_id' instead of 'id' for grouping to match new SQL schema
+                    anchor_map = strat_snaps.groupby('trade_id').apply(get_theta_anchor)
+                    strat_snaps['Theta_Anchor'] = strat_snaps['trade_id'].map(anchor_map)
                     
                     strat_snaps['Theta_Expected'] = strat_snaps['Theta_Anchor'] * (1 - strat_snaps['days_held'] / 45)
                     
@@ -1673,8 +1677,9 @@ with tab_analytics:
                         d1, d2 = st.columns(2)
                         with d1:
                             fig_theta = go.Figure()
-                            for trade_id in strat_snaps['id'].unique():
-                                trade_data = strat_snaps[strat_snaps['id'] == trade_id].sort_values('days_held')
+                            # UPDATED: Use 'trade_id' for iteration
+                            for trade_id in strat_snaps['trade_id'].unique():
+                                trade_data = strat_snaps[strat_snaps['trade_id'] == trade_id].sort_values('days_held')
                                 fig_theta.add_trace(go.Scatter(
                                     x=trade_data['days_held'],
                                     y=trade_data['theta'],
@@ -1797,4 +1802,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v131.0 (Persistent Group Memory & Safe Reprocess)")
+    st.caption("Allantis Trade Guardian v131.1 (Persistent Group Memory & Safe Reprocess)")
