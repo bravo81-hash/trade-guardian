@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v132.0 (Quant Upgrade: MFE, Gamma Risk, Profit Factor)")
+st.info("✅ RUNNING VERSION: v132.1 (Fix: DataFrame Formatting & Gamma History Enabled)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -65,6 +65,7 @@ def init_db():
                     theta REAL,
                     delta REAL,
                     vega REAL,
+                    gamma REAL, 
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )''')
     
@@ -90,6 +91,7 @@ def init_db():
     add_column_safe('snapshots', 'theta', 'REAL')
     add_column_safe('snapshots', 'delta', 'REAL')
     add_column_safe('snapshots', 'vega', 'REAL')
+    add_column_safe('snapshots', 'gamma', 'REAL') # Added v132.1
     add_column_safe('strategy_config', 'typical_debit', 'REAL')
     add_column_safe('trades', 'original_group', 'TEXT')
     
@@ -468,13 +470,12 @@ def sync_data(file_list, file_type):
                     gamma_val = t['gamma'] if t['gamma'] else 0.0
                     
                     if not c.fetchone():
-                        # Note: Snapshots table might not have gamma column in DB schema yet, handled via logic or just stored in RAM analysis
-                        # Basic snapshots only store theta/delta/vega. For Gamma ratio we will use current active Gamma from trades table
-                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega) VALUES (?,?,?,?,?,?,?)",
-                                  (trade_id, today, t['pnl'], t['days_held'], theta_val, delta_val, vega_val))
+                        # Updated to include gamma
+                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega, gamma) VALUES (?,?,?,?,?,?,?,?)",
+                                  (trade_id, today, t['pnl'], t['days_held'], theta_val, delta_val, vega_val, gamma_val))
                     else:
-                        c.execute("UPDATE snapshots SET theta=?, delta=?, vega=? WHERE trade_id=? AND snapshot_date=?",
-                                  (theta_val, delta_val, vega_val, trade_id, today))
+                        c.execute("UPDATE snapshots SET theta=?, delta=?, vega=?, gamma=? WHERE trade_id=? AND snapshot_date=?",
+                                  (theta_val, delta_val, vega_val, gamma_val, trade_id, today))
             log.append(f"✅ {file.name}: {count_new} New, {count_update} Updated")
         except Exception as e:
             log.append(f"❌ {file.name}: Error - {str(e)}")
@@ -625,19 +626,35 @@ def load_snapshots():
     if not os.path.exists(DB_NAME): return pd.DataFrame()
     conn = get_db_connection()
     try:
+        # UPDATED: Including gamma in fetch
+        # Need to check if column exists first or handle error gracefully if older DB
+        # But 'add_column_safe' should have handled it.
         q = """
-        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
+        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, s.gamma,
                t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
         FROM snapshots s
         JOIN trades t ON s.trade_id = t.id
         """
-        df = pd.read_sql(q, conn)
+        try:
+            df = pd.read_sql(q, conn)
+        except:
+            # Fallback if gamma col missing in table despite migration attempt
+            q_fallback = """
+            SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
+                   t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
+            FROM snapshots s
+            JOIN trades t ON s.trade_id = t.id
+            """
+            df = pd.read_sql(q_fallback, conn)
+            df['gamma'] = 0.0
+
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
         df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
         df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
         df['theta'] = pd.to_numeric(df['theta'], errors='coerce').fillna(0)
         df['delta'] = pd.to_numeric(df['delta'], errors='coerce').fillna(0)
         df['vega'] = pd.to_numeric(df['vega'], errors='coerce').fillna(0)
+        df['gamma'] = pd.to_numeric(df['gamma'], errors='coerce').fillna(0)
         df['initial_theta'] = pd.to_numeric(df['initial_theta'], errors='coerce').fillna(0)
         return df
     except: return pd.DataFrame()
@@ -1077,7 +1094,25 @@ with tab_dash:
                     def highlight_trend(val): return 'color: green; font-weight: bold' if '🟢' in str(val) else 'color: red; font-weight: bold' if '🔴' in str(val) else ''
                     def style_total(row): return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
 
-                    st.dataframe(display_agg.style.format({'Total P&L': "${:,.0f}", 'Total Debit': "${:,.0f}", 'Net Theta': "{:,.0f}", 'Net Delta': "{:,.1f}", 'Yield/Day': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 'Θ Eff': "{:.2f}", 'Stability': "{:.2f}", 'Sleep Well (Vol)': "{:.1f}", 'Target': "{:.2f}%"}).map(highlight_trend, subset=['Trend']).apply(style_total, axis=1), use_container_width=True)
+                    # FIXED: Use lambda with safe_fmt to handle '-' or string values in numeric columns without crashing
+                    st.dataframe(
+                        display_agg.style
+                        .format({
+                            'Total P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
+                            'Total Debit': lambda x: safe_fmt(x, "${:,.0f}"), 
+                            'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
+                            'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
+                            'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
+                            'Ann. ROI': lambda x: safe_fmt(x, "{:.1f}%"), 
+                            'Θ Eff': lambda x: safe_fmt(x, "{:.2f}"),
+                            'Stability': lambda x: safe_fmt(x, "{:.2f}"),
+                            'Sleep Well (Vol)': lambda x: safe_fmt(x, "{:.1f}"),
+                            'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                        })
+                        .map(highlight_trend, subset=['Trend'])
+                        .apply(style_total, axis=1), 
+                        use_container_width=True
+                    )
 
                 cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
                 for i, strat_name in enumerate(sorted_strats):
@@ -1366,10 +1401,21 @@ with tab_analytics:
                 
                 # --- NEW: GAMMA RISK PROFILE ---
                 st.markdown("##### ☢️ Gamma Risk Profile")
-                # Filter for trades where we have both Gamma and Theta
-                if 'delta' in strat_snaps.columns: # Assuming delta exists, we proxy gamma risk via stability if gamma missing
-                     # Note: Snapshots currently don't have gamma column, so we infer from active
-                     pass
+                
+                if 'gamma' in strat_snaps.columns and strat_snaps['gamma'].abs().sum() > 0:
+                    # Calculate Gamma/Theta Ratio
+                    # We want absolute ratio: Risk per unit of income
+                    strat_snaps['Gamma/Theta'] = np.where(strat_snaps['theta'] != 0, 
+                                                          (strat_snaps['gamma'] * 100) / strat_snaps['theta'], 
+                                                          0)
+                    
+                    fig_risk = px.line(strat_snaps, x='days_held', y='Gamma/Theta', color='name',
+                                      title=f"Explosion Ratio (Gamma Risk per unit of Theta Income)",
+                                      labels={'days_held': 'Days Held', 'Gamma/Theta': 'Gamma% / Theta$ Ratio'})
+                    st.plotly_chart(fig_risk, use_container_width=True)
+                    st.info("ℹ️ **Interpretation:** A spike in this ratio means you are taking exponentially more risk for the same income. Valid for Income Strategies (130/160, M200).")
+                else:
+                    st.warning("⚠️ Gamma history unavailable. This chart will populate as you sync new daily data.")
 
                 # Standard Decay Analysis
                 def get_theta_anchor(group):
@@ -1467,4 +1513,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v132.0 (Quant Upgrade: MFE, Gamma Risk, Profit Factor)")
+    st.caption("Allantis Trade Guardian v132.1 (Fix: DataFrame Formatting & Gamma History Enabled)")
