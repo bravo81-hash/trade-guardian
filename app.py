@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v138.0 (Cumulative Fix: Restored Analytics & Strategies Stability)")
+st.info("✅ RUNNING VERSION: v139.0 (New Metrics: Sharpe Ratio & CAGR%)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -777,6 +777,64 @@ def find_similar_trades(current_trade, historical_df, top_n=3):
     similar['Similarity %'] = 100 * (1 - distances[similar_idx] / max_dist)
     return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
 
+def calculate_portfolio_metrics(trades_df, capital):
+    """
+    Calculates Sharpe and CAGR based on reconstructed daily PnL equity curve
+    from trade entry/exit dates.
+    """
+    if trades_df.empty or capital <= 0: return 0.0, 0.0
+    
+    # Prepare dates
+    trades = trades_df.copy()
+    trades['entry_date'] = pd.to_datetime(trades['entry_date'])
+    trades['exit_date'] = pd.to_datetime(trades['exit_date'])
+    
+    # Create a date range from first entry to last exit/today
+    start_date = trades['entry_date'].min()
+    end_date = max(trades['exit_date'].max(), pd.Timestamp.now())
+    date_range = pd.date_range(start=start_date, end=end_date)
+    
+    # Daily PnL Dictionary initialization
+    daily_pnl = {d.date(): 0.0 for d in date_range}
+    
+    for _, t in trades.iterrows():
+        if pd.isnull(t['exit_date']) or t['days_held'] <= 0: continue
+        
+        # Distribute PnL evenly over duration (Linear Attribution)
+        d_pnl = t['pnl'] / t['days_held']
+        
+        t_start = t['entry_date']
+        t_end = t['exit_date']
+        
+        # Add PnL to each day in range
+        curr = t_start
+        while curr <= t_end:
+             if curr.date() in daily_pnl:
+                 daily_pnl[curr.date()] += d_pnl
+             curr += pd.Timedelta(days=1)
+                 
+    # Convert to Series for calculation
+    pnl_series = pd.Series(daily_pnl)
+    
+    # Sharpe Ratio (Daily Returns)
+    # Daily Return = Daily PnL / Capital (Simplification using Fixed Capital Base)
+    daily_rets = pnl_series / capital
+    if daily_rets.std() == 0: sharpe = 0.0
+    else: sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(252)
+    
+    # CAGR
+    total_days = (end_date - start_date).days
+    if total_days < 1: total_days = 1
+    total_pnl = trades['pnl'].sum()
+    end_val = capital + total_pnl
+    
+    try:
+        cagr = ( (end_val / capital) ** (365 / total_days) ) - 1
+    except:
+        cagr = 0.0
+    
+    return sharpe, cagr * 100
+
 # --- INITIALIZE DB ---
 init_db()
 
@@ -852,7 +910,8 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
         st.rerun()
 
 st.sidebar.divider()
-st.sidebar.header("⚙️ Strategy Settings")
+st.sidebar.header("⚙️ Portfolio Settings")
+acct_capital = st.sidebar.number_input("Starting Capital ($)", min_value=1000, value=50000, step=1000, help="Used for CAGR and Sharpe Ratio calculations.")
 market_regime = st.sidebar.selectbox("Current Market Regime", ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"], index=0)
 regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in market_regime else 1.0
 
@@ -1356,22 +1415,22 @@ with tab_analytics:
                     avg_loss = abs(losses.mean()) if not losses.empty else 0
                     expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
                     
-                    # --- NEW: PROFIT FACTOR ---
+                    # --- PROFIT FACTOR ---
                     gross_profit = wins.sum() if not wins.empty else 0
                     gross_loss = abs(losses.sum()) if not losses.empty else 1 
                     profit_factor = gross_profit / gross_loss
                     
+                    # --- NEW METRICS: SHARPE & CAGR (v139.0) ---
+                    sharpe, cagr = calculate_portfolio_metrics(expired_df, acct_capital)
+                    
                     m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("💰 Banked Profit", f"${realized_pnl:,.0f}")
-                    m2.metric("📊 Win Rate", f"{win_rate:.1%}")
-                    m3.metric("⚖️ Profit Factor", f"{profit_factor:.2f}", help="Gross Win / Gross Loss. > 1.5 is good. > 2.0 is elite.")
-                    m4.metric("🎲 Expectancy", f"${expectancy:,.0f}", help="Expected $ per trade")
+                    m2.metric("⚖️ Profit Factor", f"{profit_factor:.2f}")
+                    m3.metric("📈 CAGR", f"{cagr:.1f}%")
+                    m4.metric("📊 Sharpe Ratio", f"{sharpe:.2f}")
                     m5.metric("🔮 Total Projected", f"${realized_pnl+floating_pnl:,.0f}")
                 else:
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("💰 Banked Profit", f"${realized_pnl:,.0f}")
-                    m2.metric("📄 Floating PnL", f"${floating_pnl:,.0f}", delta_color="normal")
-                    m3.metric("🔮 Total Projected", f"${realized_pnl+floating_pnl:,.0f}")
+                    st.info("Need closed trades for deep dive.")
             except Exception as e: st.error(f"Error calculating metrics: {e}")
             st.divider()
 
@@ -1387,8 +1446,14 @@ with tab_analytics:
             perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
             perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
             
-            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI']].copy()
-            perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']
+            # Estimate Trade Sharpe (Mean ROI / Std ROI * sqrt(Trades))
+            # Group by strategy to get StdDev of ROI
+            std_roi = expired_df.groupby('Strategy')['ROI'].std().reset_index(name='Std_ROI')
+            perf_agg = perf_agg.merge(std_roi, on='Strategy', how='left').fillna(1)
+            perf_agg['Sharpe'] = (perf_agg['ROI'] / perf_agg['Std_ROI']) * np.sqrt(perf_agg['id'])
+            
+            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI', 'Sharpe']].copy()
+            perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI', 'Sharpe']
             
             total_pnl = perf_display['Total P&L'].sum()
             total_vol = perf_display['Total Volume'].sum()
@@ -1403,11 +1468,11 @@ with tab_analytics:
             total_row = pd.DataFrame({
                 'Strategy': ['TOTAL'], 'Trades': [total_trades], 'Win Rate': [total_win_rate],
                 'Total P&L': [total_pnl], 'Total Volume': [total_vol], 'Simple Return %': [total_simple_ret],
-                'Ann. TWR %': [total_twr], 'Avg Trade ROI': [avg_trade_roi]
+                'Ann. TWR %': [total_twr], 'Avg Trade ROI': [avg_trade_roi], 'Sharpe': [0]
             })
             perf_display = pd.concat([perf_display, total_row], ignore_index=True)
 
-            st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
+            st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%", 'Sharpe': "{:.2f}"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI', 'Sharpe']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
             
             # --- NEW: CAPITAL EFFICIENCY CHART (v134.0) ---
             st.subheader("🚀 Efficiency Showdown: Active vs Historical")
@@ -1787,4 +1852,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v138.0 (Cumulative Fix: Restored Analytics & Strategies Stability)")
+    st.caption("Allantis Trade Guardian v139.0 (New Metrics: Sharpe Ratio & CAGR%)")
