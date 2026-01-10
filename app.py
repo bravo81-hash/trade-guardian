@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v139.0 (New Metrics: Sharpe Ratio & CAGR%)")
+st.info("✅ RUNNING VERSION: v140.0 (Fix: Metrics Error & New ROI% Columns Added)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -786,25 +786,25 @@ def calculate_portfolio_metrics(trades_df, capital):
     
     # Prepare dates
     trades = trades_df.copy()
-    trades['entry_date'] = pd.to_datetime(trades['entry_date'])
-    trades['exit_date'] = pd.to_datetime(trades['exit_date'])
+    trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
+    trades['Exit Date'] = pd.to_datetime(trades['Exit Date'])
     
     # Create a date range from first entry to last exit/today
-    start_date = trades['entry_date'].min()
-    end_date = max(trades['exit_date'].max(), pd.Timestamp.now())
+    start_date = trades['Entry Date'].min()
+    end_date = max(trades['Exit Date'].max(), pd.Timestamp.now())
     date_range = pd.date_range(start=start_date, end=end_date)
     
     # Daily PnL Dictionary initialization
     daily_pnl = {d.date(): 0.0 for d in date_range}
     
     for _, t in trades.iterrows():
-        if pd.isnull(t['exit_date']) or t['days_held'] <= 0: continue
+        if pd.isnull(t['Exit Date']) or t['Days Held'] <= 0: continue
         
         # Distribute PnL evenly over duration (Linear Attribution)
-        d_pnl = t['pnl'] / t['days_held']
+        d_pnl = t['P&L'] / t['Days Held']
         
-        t_start = t['entry_date']
-        t_end = t['exit_date']
+        t_start = t['Entry Date']
+        t_end = t['Exit Date']
         
         # Add PnL to each day in range
         curr = t_start
@@ -825,7 +825,7 @@ def calculate_portfolio_metrics(trades_df, capital):
     # CAGR
     total_days = (end_date - start_date).days
     if total_days < 1: total_days = 1
-    total_pnl = trades['pnl'].sum()
+    total_pnl = trades['P&L'].sum()
     end_val = capital + total_pnl
     
     try:
@@ -1193,7 +1193,9 @@ with tab_dash:
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
                 strategy_options = sorted(list(dynamic_benchmarks.keys())) + ["Other"]
-                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
+                
+                # Updated Columns to include ROI and Ann. ROI
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'ROI', 'Ann. ROI', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, "Name": st.column_config.TextColumn("Trade Name", disabled=True),
                     "Link": st.column_config.LinkColumn("OS Link", display_text="Open 🔗"),
@@ -1204,6 +1206,8 @@ with tab_dash:
                     "Gauge": st.column_config.TextColumn("Tank / Recov"),
                     "Stability": st.column_config.NumberColumn("Stability", format="%.2f", disabled=True),
                     "Theta Eff.": st.column_config.NumberColumn("Θ Eff", format="%.2f", disabled=True),
+                    "ROI": st.column_config.NumberColumn("ROI %", format="%.1f%%", disabled=True),
+                    "Ann. ROI": st.column_config.NumberColumn("Ann. ROI %", format="%.1f%%", disabled=True),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
                     "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
                     "lot_size": st.column_config.NumberColumn("Lots", min_value=1, step=1),
@@ -1434,7 +1438,27 @@ with tab_analytics:
             except Exception as e: st.error(f"Error calculating metrics: {e}")
             st.divider()
 
+        # --- CLOSED TRADE HISTORY ---
         if not expired_df.empty:
+            with st.expander("📜 Detailed Trade History (Closed Trades)", expanded=False):
+                # Columns: Date In, Date Out, Days, Name, Strategy, Debit, PnL, ROI%, Ann ROI%
+                hist_cols = ['Entry Date', 'Exit Date', 'Days Held', 'Name', 'Strategy', 'Debit', 'P&L', 'ROI', 'Ann. ROI']
+                
+                # Format dates
+                hist_view = expired_df[hist_cols].copy()
+                hist_view['Entry Date'] = hist_view['Entry Date'].dt.date
+                hist_view['Exit Date'] = hist_view['Exit Date'].dt.date
+                
+                st.dataframe(
+                    hist_view.style
+                    .format({
+                        'Debit': "${:,.0f}", 'P&L': "${:,.0f}", 
+                        'ROI': "{:.2f}%", 'Ann. ROI': "{:.2f}%"
+                    })
+                    .map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['P&L', 'ROI', 'Ann. ROI']),
+                    use_container_width=True
+                )
+
             st.markdown("### 🏆 Closed Trade Performance")
             expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
             perf_agg = expired_df.groupby('Strategy').agg({
@@ -1852,4 +1876,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v139.0 (New Metrics: Sharpe Ratio & CAGR%)")
+    st.caption("Allantis Trade Guardian v140.0 (Fix: Metrics Error & New ROI% Columns Added)")
