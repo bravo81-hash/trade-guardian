@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v140.0 (Fix: Metrics Error & New ROI% Columns Added)")
+st.info("✅ RUNNING VERSION: v140.1 (Fix: Smart Portfolio Status Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1129,9 +1129,17 @@ with tab_dash:
             total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
             avg_age = active_df['Days Held'].mean()
             
-            health_status = "🟢 HEALTHY" if allocation_score > 80 and total_delta_pct < 2 and avg_age < 25 else \
-                            "🟡 REVIEW" if allocation_score > 60 and total_delta_pct < 5 and avg_age < 35 else \
-                            "🔴 CRITICAL"
+            # --- UPDATED LOGIC v140.1 ---
+            # Prioritize Risk (Delta/Age) over Allocation. 
+            # Bad allocation with good risk = Review (Yellow), not Critical (Red).
+            if total_delta_pct > 6 or avg_age > 45:
+                health_status = "🔴 CRITICAL"  # High Risk (Greeks/Time)
+            elif allocation_score < 40:
+                health_status = "🔴 CRITICAL"  # Severely Broken Allocation
+            elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25:
+                health_status = "🟡 REVIEW"    # Suboptimal but not dangerous
+            else:
+                health_status = "🟢 HEALTHY"   # Perfect
             
             if "HEALTHY" in health_status:
                 st.success(f"**Portfolio Status: {health_status}** (Alloc: {allocation_score:.0f}, Delta: {total_delta_pct:.1f}%, Age: {avg_age:.0f}d)")
@@ -1876,4 +1884,4 @@ with tab_rules:
     4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
     """)
     st.divider()
-    st.caption("Allantis Trade Guardian v140.0 (Fix: Metrics Error & New ROI% Columns Added)")
+    st.caption("Allantis Trade Guardian v140.1 (Fix: Smart Portfolio Status Logic)")
