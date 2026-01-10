@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v144.0 (Audited: Exponential Decay, True Sharpe & Concentration Risk)")
+st.info("✅ RUNNING VERSION: v145.0 (Fix: Strategies Tab + New: Rolling Correlation & Max Drawdown)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -874,6 +874,87 @@ def check_concentration_risk(active_df, total_equity, threshold=0.15):
             })
     return pd.DataFrame(warnings)
 
+# --- v145.0 NEW FUNCTIONS ---
+
+def calculate_max_drawdown(trades_df, initial_capital):
+    """
+    Calculates Max Drawdown % and Peak-to-Trough amount
+    using reconstructed daily equity curve.
+    """
+    if trades_df.empty or initial_capital <= 0: 
+        return {'Max Drawdown %': 0.0, 'Max DD Date': None, 'Current DD %': 0.0}
+
+    # 1. Reconstruct Daily PnL (Same logic as Sharpe)
+    trades = trades_df.copy()
+    trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
+    trades['Exit Date'] = pd.to_datetime(trades['Exit Date'])
+    
+    start_date = trades['Entry Date'].min()
+    end_date = max(trades['Exit Date'].max(), pd.Timestamp.now())
+    date_range = pd.date_range(start=start_date, end=end_date)
+    daily_pnl_dict = {d.date(): 0.0 for d in date_range}
+    
+    for _, t in trades.iterrows():
+        if pd.isnull(t['Exit Date']) or t['Days Held'] <= 0: continue
+        d_pnl = t['P&L'] / t['Days Held']
+        curr = t['Entry Date']
+        while curr <= t['Exit Date']:
+             if curr.date() in daily_pnl_dict:
+                 daily_pnl_dict[curr.date()] += d_pnl
+             curr += pd.Timedelta(days=1)
+    
+    # 2. Build Equity Curve
+    equity = initial_capital
+    equity_curve = []
+    dates = []
+    for d in date_range:
+        day_pnl = daily_pnl_dict.get(d.date(), 0)
+        equity += day_pnl
+        equity_curve.append(equity)
+        dates.append(d.date())
+        
+    equity_series = pd.Series(equity_curve, index=pd.to_datetime(dates))
+    
+    # 3. Calculate Drawdown
+    running_max = equity_series.cummax()
+    drawdown = (equity_series - running_max) / running_max
+    
+    max_dd = drawdown.min()
+    current_dd = drawdown.iloc[-1]
+    
+    return {
+        'Max Drawdown %': max_dd * 100,
+        'Current DD %': current_dd * 100
+    }
+
+def rolling_correlation_matrix(snaps, window_days=30):
+    """
+    Calculates 30-day rolling correlation between strategies.
+    Returns a figure ready for plotly.
+    """
+    if snaps.empty: return None
+    
+    # Pivot: Date x Strategy -> PnL
+    strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
+    
+    # Need enough data points
+    if len(strat_daily) < window_days: return None
+    
+    # Calculate Rolling Correlation (Returns a MultiIndex: Date, Strategy -> Correlation with others)
+    # We want to visualize this. Animating a heatmap is complex in simple Streamlit.
+    # Simplified approach: Show correlation matrix of LAST 30 DAYS vs ALL TIME
+    
+    last_30 = strat_daily.tail(30)
+    corr_30 = last_30.corr()
+    
+    fig = px.imshow(corr_30, 
+                    text_auto=".2f", 
+                    aspect="auto", 
+                    color_continuous_scale="RdBu", 
+                    title="Strategy Correlation (Last 30 Days)",
+                    labels=dict(color="Correlation"))
+    return fig
+
 def generate_adaptive_rulebook_text(history_df, strategies):
     """
     Generates dynamic markdown for the Rulebook based on historical data.
@@ -1426,6 +1507,58 @@ with tab_dash:
                         else: st.info("No unclassified trades.")
     else: st.info("👋 Database is empty. Sync your first file.")
 
+with tab_strategies:
+    st.markdown("### ⚙️ Strategy Configuration Manager")
+    conn = get_db_connection()
+    try:
+        # Robust fetch to handle potential extra/missing columns gracefully
+        # First ensure we get the data
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        
+        # Expected columns map
+        expected_cols = {
+            'name': 'Name',
+            'identifier': 'Identifier',
+            'target_pnl': 'Target PnL',
+            'target_days': 'Target Days',
+            'min_stability': 'Min Stability',
+            'description': 'Description',
+            'typical_debit': 'Typical Debit'
+        }
+        
+        # Ensure all expected columns exist in DF
+        for db_col in expected_cols.keys():
+            if db_col not in strat_df.columns:
+                strat_df[db_col] = 0.0 if 'pnl' in db_col or 'debit' in db_col else (0 if 'days' in db_col else "")
+        
+        # Select and rename
+        strat_df = strat_df[list(expected_cols.keys())].rename(columns=expected_cols)
+        
+        # Render Editor
+        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name"),
+                "Identifier": st.column_config.TextColumn("Keyword Match"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d"),
+                "Description": st.column_config.TextColumn("Notes")
+            })
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button("💾 Save Changes"):
+                if update_strategy_config(edited_strats): st.success("Configuration Saved!"); st.cache_data.clear(); st.rerun()
+        with c2:
+            if st.button("🔄 Reprocess 'Other' Trades"):
+                count = reprocess_other_trades(); st.success(f"Reprocessed {count} trades!"); st.cache_data.clear(); st.rerun()
+        with c3:
+            if st.button("🧨 Reset to Defaults", type="secondary"): seed_default_strategies(force_reset=True); st.cache_data.clear(); st.rerun()
+    except Exception as e: st.error(f"Error loading strategies: {e}")
+    finally: conn.close()
+    
+    st.info("💡 **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
+
 with tab_analytics:
     an_overview, an_trends, an_risk, an_decay, an_rolls = st.tabs(["📊 Overview", "📈 Trends & Seasonality", "⚠️ Risk & Excursion", "🧬 Decay & DNA", "🔄 Rolls"])
 
@@ -1493,6 +1626,18 @@ with tab_analytics:
                         st.metric("Profit", f"${smsf_trades['P&L'].sum():,.0f}")
                         st.metric("CAGR", f"{c_smsf:.1f}%")
                         st.metric("Sharpe", f"{s_smsf:.2f}")
+
+                    # --- v145.0: MAX DRAWDOWN METRICS ---
+                    st.divider()
+                    st.markdown("**📉 Risk Metrics (Max Drawdown)**")
+                    mdd_total = calculate_max_drawdown(expired_df, total_cap)
+                    mdd_prime = calculate_max_drawdown(prime_trades, prime_cap)
+                    mdd_smsf = calculate_max_drawdown(smsf_trades, smsf_cap)
+                    
+                    r1, r2, r3 = st.columns(3)
+                    with r1: st.metric("Total Max DD", f"{mdd_total['Max Drawdown %']:.1f}%", help="Largest peak-to-trough decline in total equity.")
+                    with r2: st.metric("Prime Max DD", f"{mdd_prime['Max Drawdown %']:.1f}%")
+                    with r3: st.metric("SMSF Max DD", f"{mdd_smsf['Max Drawdown %']:.1f}%")
 
                 else:
                     st.info("Need closed trades for deep dive.")
@@ -1700,14 +1845,13 @@ with tab_analytics:
             st.subheader("Strategy Correlation (Daily P&L)")
             snaps = load_snapshots()
             if not snaps.empty:
-                strat_daily = snaps.groupby(['snapshot_date', 'strategy'])['pnl'].sum().reset_index()
-                pivoted = strat_daily.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
-                daily_changes = pivoted.diff().fillna(0)
-                if len(daily_changes.columns) > 1:
-                    corr_matrix = daily_changes.corr()
-                    fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", title="Strategy Correlation (Daily P&L Movement)", labels=dict(color="Correlation"))
-                    st.plotly_chart(fig_corr, use_container_width=True)
-                else: st.info("Not enough concurrent strategies to calculate correlation.")
+                # --- v145.0 NEW: ROLLING CORRELATION HEATMAP ---
+                fig_rolling_corr = rolling_correlation_matrix(snaps)
+                if fig_rolling_corr:
+                    st.plotly_chart(fig_rolling_corr, use_container_width=True)
+                    st.caption("Heatmap shows correlations of strategy P&L over the last 30 days. Red = Strategies moving together (Risk). Blue = Diversified.")
+                else:
+                    st.info("Insufficient snapshot history for correlation analysis (need > 30 days).")
             else: st.info("Insufficient snapshot data for correlation.")
 
         with r_mae:
@@ -1942,4 +2086,4 @@ with tab_rules:
     st.markdown(adaptive_content)
     
     st.divider()
-    st.caption("Allantis Trade Guardian v144.0 (Audited: Exponential Decay, True Sharpe & Concentration Risk)")
+    st.caption("Allantis Trade Guardian v145.0 (Fix: Strategies Tab + New: Rolling Correlation & Max Drawdown)")
