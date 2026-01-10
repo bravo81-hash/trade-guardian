@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v141.0 (Multi-Account Logic + Self-Writing Adaptive Rulebook)")
+st.info("✅ RUNNING VERSION: v142.0 (Fix: Lot Parsing from Name, Target Cost Per Lot, Better Visuals)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -296,7 +296,15 @@ def parse_optionstrat_file(file, file_type, config_dict):
             strat_config = config_dict.get(strat, {})
             typical_debit = strat_config.get('debit_per_lot', 5000)
             
-            lot_size = int(round(debit / typical_debit))
+            # --- UPDATED LOT SIZE PARSING (v142) ---
+            # Priority 1: Check Trade Name (e.g. "M200 2LOTS")
+            lot_match = re.search(r'(\d+)\s*(?:LOT|L\b)', name, re.IGNORECASE)
+            if lot_match:
+                lot_size = int(lot_match.group(1))
+            else:
+                # Priority 2: Fallback to Debit Estimate
+                lot_size = int(round(debit / typical_debit))
+            
             if lot_size < 1: lot_size = 1
 
             put_pnl = 0.0
@@ -584,7 +592,9 @@ def load_data():
         df['lot_size'] = pd.to_numeric(df['lot_size'], errors='coerce').fillna(1).astype(int)
         df['lot_size'] = df['lot_size'].apply(lambda x: 1 if x < 1 else x)
         
-        df['Debit/Lot'] = df['Debit'] / df['lot_size']
+        # --- NEW v142: Ensure Debit/Lot is always calculated ---
+        df['Debit/Lot'] = np.where(df['lot_size'] > 0, df['Debit'] / df['lot_size'], df['Debit'])
+
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         df['Ann. ROI'] = df['Daily Yield %'] * 365
@@ -867,8 +877,9 @@ def generate_adaptive_rulebook_text(history_df, strategies):
         
         # 3. Pricing (Debit)
         if not winners.empty:
-            avg_cost = winners['Debit'].mean()
-            text += f"* **💰 Target Cost:** ${avg_cost:,.0f} (Avg Winner Debit)\n"
+            # FIXED v142: Use Debit/Lot for rulebook target price
+            avg_cost = winners['Debit/Lot'].mean()
+            text += f"* **💰 Target Cost:** ${avg_cost:,.0f} (Avg Winner Debit per Lot)\n"
             
         # 4. Stop/Loss behavior (if any losses)
         losers = strat_df[strat_df['P&L'] < 0]
@@ -1491,7 +1502,7 @@ with tab_analytics:
                         st.markdown("**🏦 PRIME (Income)**")
                         st.metric("Profit", f"${prime_trades['P&L'].sum():,.0f}")
                         st.metric("CAGR", f"{c_prime:.1f}%")
-                        st.metric("Sharpe", f"{s_prime:.2f}")
+                        st.metric("Sharpe", f"{s_prime:.2f}", help="Daily Sharpe Ratio (Annualized). >1.0 is Good, >2.0 is Excellent. Calculated by reconstructing daily equity curve from trade start/end dates.")
 
                     with col3:
                         st.markdown("**🛡️ SMSF (Wealth)**")
@@ -1602,12 +1613,33 @@ with tab_analytics:
                 st.info("Insufficient data for comparison.")
 
             st.subheader("💰 Profit Anatomy: Call vs Put Contribution")
-            viz_df = expired_df.sort_values('Exit Date')
-            fig_anatomy = go.Figure()
-            fig_anatomy.add_trace(go.Bar(x=viz_df['Name'], y=viz_df['Put P&L'], name='Put Side', marker_color='#EF553B'))
-            fig_anatomy.add_trace(go.Bar(x=viz_df['Name'], y=viz_df['Call P&L'], name='Call Side', marker_color='#00CC96'))
-            fig_anatomy.update_layout(barmode='relative', title='PnL Breakdown per Trade (Red=Puts, Green=Calls)', xaxis_tickangle=-45)
-            st.plotly_chart(fig_anatomy, use_container_width=True)
+            
+            # 1. AGGREGATED VIEW (Strategy Level)
+            strat_anatomy = expired_df.groupby('Strategy')[['Put P&L', 'Call P&L']].mean().reset_index()
+            fig_strat_ana = go.Figure()
+            fig_strat_ana.add_trace(go.Bar(
+                y=strat_anatomy['Strategy'], x=strat_anatomy['Put P&L'], 
+                name='Avg Put Profit', orientation='h', marker_color='#EF553B'
+            ))
+            fig_strat_ana.add_trace(go.Bar(
+                y=strat_anatomy['Strategy'], x=strat_anatomy['Call P&L'], 
+                name='Avg Call Profit', orientation='h', marker_color='#00CC96'
+            ))
+            fig_strat_ana.update_layout(barmode='relative', title="Average Profit Sources per Strategy (Stacked)", xaxis_title="Average P&L ($)")
+            
+            # 2. SCATTER VIEW (Trade Level)
+            fig_scatter_ana = px.scatter(
+                expired_df, x="Call P&L", y="Put P&L", color="Strategy",
+                hover_data=["Name"], title="The Balance Beam: Call PnL vs Put PnL",
+                labels={"Call P&L": "Call Side Profit ($)", "Put P&L": "Put Side Profit ($)"}
+            )
+            # Add quadrants
+            fig_scatter_ana.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_scatter_ana.add_vline(x=0, line_dash="dash", line_color="gray")
+
+            c_ana1, c_ana2 = st.columns(2)
+            with c_ana1: st.plotly_chart(fig_strat_ana, use_container_width=True)
+            with c_ana2: st.plotly_chart(fig_scatter_ana, use_container_width=True)
 
     with an_trends:
         col1, col2 = st.columns(2)
@@ -1904,4 +1936,4 @@ with tab_rules:
     st.markdown(adaptive_content)
     
     st.divider()
-    st.caption("Allantis Trade Guardian v141.0 (Multi-Account Logic + Self-Writing Adaptive Rulebook)")
+    st.caption("Allantis Trade Guardian v142.0 (Fix: Lot Parsing from Name, Target Cost Per Lot, Better Visuals)")
