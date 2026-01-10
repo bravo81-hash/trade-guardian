@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.0 (Expert Audit: Theta Decay Fix, Kelly Criterion & Heatmap Added)")
+st.info("🚀 RUNNING VERSION: v146.1 (Restored v146.0 Layout + Fixed Startup Crash)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -637,10 +637,22 @@ def reprocess_other_trades():
 # --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
-    if not os.path.exists(DB_NAME): return pd.DataFrame()
+    empty_schema = pd.DataFrame(columns=[
+        'id', 'Name', 'Strategy', 'Status', 'P&L', 'Debit', 
+        'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 
+        'Entry Date', 'Exit Date', 'Notes', 'Tags', 
+        'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link',
+        'lot_size', 'Debit/Lot', 'ROI', 'Daily Yield %', 
+        'Ann. ROI', 'Theta Pot.', 'Theta Eff.', 
+        'Theta/Cap %', 'Ticker', 'Stability', 'Grade', 'Reason', 'P&L Vol'
+    ])
+    
+    if not os.path.exists(DB_NAME): return empty_schema
     conn = get_db_connection()
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
+        if df.empty: return empty_schema
+        
         snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
         if not snaps.empty:
             vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
@@ -648,7 +660,7 @@ def load_data():
             df = df.merge(vol_df, left_on='id', right_on='trade_id', how='left')
             df['P&L Vol'] = df['P&L Vol'].fillna(0)
         else: df['P&L Vol'] = 0.0
-    except Exception as e: return pd.DataFrame()
+    except Exception as e: return empty_schema
     finally: conn.close()
     
     if not df.empty:
@@ -1228,7 +1240,7 @@ dynamic_benchmarks = load_strategy_config()
 if not dynamic_benchmarks: dynamic_benchmarks = BASE_CONFIG.copy()
 
 expired_df = pd.DataFrame() 
-if not df.empty:
+if not df.empty and 'Status' in df.columns:
     expired_df = df[df['Status'] == 'Expired']
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
@@ -1243,6 +1255,7 @@ if not df.empty:
             dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
+# v136: Added " AI & Insights" as a separate main tab
 tab_dash, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " Analytics", " AI & Insights", " Strategies", " Rules"])
 
 # 1. ACTIVE DASHBOARD
@@ -1316,7 +1329,7 @@ with tab_dash:
                 with res_c2: st.metric("Daily Cost", f"${pf_theta:.0f}")
                 with res_c3: st.info(f"Need {move_needed:.1f}% IV move to break even")
 
-    if not df.empty:
+    if not df.empty and 'Status' in df.columns:
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         if active_df.empty:
             st.info(" No active trades.")
@@ -1330,10 +1343,14 @@ with tab_dash:
             avg_age = active_df['Days Held'].mean()
             
             # --- UPDATED LOGIC v140.1 ---
-            health_status = "HEALTHY"
-            if total_delta_pct > 6 or avg_age > 45: health_status = "CRITICAL"
-            elif allocation_score < 40: health_status = "CRITICAL"
-            elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25: health_status = "REVIEW"
+            if total_delta_pct > 6 or avg_age > 45:
+                health_status = " CRITICAL"  # High Risk (Greeks/Time)
+            elif allocation_score < 40:
+                health_status = " CRITICAL"  # Severely Broken Allocation
+            elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25:
+                health_status = " REVIEW"    # Suboptimal but not dangerous
+            else:
+                health_status = " HEALTHY"   # Perfect
             
             # --- v146.0: SIMPLIFIED DASHBOARD (Progressive Disclosure) ---
             with st.container():
@@ -1343,7 +1360,7 @@ with tab_dash:
                 c1, c2, c3, c4 = st.columns(4)
                 
                 # Dynamic Icon for Health
-                h_icon = "🟢" if health_status == "HEALTHY" else ("🔴" if health_status == "CRITICAL" else "🟡")
+                h_icon = "🟢" if "HEALTHY" in health_status else ("🔴" if "CRITICAL" in health_status else "🟡")
                 c1.metric("Portfolio Health", f"{h_icon} {health_status}")
                 
                 c2.metric("Daily Income", f"${tot_theta:,.0f}")
@@ -1616,7 +1633,7 @@ with tab_analytics:
     an_overview, an_trends, an_risk, an_decay, an_rolls = st.tabs([" Overview", " Trends & Seasonality", " Risk & Excursion", " Decay & DNA", " Rolls"])
 
     with an_overview:
-        if not df.empty:
+        if not df.empty and 'Status' in df.columns:
             active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
             if not active_df.empty:
                 st.markdown("###  Portfolio Health Check (Breakdown)")
@@ -1638,7 +1655,7 @@ with tab_analytics:
                 health_col3.metric(" Portfolio Age", age_health, delta=f"{avg_age:.0f} days avg", delta_color="inverse")
                 
                 # --- v144.0: CONCENTRATION CHECK ---
-                conc_warnings = check_concentration_risk(active_df, total_cap) 
+                conc_warnings = check_concentration_risk(active_df, total_cap) # Assuming total_cap is blended portfolio equity
                 if not conc_warnings.empty:
                     st.warning(" **Position Sizing Alert:** The following trades exceed 15% concentration.")
                     st.dataframe(conc_warnings, use_container_width=True)
@@ -1672,7 +1689,7 @@ with tab_analytics:
                         st.markdown("** PRIME (Income)**")
                         st.metric("Profit", f"${prime_trades['P&L'].sum():,.0f}")
                         st.metric("CAGR", f"{c_prime:.1f}%")
-                        st.metric("Sharpe", f"{s_prime:.2f}", help="Daily Sharpe Ratio (Annualized). >1.0 is Good, >2.0 is Excellent.")
+                        st.metric("Sharpe", f"{s_prime:.2f}", help="Daily Sharpe Ratio (Annualized). >1.0 is Good, >2.0 is Excellent. Calculated by reconstructing daily equity curve from trade start/end dates.")
 
                     with col3:
                         st.markdown("** SMSF (Wealth)**")
@@ -1827,6 +1844,7 @@ with tab_analytics:
                     x=trade_subset['Name'], y=trade_subset['Put P&L'],
                     name='Put PnL', marker_color='#EF553B'
                 ))
+                # FIX: Use correct column name 'Call P&L' from DataFrame, not 'Call PnL'
                 fig_trade_ana.add_trace(go.Bar(
                     x=trade_subset['Name'], y=trade_subset['Call P&L'],
                     name='Call PnL', marker_color='#00CC96'
@@ -1846,24 +1864,28 @@ with tab_analytics:
         col1, col2 = st.columns(2)
         with col1:
             st.subheader(" Root Cause Analysis")
-            expired_wins = df[(df['Status'] == 'Expired') & (df['P&L'] > 0)]
-            active_trades = df[df['Status'] == 'Active']
-            if not expired_wins.empty and not active_trades.empty:
-                avg_win_debit = expired_wins.groupby('Strategy')['Debit/Lot'].mean().reset_index()
-                avg_act_debit = active_trades.groupby('Strategy')['Debit/Lot'].mean().reset_index()
-                avg_win_debit['Type'] = 'Winning History'; avg_act_debit['Type'] = 'Active (Current)'
-                comp_df = pd.concat([avg_win_debit, avg_act_debit])
-                fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group', title="Entry Price per Lot Comparison", color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
-                st.plotly_chart(fig_price, use_container_width=True)
-            else: st.info("Need more data.")
+            if not df.empty and 'Status' in df.columns:
+                expired_wins = df[(df['Status'] == 'Expired') & (df['P&L'] > 0)]
+                active_trades = df[df['Status'] == 'Active']
+                if not expired_wins.empty and not active_trades.empty:
+                    avg_win_debit = expired_wins.groupby('Strategy')['Debit/Lot'].mean().reset_index()
+                    avg_act_debit = active_trades.groupby('Strategy')['Debit/Lot'].mean().reset_index()
+                    avg_win_debit['Type'] = 'Winning History'; avg_act_debit['Type'] = 'Active (Current)'
+                    comp_df = pd.concat([avg_win_debit, avg_act_debit])
+                    fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group', title="Entry Price per Lot Comparison", color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
+                    st.plotly_chart(fig_price, use_container_width=True)
+                else: st.info("Need more data.")
+            else: st.info("No data available.")
         with col2:
             st.subheader(" Profit Drivers (Puts vs Calls)")
-            expired = df[df['Status'] == 'Expired'].copy()
-            if not expired.empty:
-                leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
-                fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], title="Profit Source Split", color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
-                st.plotly_chart(fig_legs, use_container_width=True)
-            else: st.info("No closed trades.")
+            if not df.empty and 'Status' in df.columns:
+                expired = df[df['Status'] == 'Expired'].copy()
+                if not expired.empty:
+                    leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
+                    fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], title="Profit Source Split", color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
+                    st.plotly_chart(fig_legs, use_container_width=True)
+                else: st.info("No closed trades.")
+            else: st.info("No data available.")
         st.divider()
         if not expired_df.empty:
             ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
@@ -2132,4 +2154,4 @@ with tab_rules:
     st.markdown(adaptive_content)
     
     st.divider()
-    st.caption("Allantis Trade Guardian v146.0")
+    st.caption("Allantis Trade Guardian v146.1")
