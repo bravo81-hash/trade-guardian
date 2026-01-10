@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v142.0 (Fix: Lot Parsing from Name, Target Cost Per Lot, Better Visuals)")
+st.info("✅ RUNNING VERSION: v143.0 (Visual Upgrade: Trade Attribution Waterfall)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -297,12 +297,10 @@ def parse_optionstrat_file(file, file_type, config_dict):
             typical_debit = strat_config.get('debit_per_lot', 5000)
             
             # --- UPDATED LOT SIZE PARSING (v142) ---
-            # Priority 1: Check Trade Name (e.g. "M200 2LOTS")
             lot_match = re.search(r'(\d+)\s*(?:LOT|L\b)', name, re.IGNORECASE)
             if lot_match:
                 lot_size = int(lot_match.group(1))
             else:
-                # Priority 2: Fallback to Debit Estimate
                 lot_size = int(round(debit / typical_debit))
             
             if lot_size < 1: lot_size = 1
@@ -475,7 +473,6 @@ def sync_data(file_list, file_type):
                     gamma_val = t['gamma'] if t['gamma'] else 0.0
                     
                     if not c.fetchone():
-                        # Updated to include gamma
                         c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega, gamma) VALUES (?,?,?,?,?,?,?,?)",
                                   (trade_id, today, t['pnl'], t['days_held'], theta_val, delta_val, vega_val, gamma_val))
                     else:
@@ -1612,9 +1609,10 @@ with tab_analytics:
             else:
                 st.info("Insufficient data for comparison.")
 
+            # --- PROFIT ANATOMY (v143.0 IMPROVED) ---
             st.subheader("💰 Profit Anatomy: Call vs Put Contribution")
             
-            # 1. AGGREGATED VIEW (Strategy Level)
+            # 1. AGGREGATED VIEW (Strategy Level) - Keep this
             strat_anatomy = expired_df.groupby('Strategy')[['Put P&L', 'Call P&L']].mean().reset_index()
             fig_strat_ana = go.Figure()
             fig_strat_ana.add_trace(go.Bar(
@@ -1627,19 +1625,39 @@ with tab_analytics:
             ))
             fig_strat_ana.update_layout(barmode='relative', title="Average Profit Sources per Strategy (Stacked)", xaxis_title="Average P&L ($)")
             
-            # 2. SCATTER VIEW (Trade Level)
-            fig_scatter_ana = px.scatter(
-                expired_df, x="Call P&L", y="Put P&L", color="Strategy",
-                hover_data=["Name"], title="The Balance Beam: Call PnL vs Put PnL",
-                labels={"Call P&L": "Call Side Profit ($)", "Put P&L": "Put Side Profit ($)"}
-            )
-            # Add quadrants
-            fig_scatter_ana.add_hline(y=0, line_dash="dash", line_color="gray")
-            fig_scatter_ana.add_vline(x=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig_strat_ana, use_container_width=True)
 
-            c_ana1, c_ana2 = st.columns(2)
-            with c_ana1: st.plotly_chart(fig_strat_ana, use_container_width=True)
-            with c_ana2: st.plotly_chart(fig_scatter_ana, use_container_width=True)
+            # 2. TRADE LEVEL VIEW (Replaces Scatter)
+            st.markdown("##### 🔬 Trade-by-Trade Attribution")
+            
+            # Filter options
+            strat_list = sorted(expired_df['Strategy'].unique())
+            sel_strat_ana = st.selectbox("Select Strategy to Analyze:", strat_list, key="ana_strat_sel")
+            
+            trade_subset = expired_df[expired_df['Strategy'] == sel_strat_ana].sort_values('Exit Date')
+            
+            if not trade_subset.empty:
+                fig_trade_ana = go.Figure()
+                fig_trade_ana.add_trace(go.Bar(
+                    x=trade_subset['Name'], y=trade_subset['Put P&L'],
+                    name='Put PnL', marker_color='#EF553B'
+                ))
+                fig_trade_ana.add_trace(go.Bar(
+                    x=trade_subset['Name'], y=trade_subset['Call PnL'],
+                    name='Call PnL', marker_color='#00CC96'
+                ))
+                # Add Net PnL line or marker? Maybe just the stacked bars are enough. 
+                # Barmode relative allows seeing positive and negative components clearly.
+                fig_trade_ana.update_layout(
+                    barmode='relative', 
+                    title=f"Profit Attribution: {sel_strat_ana}",
+                    xaxis_title="Trade",
+                    yaxis_title="PnL ($)",
+                    xaxis_tickangle=-45
+                )
+                st.plotly_chart(fig_trade_ana, use_container_width=True)
+            else:
+                st.info("No closed trades for this strategy.")
 
     with an_trends:
         col1, col2 = st.columns(2)
@@ -1936,4 +1954,4 @@ with tab_rules:
     st.markdown(adaptive_content)
     
     st.divider()
-    st.caption("Allantis Trade Guardian v142.0 (Fix: Lot Parsing from Name, Target Cost Per Lot, Better Visuals)")
+    st.caption("Allantis Trade Guardian v143.0 (Visual Upgrade: Trade Attribution Waterfall)")
