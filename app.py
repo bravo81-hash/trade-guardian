@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v143.0 (Visual Upgrade: Trade Attribution Waterfall)")
+st.info("✅ RUNNING VERSION: v143.1 (Fix: 'Call PnL' KeyError Resolved)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1642,12 +1642,11 @@ with tab_analytics:
                     x=trade_subset['Name'], y=trade_subset['Put P&L'],
                     name='Put PnL', marker_color='#EF553B'
                 ))
+                # FIX: Use correct column name 'Call P&L' from DataFrame, not 'Call PnL'
                 fig_trade_ana.add_trace(go.Bar(
-                    x=trade_subset['Name'], y=trade_subset['Call PnL'],
+                    x=trade_subset['Name'], y=trade_subset['Call P&L'],
                     name='Call PnL', marker_color='#00CC96'
                 ))
-                # Add Net PnL line or marker? Maybe just the stacked bars are enough. 
-                # Barmode relative allows seeing positive and negative components clearly.
                 fig_trade_ana.update_layout(
                     barmode='relative', 
                     title=f"Profit Attribution: {sel_strat_ana}",
@@ -1954,4 +1953,4 @@ with tab_rules:
     st.markdown(adaptive_content)
     
     st.divider()
-    st.caption("Allantis Trade Guardian v143.0 (Visual Upgrade: Trade Attribution Waterfall)")
+    st.caption("Allantis Trade Guardian v143.1 (Fix: 'Call PnL' KeyError Resolved)")
