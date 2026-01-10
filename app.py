@@ -16,7 +16,7 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("✅ RUNNING VERSION: v140.1 (Fix: Smart Portfolio Status Logic)")
+st.info("✅ RUNNING VERSION: v141.0 (Multi-Account Logic + Self-Writing Adaptive Rulebook)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -835,6 +835,55 @@ def calculate_portfolio_metrics(trades_df, capital):
     
     return sharpe, cagr * 100
 
+def generate_adaptive_rulebook_text(history_df, strategies):
+    """
+    Generates dynamic markdown for the Rulebook based on historical data.
+    """
+    text = "# 📖 The Adaptive Trader's Constitution\n*Rules evolve. This book rewrites itself based on your actual data.*\n\n"
+    
+    if history_df.empty:
+        text += "⚠️ *Not enough data yet. Complete more trades to unlock adaptive rules.*"
+        return text
+
+    for strat in strategies:
+        strat_df = history_df[history_df['Strategy'] == strat]
+        if strat_df.empty: continue
+        
+        winners = strat_df[strat_df['P&L'] > 0]
+        
+        text += f"### {strat}\n"
+        
+        # 1. Best Entry Day
+        if not winners.empty:
+            winners = winners.copy() # Avoid SettingWithCopyWarning
+            winners['Day'] = winners['Entry Date'].dt.day_name()
+            best_day = winners.groupby('Day')['P&L'].mean().idxmax()
+            text += f"* **✅ Best Entry Day:** {best_day} (Highest Avg Win)\n"
+        
+        # 2. Optimal Hold
+        if not winners.empty:
+            avg_hold = winners['Days Held'].mean()
+            text += f"* **⏳ Optimal Hold:** {avg_hold:.0f} Days (Avg Winner Duration)\n"
+        
+        # 3. Pricing (Debit)
+        if not winners.empty:
+            avg_cost = winners['Debit'].mean()
+            text += f"* **💰 Target Cost:** ${avg_cost:,.0f} (Avg Winner Debit)\n"
+            
+        # 4. Stop/Loss behavior (if any losses)
+        losers = strat_df[strat_df['P&L'] < 0]
+        if not losers.empty:
+             avg_loss_hold = losers['Days Held'].mean()
+             text += f"* **⚠️ Loss Pattern:** Losers held for avg {avg_loss_hold:.0f} days.\n"
+        
+        text += "\n"
+        
+    text += "---\n### 🛡️ Universal AI Gates\n"
+    text += "1. **Efficiency Check:** If 'Rot Detector' flags a trade, cut it. Your capital is stuck.\n"
+    text += "2. **Probability Gate:** Check 'Win Prob %' before entering. If < 40%, skip even if the chart looks good.\n"
+    
+    return text
+
 # --- INITIALIZE DB ---
 init_db()
 
@@ -911,7 +960,12 @@ with st.sidebar.expander("🛠️ Maintenance", expanded=False):
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Portfolio Settings")
-acct_capital = st.sidebar.number_input("Starting Capital ($)", min_value=1000, value=50000, step=1000, help="Used for CAGR and Sharpe Ratio calculations.")
+
+# --- v141: MULTI-ACCOUNT CAPITAL ---
+prime_cap = st.sidebar.number_input("Prime Account (130/160, M200)", min_value=1000, value=115000, step=1000)
+smsf_cap = st.sidebar.number_input("SMSF Account", min_value=1000, value=150000, step=1000)
+total_cap = prime_cap + smsf_cap
+
 market_regime = st.sidebar.selectbox("Current Market Regime", ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"], index=0)
 regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in market_regime else 1.0
 
@@ -1130,8 +1184,6 @@ with tab_dash:
             avg_age = active_df['Days Held'].mean()
             
             # --- UPDATED LOGIC v140.1 ---
-            # Prioritize Risk (Delta/Age) over Allocation. 
-            # Bad allocation with good risk = Review (Yellow), not Critical (Red).
             if total_delta_pct > 6 or avg_age > 45:
                 health_status = "🔴 CRITICAL"  # High Risk (Greeks/Time)
             elif allocation_score < 40:
@@ -1418,29 +1470,35 @@ with tab_analytics:
             
             try:
                 if not expired_df.empty:
-                    total_trades = len(expired_df)
-                    win_count = (expired_df['P&L'] > 0).sum()
-                    win_rate = win_count / total_trades if total_trades > 0 else 0
-                    wins = expired_df[expired_df['P&L'] > 0]['P&L']
-                    losses = expired_df[expired_df['P&L'] <= 0]['P&L']
-                    avg_win = wins.mean() if not wins.empty else 0
-                    avg_loss = abs(losses.mean()) if not losses.empty else 0
-                    expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+                    # --- v141: MULTI-ACCOUNT METRICS ---
+                    # Filter Trades
+                    smsf_trades = expired_df[expired_df['Strategy'].str.contains("SMSF", case=False, na=False)].copy()
+                    prime_trades = expired_df[~expired_df['Strategy'].str.contains("SMSF", case=False, na=False)].copy()
                     
-                    # --- PROFIT FACTOR ---
-                    gross_profit = wins.sum() if not wins.empty else 0
-                    gross_loss = abs(losses.sum()) if not losses.empty else 1 
-                    profit_factor = gross_profit / gross_loss
+                    # Calculate Metrics for Each
+                    s_smsf, c_smsf = calculate_portfolio_metrics(smsf_trades, smsf_cap)
+                    s_prime, c_prime = calculate_portfolio_metrics(prime_trades, prime_cap)
+                    s_total, c_total = calculate_portfolio_metrics(expired_df, total_cap)
                     
-                    # --- NEW METRICS: SHARPE & CAGR (v139.0) ---
-                    sharpe, cagr = calculate_portfolio_metrics(expired_df, acct_capital)
-                    
-                    m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("💰 Banked Profit", f"${realized_pnl:,.0f}")
-                    m2.metric("⚖️ Profit Factor", f"{profit_factor:.2f}")
-                    m3.metric("📈 CAGR", f"{cagr:.1f}%")
-                    m4.metric("📊 Sharpe Ratio", f"{sharpe:.2f}")
-                    m5.metric("🔮 Total Projected", f"${realized_pnl+floating_pnl:,.0f}")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown("**💰 TOTAL PORTFOLIO**")
+                        st.metric("Banked Profit", f"${realized_pnl:,.0f}")
+                        st.metric("CAGR", f"{c_total:.1f}%")
+                        st.metric("Sharpe", f"{s_total:.2f}")
+
+                    with col2:
+                        st.markdown("**🏦 PRIME (Income)**")
+                        st.metric("Profit", f"${prime_trades['P&L'].sum():,.0f}")
+                        st.metric("CAGR", f"{c_prime:.1f}%")
+                        st.metric("Sharpe", f"{s_prime:.2f}")
+
+                    with col3:
+                        st.markdown("**🛡️ SMSF (Wealth)**")
+                        st.metric("Profit", f"${smsf_trades['P&L'].sum():,.0f}")
+                        st.metric("CAGR", f"{c_smsf:.1f}%")
+                        st.metric("Sharpe", f"{s_smsf:.2f}")
+
                 else:
                     st.info("Need closed trades for deep dive.")
             except Exception as e: st.error(f"Error calculating metrics: {e}")
@@ -1838,50 +1896,12 @@ with tab_ai:
             else: st.info("Need more winning trades to calculate optimal zones.")
 
 with tab_rules:
-    st.markdown("""
-    # 📖 The Trader's Constitution
-    *Refined by Data Audit & Behavioral Analysis*
-
-    ### 1. 130/160 Strategy (Income Discipline)
-    * **Role:** Income Engine. Extracts time decay (Theta).
-    * **Entry:** Monday/Tuesday (Best liquidity/IV fit).
-    * **Debit Target:** `$3,500 - $4,500` per lot.
-        * *Stop Rule:* Never pay > `$4,800` per lot.
-    * **Management:** **Time Limit Rule.**
-        * Kill if trade is **25 days old** and P&L is flat/negative.
-        * *Why?* Data shows convexity diminishes after Day 21. It's a decay trade, not a patience trade.
-    * **Efficiency Check:** ROI-focused. Requires high velocity.
+    # --- v141: Adaptive Rules ---
+    # Generate intelligent rules based on expired_df stats if available
+    strategies_for_rules = sorted(list(dynamic_benchmarks.keys()))
+    adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
     
-    ### 2. 160/190 Strategy (Patience Training)
-    * **Role:** Compounder. Expectancy focused.
-    * **Entry:** Friday (Captures weekend decay start).
-    * **Debit Target:** `~$5,200` per lot.
-    * **Sizing:** Trade **1 Lot**.
-    * **Exit:** Hold for **40-50 Days**. 
-    * **Golden Rule:** **Do not touch in first 30 days.** Early interference statistically worsens outcomes.
+    st.markdown(adaptive_content)
     
-    ### 3. M200 Strategy (Emotional Mastery)
-    * **Role:** Whale. Variance-tolerant capital deployment.
-    * **Entry:** Wednesday.
-    * **Debit Target:** `$7,500 - $8,500` per lot.
-    * **The "Dip Valley":**
-        * P&L often looks worst between Day 15–40. This is structural.
-        * **Management:** Check at **Day 14**.
-            * Check **Greeks & VIX**, not just P&L.
-            * If Red/Flat: **HOLD.** Do not panic exit in the Valley. Wait for volatility to revert.
-            
-    ### 4. SMSF Strategy (Wealth Builder)
-    * **Role:** Long-term Growth.
-    * **Structure:** Multi-trade portfolio strategy.
-    
-    ---
-    ### 🛡️ Universal Execution Gates
-    1.  **Stability Check:** Monitor **Stability** Ratio.
-        * **> 1.0 (Green):** Fortress. Trade is safe.
-        * **< 0.25 (Red):** Coin Flip. Trade is directional gambling.
-    2.  **Volatility Gate:** Check VIX before entry. Ideal: 14–22. Skip if VIX exploded >10% in last 48h.
-    3.  **Loss Definition:** A trade that is early and red but *structurally intact* is **NOT** a losing trade. It is just *unripe*.
-    4.  **Efficiency Check:** Monitor **Theta Eff.** (> 1.0 means you are capturing decay efficiently).
-    """)
     st.divider()
-    st.caption("Allantis Trade Guardian v140.1 (Fix: Smart Portfolio Status Logic)")
+    st.caption("Allantis Trade Guardian v141.0 (Multi-Account Logic + Self-Writing Adaptive Rulebook)")
