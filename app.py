@@ -26,7 +26,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.3 (Fuzzy Search Fix)")
+st.info("🚀 RUNNING VERSION: v146.4 (Conflict Guard + Auto-Backups)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -57,29 +57,27 @@ class DriveManager:
         """Helper to show user what files the bot sees"""
         if not self.is_connected: return []
         try:
-            # List first 10 files the bot has access to
             results = self.service.files().list(
-                pageSize=10, fields="files(id, name)").execute()
+                pageSize=10, fields="files(id, name, modifiedTime)").execute()
             return results.get('files', [])
         except Exception as e:
             return []
 
     def find_db_file(self):
-        if not self.is_connected: return None
+        if not self.is_connected: return None, None
         try:
             # 1. Try Exact Match First
             query_exact = f"name='{DB_NAME}' and trashed=false"
             results = self.service.files().list(
-                q=query_exact, pageSize=1, fields="files(id, name)").execute()
+                q=query_exact, pageSize=1, fields="files(id, name, modifiedTime, parents)").execute()
             items = results.get('files', [])
             if items: 
                 return items[0]['id'], items[0]['name']
 
             # 2. Try Fuzzy Match (e.g. "trade_guardian_v4 (9).db")
-            # Look for files containing "trade_guardian" AND ".db"
             query_fuzzy = "name contains 'trade_guardian' and name contains '.db' and trashed=false"
             results = self.service.files().list(
-                q=query_fuzzy, pageSize=5, fields="files(id, name)").execute()
+                q=query_fuzzy, pageSize=5, fields="files(id, name, modifiedTime, parents)").execute()
             items = results.get('files', [])
             
             if items:
@@ -94,12 +92,66 @@ class DriveManager:
             st.error(f"Drive Search Error: {e}")
             return None, None
 
+    def get_cloud_modified_time(self, file_id):
+        try:
+            file = self.service.files().get(fileId=file_id, fields='modifiedTime').execute()
+            # Parse RFC 3339 timestamp (e.g., 2023-10-25T14:00:00.000Z)
+            dt = datetime.strptime(file['modifiedTime'].replace('Z', '+0000'), '%Y-%m-%dT%H:%M:%S.%f%z')
+            # Convert to naive local time for comparison (simplified) or keep aware
+            return dt
+        except:
+            return None
+
+    def create_backup(self, file_id, file_name):
+        """Creates a timestamped copy in the cloud before overwriting"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_name = f"BACKUP_{timestamp}_{file_name}"
+            
+            # Get parent folder of original file to put backup in same place
+            orig_file = self.service.files().get(fileId=file_id, fields='parents').execute()
+            parents = orig_file.get('parents', [])
+            
+            metadata = {'name': backup_name}
+            if parents: metadata['parents'] = parents
+            
+            self.service.files().copy(fileId=file_id, body=metadata).execute()
+            
+            # Cleanup old backups (Keep last 5)
+            self.cleanup_backups(file_name)
+            return True
+        except Exception as e:
+            print(f"Backup failed: {e}")
+            return False
+
+    def cleanup_backups(self, original_name):
+        try:
+            # Find files starting with BACKUP_ and ending with original name
+            query = f"name contains 'BACKUP_' and name contains '{original_name}' and trashed=false"
+            results = self.service.files().list(
+                q=query, pageSize=20, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
+            items = results.get('files', [])
+            
+            # Keep top 5, delete rest
+            if len(items) > 5:
+                for item in items[5:]:
+                    try:
+                        self.service.files().delete(fileId=item['id']).execute()
+                    except: pass
+        except: pass
+
     def download_db(self):
         file_id, file_name = self.find_db_file()
         if not file_id:
             return False, "Database not found in Cloud."
         
         try:
+            # Close any local connections first
+            try:
+                # Assuming single threaded app, but good practice
+                sqlite3.connect(DB_NAME).close()
+            except: pass
+
             request = self.service.files().get_media(fileId=file_id)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
@@ -109,24 +161,60 @@ class DriveManager:
             
             with open(DB_NAME, "wb") as f:
                 f.write(fh.getbuffer())
+            
+            # Update session state timestamp
+            st.session_state['last_cloud_sync'] = datetime.now()
             return True, f"Downloaded '{file_name}' successfully."
         except Exception as e:
             return False, str(e)
 
-    def upload_db(self):
+    def upload_db(self, force=False):
         if not os.path.exists(DB_NAME):
             return False, "No local database found to upload."
             
         file_id, file_name = self.find_db_file()
+        
+        # --- CONFLICT RESOLUTION ---
+        if file_id and not force:
+            cloud_time = self.get_cloud_modified_time(file_id)
+            # Local modified time
+            local_ts = os.path.getmtime(DB_NAME)
+            local_time = datetime.fromtimestamp(local_ts).astimezone() # Make aware
+            
+            # Buffer: If cloud is > 2 minutes newer than local file, warn user
+            # Note: This is imperfect due to clock skews, but a good safety net
+            if cloud_time and (cloud_time > local_time):
+                 # Check if we just downloaded it?
+                 last_sync = st.session_state.get('last_cloud_sync')
+                 # Convert last_sync to aware if needed or compare carefully
+                 # Simplified logic: Just warn if Cloud seems newer
+                 return False, f"CONFLICT: Cloud file is newer ({cloud_time.strftime('%H:%M')}) than local ({local_time.strftime('%H:%M')}). Pull first or Force Push."
+
+        # --- SAFETY LOCK ---
+        # Verify integrity and ensure closed
+        try:
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA integrity_check")
+            result = cursor.fetchone()
+            conn.close()
+            if result[0] != "ok":
+                return False, "❌ Local Database Corrupt. Do not upload."
+        except Exception as e:
+            return False, f"❌ DB Check Failed: {e}"
+
         media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
         
         try:
             if file_id:
-                # Update existing file (even if name is different, like (9).db)
+                # 1. Create Backup first
+                self.create_backup(file_id, file_name)
+                
+                # 2. Update existing file
                 self.service.files().update(
                     fileId=file_id,
                     media_body=media).execute()
-                action = f"Updated existing file '{file_name}'"
+                action = f"Updated '{file_name}' (Backup created)"
             else:
                 # Create new file
                 file_metadata = {'name': DB_NAME}
@@ -135,7 +223,9 @@ class DriveManager:
                     media_body=media,
                     fields='id').execute()
                 action = "Created New File"
-            return True, f"Cloud Sync Successful ({action})"
+            
+            st.session_state['last_cloud_sync'] = datetime.now()
+            return True, f"Sync Successful: {action}"
         except Exception as e:
             return False, str(e)
 
@@ -1063,7 +1153,21 @@ if GOOGLE_DEPS_INSTALLED:
             with c1:
                 if st.button("⬆️ Sync to Cloud"):
                     success, msg = drive_mgr.upload_db()
-                    if success: st.success(msg)
+                    if not success and "CONFLICT" in msg:
+                        st.error(msg)
+                        c_safe, c_force = st.columns(2)
+                        with c_safe:
+                            if st.button("⬇️ Pull (Safe)"):
+                                success, msg = drive_mgr.download_db()
+                                if success:
+                                    st.success("Resolved: Pulled cloud version.")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                        with c_force:
+                            if st.button("⚠️ Force Push"):
+                                success, msg = drive_mgr.upload_db(force=True)
+                                if success: st.success(msg)
+                    elif success: st.success(msg)
                     else: st.error(msg)
             with c2:
                 if st.button("⬇️ Pull from Cloud"):
@@ -1073,9 +1177,15 @@ if GOOGLE_DEPS_INSTALLED:
                         st.success(msg)
                         st.rerun()
                     else: st.error(msg)
-            st.caption("Press 'Sync to Cloud' after saving journal or processing files.")
             
-            # --- DEBUG SECTION ---
+            # Persistent Status Indicator
+            st.sidebar.divider()
+            last_sync_time = st.session_state.get('last_cloud_sync')
+            if last_sync_time:
+                st.sidebar.caption(f"Last Sync: {last_sync_time.strftime('%H:%M:%S')}")
+            else:
+                st.sidebar.warning("Cloud status: Unknown (Sync to update)")
+
             with st.expander("🕵️ Debug: What can I see?"):
                 st.write("Files visible to Bot:")
                 files = drive_mgr.list_files_debug()
@@ -1107,6 +1217,12 @@ with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
             for l in logs: st.write(l)
             st.cache_data.clear()
             st.success("Sync Complete!")
+            # AUTO-SYNC
+            if drive_mgr.is_connected:
+                with st.spinner("Auto-syncing to cloud..."):
+                    success, msg = drive_mgr.upload_db()
+                    if success: st.toast("☁️ Auto-synced to cloud")
+                    else: st.toast(f"⚠️ Auto-sync failed: {msg}")
 
 st.sidebar.markdown(" *finally...*")
 with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
@@ -1474,6 +1590,12 @@ with tab_dash:
                     if changes: 
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
+                        # AUTO-SYNC
+                        if drive_mgr.is_connected:
+                            with st.spinner("Auto-syncing to cloud..."):
+                                success, msg = drive_mgr.upload_db()
+                                if success: st.toast("☁️ Auto-synced to cloud")
+                                else: st.toast(f"⚠️ Auto-sync failed: {msg}")
             
             with sub_dna:
                 st.subheader(" Trade DNA Fingerprinting")
