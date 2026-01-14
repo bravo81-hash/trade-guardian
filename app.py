@@ -8,7 +8,7 @@ import sqlite3
 import os
 import re
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from openpyxl import load_workbook
 from scipy import stats 
 from scipy.spatial.distance import cdist 
@@ -26,7 +26,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.4 (Conflict Guard + Auto-Backups)")
+st.info("🚀 RUNNING VERSION: v146.5 (Audit Fixes: Race Conditions & Timezones)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -40,6 +40,7 @@ class DriveManager:
         self.creds = None
         self.service = None
         self.is_connected = False
+        self.cached_file_id = None # Cache to reduce API calls
         
         # Check for secrets in Streamlit Cloud
         if 'gcp_service_account' in st.secrets:
@@ -65,27 +66,43 @@ class DriveManager:
 
     def find_db_file(self):
         if not self.is_connected: return None, None
+        
+        # Try cache first
+        if self.cached_file_id:
+            try:
+                file = self.service.files().get(
+                    fileId=self.cached_file_id, 
+                    fields='id,name'
+                ).execute()
+                return file['id'], file['name']
+            except:
+                self.cached_file_id = None  # Invalidate cache if stale
+
         try:
             # 1. Try Exact Match First
             query_exact = f"name='{DB_NAME}' and trashed=false"
             results = self.service.files().list(
-                q=query_exact, pageSize=1, fields="files(id, name, modifiedTime, parents)").execute()
+                q=query_exact, pageSize=1, fields="files(id, name)").execute()
             items = results.get('files', [])
             if items: 
+                self.cached_file_id = items[0]['id']
                 return items[0]['id'], items[0]['name']
 
             # 2. Try Fuzzy Match (e.g. "trade_guardian_v4 (9).db")
             query_fuzzy = "name contains 'trade_guardian' and name contains '.db' and trashed=false"
             results = self.service.files().list(
-                q=query_fuzzy, pageSize=5, fields="files(id, name, modifiedTime, parents)").execute()
+                q=query_fuzzy, pageSize=5, fields="files(id, name)").execute()
             items = results.get('files', [])
             
             if items:
                 # Prefer one starting with correct prefix
+                selected = items[0]
                 for item in items:
                     if item['name'].startswith("trade_guardian_v4"):
-                        return item['id'], item['name']
-                return items[0]['id'], items[0]['name'] # Fallback to first found
+                        selected = item
+                        break
+                self.cached_file_id = selected['id']
+                return selected['id'], selected['name']
             
             return None, None
         except Exception as e:
@@ -97,7 +114,6 @@ class DriveManager:
             file = self.service.files().get(fileId=file_id, fields='modifiedTime').execute()
             # Parse RFC 3339 timestamp (e.g., 2023-10-25T14:00:00.000Z)
             dt = datetime.strptime(file['modifiedTime'].replace('Z', '+0000'), '%Y-%m-%dT%H:%M:%S.%f%z')
-            # Convert to naive local time for comparison (simplified) or keep aware
             return dt
         except:
             return None
@@ -148,7 +164,6 @@ class DriveManager:
         try:
             # Close any local connections first
             try:
-                # Assuming single threaded app, but good practice
                 sqlite3.connect(DB_NAME).close()
             except: pass
 
@@ -174,21 +189,17 @@ class DriveManager:
             
         file_id, file_name = self.find_db_file()
         
-        # --- CONFLICT RESOLUTION ---
+        # --- ROBUST CONFLICT RESOLUTION (v146.5) ---
         if file_id and not force:
             cloud_time = self.get_cloud_modified_time(file_id)
-            # Local modified time
-            local_ts = os.path.getmtime(DB_NAME)
-            local_time = datetime.fromtimestamp(local_ts).astimezone() # Make aware
             
-            # Buffer: If cloud is > 2 minutes newer than local file, warn user
-            # Note: This is imperfect due to clock skews, but a good safety net
-            if cloud_time and (cloud_time > local_time):
-                 # Check if we just downloaded it?
-                 last_sync = st.session_state.get('last_cloud_sync')
-                 # Convert last_sync to aware if needed or compare carefully
-                 # Simplified logic: Just warn if Cloud seems newer
-                 return False, f"CONFLICT: Cloud file is newer ({cloud_time.strftime('%H:%M')}) than local ({local_time.strftime('%H:%M')}). Pull first or Force Push."
+            # Get local time in UTC for fair comparison
+            local_ts = os.path.getmtime(DB_NAME)
+            local_time = datetime.fromtimestamp(local_ts, tz=timezone.utc) 
+            
+            # If cloud is newer (allowing for slight clock skew of 2 seconds)
+            if cloud_time and (cloud_time > local_time + timedelta(seconds=2)):
+                 return False, f"CONFLICT: Cloud file is newer ({cloud_time.strftime('%H:%M')}) than local ({local_time.strftime('%H:%M')}). Please Pull first."
 
         # --- SAFETY LOCK ---
         # Verify integrity and ensure closed
@@ -231,6 +242,18 @@ class DriveManager:
 
 # Initialize Drive Manager
 drive_mgr = DriveManager()
+
+# --- HELPER: AUTO-SYNC WRAPPER ---
+def auto_sync_if_connected():
+    if not drive_mgr.is_connected: return
+    with st.spinner("☁️ Auto-syncing to cloud..."):
+        success, msg = drive_mgr.upload_db()
+        if success:
+            st.toast(f"✅ Cloud Saved: {datetime.now().strftime('%H:%M')}")
+        elif "CONFLICT" in msg:
+            st.error(f"⚠️ Auto-sync BLOCKED: Conflict detected. Please resolve in sidebar.")
+        else:
+            st.warning(f"⚠️ Auto-sync failed: {msg}")
 
 # --- DATABASE ENGINE ---
 def get_db_connection():
@@ -1151,24 +1174,17 @@ if GOOGLE_DEPS_INSTALLED:
         else:
             c1, c2 = st.columns(2)
             with c1:
+                # Main Sync Button
                 if st.button("⬆️ Sync to Cloud"):
                     success, msg = drive_mgr.upload_db()
                     if not success and "CONFLICT" in msg:
                         st.error(msg)
-                        c_safe, c_force = st.columns(2)
-                        with c_safe:
-                            if st.button("⬇️ Pull (Safe)"):
-                                success, msg = drive_mgr.download_db()
-                                if success:
-                                    st.success("Resolved: Pulled cloud version.")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                        with c_force:
-                            if st.button("⚠️ Force Push"):
-                                success, msg = drive_mgr.upload_db(force=True)
-                                if success: st.success(msg)
-                    elif success: st.success(msg)
+                        st.session_state['show_conflict'] = True
+                    elif success: 
+                        st.success(msg)
+                        st.session_state['show_conflict'] = False
                     else: st.error(msg)
+            
             with c2:
                 if st.button("⬇️ Pull from Cloud"):
                     success, msg = drive_mgr.download_db()
@@ -1178,20 +1194,46 @@ if GOOGLE_DEPS_INSTALLED:
                         st.rerun()
                     else: st.error(msg)
             
+            # Conflict Resolution UI (Only appears when needed)
+            if st.session_state.get('show_conflict'):
+                st.warning("Resolve Conflict:")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("⬇️ Pull (Safe)", key="res_pull"):
+                        success, msg = drive_mgr.download_db()
+                        if success:
+                            st.success("Resolved: Cloud version pulled.")
+                            st.session_state['show_conflict'] = False
+                            st.cache_data.clear()
+                            st.rerun()
+                with cc2:
+                    if st.button("⚠️ Force Push", key="res_force"):
+                        success, msg = drive_mgr.upload_db(force=True)
+                        if success:
+                            st.success("Resolved: Cloud overwritten.")
+                            st.session_state['show_conflict'] = False
+            
             # Persistent Status Indicator
             st.sidebar.divider()
             last_sync_time = st.session_state.get('last_cloud_sync')
             if last_sync_time:
-                st.sidebar.caption(f"Last Sync: {last_sync_time.strftime('%H:%M:%S')}")
+                mins_ago = (datetime.now() - last_sync_time).total_seconds() / 60
+                if mins_ago < 1:
+                    st.sidebar.success(f"✅ Synced just now")
+                elif mins_ago < 60:
+                    st.sidebar.info(f"Last Sync: {int(mins_ago)}m ago")
+                else:
+                    st.sidebar.warning(f"Last Sync: {last_sync_time.strftime('%H:%M')}")
             else:
-                st.sidebar.warning("Cloud status: Unknown (Sync to update)")
+                st.sidebar.warning("⚠️ Cloud Status: Unknown (Sync to update)")
 
             with st.expander("🕵️ Debug: What can I see?"):
                 st.write("Files visible to Bot:")
                 files = drive_mgr.list_files_debug()
                 if files:
                     for f in files:
-                        st.code(f"{f['name']} (ID: {f['id']})")
+                        mod_time = f['modifiedTime'] if 'modifiedTime' in f else 'Unknown'
+                        st.code(f"{f['name']}\nID: {f['id']}\nMod: {mod_time}")
                 else:
                     st.warning("No files found. Ensure you shared the DB with the service account email.")
 
@@ -1217,12 +1259,7 @@ with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
             for l in logs: st.write(l)
             st.cache_data.clear()
             st.success("Sync Complete!")
-            # AUTO-SYNC
-            if drive_mgr.is_connected:
-                with st.spinner("Auto-syncing to cloud..."):
-                    success, msg = drive_mgr.upload_db()
-                    if success: st.toast("☁️ Auto-synced to cloud")
-                    else: st.toast(f"⚠️ Auto-sync failed: {msg}")
+            auto_sync_if_connected()
 
 st.sidebar.markdown(" *finally...*")
 with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
@@ -1590,12 +1627,7 @@ with tab_dash:
                     if changes: 
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
-                        # AUTO-SYNC
-                        if drive_mgr.is_connected:
-                            with st.spinner("Auto-syncing to cloud..."):
-                                success, msg = drive_mgr.upload_db()
-                                if success: st.toast("☁️ Auto-synced to cloud")
-                                else: st.toast(f"⚠️ Auto-sync failed: {msg}")
+                        auto_sync_if_connected()
             
             with sub_dna:
                 st.subheader(" Trade DNA Fingerprinting")
@@ -2103,4 +2135,4 @@ with tab_rules:
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v146.3 (Cloud Edition)")
+    st.caption("Allantis Trade Guardian v146.5 (Cloud Audit)")
