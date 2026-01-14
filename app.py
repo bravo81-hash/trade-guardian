@@ -26,7 +26,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.2 (Cloud Sync Edition)")
+st.info("🚀 RUNNING VERSION: v146.3 (Fuzzy Search Fix)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -53,22 +53,49 @@ class DriveManager:
             except Exception as e:
                 st.error(f"Cloud Config Error: {e}")
 
+    def list_files_debug(self):
+        """Helper to show user what files the bot sees"""
+        if not self.is_connected: return []
+        try:
+            # List first 10 files the bot has access to
+            results = self.service.files().list(
+                pageSize=10, fields="files(id, name)").execute()
+            return results.get('files', [])
+        except Exception as e:
+            return []
+
     def find_db_file(self):
         if not self.is_connected: return None
         try:
-            # Search for file by name, not in trash
+            # 1. Try Exact Match First
+            query_exact = f"name='{DB_NAME}' and trashed=false"
             results = self.service.files().list(
-                q=f"name='{DB_NAME}' and trashed=false",
-                pageSize=1, fields="files(id, name)").execute()
+                q=query_exact, pageSize=1, fields="files(id, name)").execute()
             items = results.get('files', [])
-            if not items: return None
-            return items[0]['id']
+            if items: 
+                return items[0]['id'], items[0]['name']
+
+            # 2. Try Fuzzy Match (e.g. "trade_guardian_v4 (9).db")
+            # Look for files containing "trade_guardian" AND ".db"
+            query_fuzzy = "name contains 'trade_guardian' and name contains '.db' and trashed=false"
+            results = self.service.files().list(
+                q=query_fuzzy, pageSize=5, fields="files(id, name)").execute()
+            items = results.get('files', [])
+            
+            if items:
+                # Prefer one starting with correct prefix
+                for item in items:
+                    if item['name'].startswith("trade_guardian_v4"):
+                        return item['id'], item['name']
+                return items[0]['id'], items[0]['name'] # Fallback to first found
+            
+            return None, None
         except Exception as e:
             st.error(f"Drive Search Error: {e}")
-            return None
+            return None, None
 
     def download_db(self):
-        file_id = self.find_db_file()
+        file_id, file_name = self.find_db_file()
         if not file_id:
             return False, "Database not found in Cloud."
         
@@ -82,7 +109,7 @@ class DriveManager:
             
             with open(DB_NAME, "wb") as f:
                 f.write(fh.getbuffer())
-            return True, "Download Complete."
+            return True, f"Downloaded '{file_name}' successfully."
         except Exception as e:
             return False, str(e)
 
@@ -90,16 +117,16 @@ class DriveManager:
         if not os.path.exists(DB_NAME):
             return False, "No local database found to upload."
             
-        file_id = self.find_db_file()
+        file_id, file_name = self.find_db_file()
         media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
         
         try:
             if file_id:
-                # Update existing file
+                # Update existing file (even if name is different, like (9).db)
                 self.service.files().update(
                     fileId=file_id,
                     media_body=media).execute()
-                action = "Updated"
+                action = f"Updated existing file '{file_name}'"
             else:
                 # Create new file
                 file_metadata = {'name': DB_NAME}
@@ -107,7 +134,7 @@ class DriveManager:
                     body=file_metadata,
                     media_body=media,
                     fields='id').execute()
-                action = "Created New"
+                action = "Created New File"
             return True, f"Cloud Sync Successful ({action})"
         except Exception as e:
             return False, str(e)
@@ -1047,6 +1074,16 @@ if GOOGLE_DEPS_INSTALLED:
                         st.rerun()
                     else: st.error(msg)
             st.caption("Press 'Sync to Cloud' after saving journal or processing files.")
+            
+            # --- DEBUG SECTION ---
+            with st.expander("🕵️ Debug: What can I see?"):
+                st.write("Files visible to Bot:")
+                files = drive_mgr.list_files_debug()
+                if files:
+                    for f in files:
+                        st.code(f"{f['name']} (ID: {f['id']})")
+                else:
+                    st.warning("No files found. Ensure you shared the DB with the service account email.")
 
 with st.sidebar.expander("1.  STARTUP (Restore Local)", expanded=False):
     restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
@@ -1944,4 +1981,4 @@ with tab_rules:
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v146.2 (Cloud Edition)")
+    st.caption("Allantis Trade Guardian v146.3 (Cloud Edition)")
