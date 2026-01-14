@@ -8,6 +8,7 @@ import sqlite3
 import os
 import re
 import json
+import time
 from datetime import datetime, timezone, timedelta
 from openpyxl import load_workbook
 from scipy import stats 
@@ -26,7 +27,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.5 (Audit Fixes: Race Conditions & Timezones)")
+st.info("🚀 RUNNING VERSION: v146.6 (Final Polish: Safety Pulls & Retries)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -156,11 +157,24 @@ class DriveManager:
                     except: pass
         except: pass
 
-    def download_db(self):
+    def download_db(self, force=False):
         file_id, file_name = self.find_db_file()
         if not file_id:
             return False, "Database not found in Cloud."
         
+        # --- PULL SAFETY CHECK (New in v146.6) ---
+        if os.path.exists(DB_NAME) and not force:
+            try:
+                local_ts = os.path.getmtime(DB_NAME)
+                local_mod = datetime.fromtimestamp(local_ts, tz=timezone.utc)
+                cloud_time = self.get_cloud_modified_time(file_id)
+                
+                # If local is significantly newer (> 2 mins) than cloud
+                if cloud_time and (local_mod > cloud_time + timedelta(minutes=2)):
+                    return False, f"CONFLICT: Your local database is NEWER ({local_mod.strftime('%H:%M')}) than the cloud file ({cloud_time.strftime('%H:%M')}).\n\nIf you pull now, you will lose your recent local changes."
+            except Exception as e:
+                print(f"Pull check warning: {e}")
+
         try:
             # Close any local connections first
             try:
@@ -183,7 +197,7 @@ class DriveManager:
         except Exception as e:
             return False, str(e)
 
-    def upload_db(self, force=False):
+    def upload_db(self, force=False, retries=2):
         if not os.path.exists(DB_NAME):
             return False, "No local database found to upload."
             
@@ -216,29 +230,35 @@ class DriveManager:
 
         media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
         
-        try:
-            if file_id:
-                # 1. Create Backup first
-                self.create_backup(file_id, file_name)
+        # --- RETRY LOGIC (New in v146.6) ---
+        for attempt in range(retries + 1):
+            try:
+                if file_id:
+                    # 1. Create Backup first (only on first attempt)
+                    if attempt == 0: 
+                        self.create_backup(file_id, file_name)
+                    
+                    # 2. Update existing file
+                    self.service.files().update(
+                        fileId=file_id,
+                        media_body=media).execute()
+                    action = f"Updated '{file_name}' (Backup created)"
+                else:
+                    # Create new file
+                    file_metadata = {'name': DB_NAME}
+                    self.service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id').execute()
+                    action = "Created New File"
                 
-                # 2. Update existing file
-                self.service.files().update(
-                    fileId=file_id,
-                    media_body=media).execute()
-                action = f"Updated '{file_name}' (Backup created)"
-            else:
-                # Create new file
-                file_metadata = {'name': DB_NAME}
-                self.service.files().create(
-                    body=file_metadata,
-                    media_body=media,
-                    fields='id').execute()
-                action = "Created New File"
-            
-            st.session_state['last_cloud_sync'] = datetime.now()
-            return True, f"Sync Successful: {action}"
-        except Exception as e:
-            return False, str(e)
+                st.session_state['last_cloud_sync'] = datetime.now()
+                return True, f"Sync Successful: {action}"
+            except Exception as e:
+                if attempt < retries:
+                    time.sleep(1) # Wait 1 sec before retry
+                    continue
+                return False, f"Upload failed after {retries} retries: {str(e)}"
 
 # Initialize Drive Manager
 drive_mgr = DriveManager()
@@ -1188,15 +1208,18 @@ if GOOGLE_DEPS_INSTALLED:
             with c2:
                 if st.button("⬇️ Pull from Cloud"):
                     success, msg = drive_mgr.download_db()
-                    if success: 
+                    if not success and "CONFLICT" in msg:
+                        st.error(msg)
+                        st.session_state['show_pull_conflict'] = True
+                    elif success: 
                         st.cache_data.clear()
                         st.success(msg)
                         st.rerun()
                     else: st.error(msg)
             
-            # Conflict Resolution UI (Only appears when needed)
+            # Conflict Resolution UI (Upload)
             if st.session_state.get('show_conflict'):
-                st.warning("Resolve Conflict:")
+                st.warning("Upload Conflict:")
                 cc1, cc2 = st.columns(2)
                 with cc1:
                     if st.button("⬇️ Pull (Safe)", key="res_pull"):
@@ -1212,10 +1235,35 @@ if GOOGLE_DEPS_INSTALLED:
                         if success:
                             st.success("Resolved: Cloud overwritten.")
                             st.session_state['show_conflict'] = False
+
+            # Conflict Resolution UI (Pull)
+            if st.session_state.get('show_pull_conflict'):
+                st.warning("Pull Warning: Local file is newer!")
+                cp1, cp2 = st.columns(2)
+                with cp1:
+                    if st.button("⬇️ Force Pull (Lose Local)", key="force_pull"):
+                        success, msg = drive_mgr.download_db(force=True)
+                        if success:
+                            st.session_state['show_pull_conflict'] = False
+                            st.cache_data.clear()
+                            st.rerun()
+                with cp2:
+                    if st.button("❌ Cancel", key="cancel_pull"):
+                        st.session_state['show_pull_conflict'] = False
+                        st.rerun()
             
             # Persistent Status Indicator
             st.sidebar.divider()
             last_sync_time = st.session_state.get('last_cloud_sync')
+            
+            # Get real cloud status
+            cloud_file_id, cloud_file_name = drive_mgr.find_db_file()
+            if cloud_file_id:
+                cloud_ts = drive_mgr.get_cloud_modified_time(cloud_file_id)
+                if cloud_ts:
+                    # Convert to local/browser time approximation or just show UTC
+                    st.sidebar.caption(f"☁️ Cloud File: {cloud_ts.strftime('%b %d, %H:%M')} (UTC)")
+            
             if last_sync_time:
                 mins_ago = (datetime.now() - last_sync_time).total_seconds() / 60
                 if mins_ago < 1:
@@ -1225,7 +1273,7 @@ if GOOGLE_DEPS_INSTALLED:
                 else:
                     st.sidebar.warning(f"Last Sync: {last_sync_time.strftime('%H:%M')}")
             else:
-                st.sidebar.warning("⚠️ Cloud Status: Unknown (Sync to update)")
+                st.sidebar.warning("⚠️ Session Status: Unsaved")
 
             with st.expander("🕵️ Debug: What can I see?"):
                 st.write("Files visible to Bot:")
@@ -2135,4 +2183,4 @@ with tab_rules:
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v146.5 (Cloud Audit)")
+    st.caption("Allantis Trade Guardian v146.6 (Cloud Edition)")
