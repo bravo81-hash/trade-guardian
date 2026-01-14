@@ -7,55 +7,125 @@ import plotly.graph_objects as go
 import sqlite3
 import os
 import re
-import shutil
 import json
 from datetime import datetime
 from openpyxl import load_workbook
 from scipy import stats 
 from scipy.spatial.distance import cdist 
 
+# --- GOOGLE DRIVE IMPORTS ---
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+    GOOGLE_DEPS_INSTALLED = True
+except ImportError:
+    GOOGLE_DEPS_INSTALLED = False
+
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Allantis Trade Guardian", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v147.0 (New: Cloud Auto-Sync & Database Settings)")
+st.info("🚀 RUNNING VERSION: v146.2 (Cloud Sync Edition)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
-# --- DATABASE ENGINE & CONFIG ---
+# --- DATABASE CONSTANTS ---
 DB_NAME = "trade_guardian_v4.db"
-CONFIG_FILE = "guardian_config.json"
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
+# --- CLOUD SYNC ENGINE ---
+class DriveManager:
+    def __init__(self):
+        self.creds = None
+        self.service = None
+        self.is_connected = False
+        
+        # Check for secrets in Streamlit Cloud
+        if 'gcp_service_account' in st.secrets:
+            try:
+                # Load credentials from Streamlit secrets
+                service_account_info = st.secrets["gcp_service_account"]
+                self.creds = service_account.Credentials.from_service_account_info(
+                    service_account_info, scopes=SCOPES)
+                self.service = build('drive', 'v3', credentials=self.creds)
+                self.is_connected = True
+            except Exception as e:
+                st.error(f"Cloud Config Error: {e}")
+
+    def find_db_file(self):
+        if not self.is_connected: return None
+        try:
+            # Search for file by name, not in trash
+            results = self.service.files().list(
+                q=f"name='{DB_NAME}' and trashed=false",
+                pageSize=1, fields="files(id, name)").execute()
+            items = results.get('files', [])
+            if not items: return None
+            return items[0]['id']
+        except Exception as e:
+            st.error(f"Drive Search Error: {e}")
+            return None
+
+    def download_db(self):
+        file_id = self.find_db_file()
+        if not file_id:
+            return False, "Database not found in Cloud."
+        
+        try:
+            request = self.service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            
+            with open(DB_NAME, "wb") as f:
+                f.write(fh.getbuffer())
+            return True, "Download Complete."
+        except Exception as e:
+            return False, str(e)
+
+    def upload_db(self):
+        if not os.path.exists(DB_NAME):
+            return False, "No local database found to upload."
+            
+        file_id = self.find_db_file()
+        media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
+        
+        try:
+            if file_id:
+                # Update existing file
+                self.service.files().update(
+                    fileId=file_id,
+                    media_body=media).execute()
+                action = "Updated"
+            else:
+                # Create new file
+                file_metadata = {'name': DB_NAME}
+                self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id').execute()
+                action = "Created New"
+            return True, f"Cloud Sync Successful ({action})"
+        except Exception as e:
+            return False, str(e)
+
+# Initialize Drive Manager
+drive_mgr = DriveManager()
+
+# --- DATABASE ENGINE ---
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
 
-def load_app_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r') as f: return json.load(f)
-        except: pass
-    return {"cloud_path": "", "auto_backup": False}
-
-def save_app_config(config):
-    try:
-        with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
-    except Exception as e:
-        print(f"Config Save Error: {e}")
-
-def perform_cloud_backup():
-    config = load_app_config()
-    path = config.get("cloud_path", "").strip()
-    if config.get("auto_backup", False) and path and os.path.exists(path):
-        try:
-            # Create timestamped backup or overwrite main backup
-            target_file = os.path.join(path, "trade_guardian_backup.db")
-            shutil.copy2(DB_NAME, target_file)
-            return True
-        except Exception as e:
-            print(f"Backup Failed: {e}")
-    return False
-
 def init_db():
+    # CLOUD CHECK ON INIT: If local DB missing, try pull from cloud
+    if not os.path.exists(DB_NAME) and drive_mgr.is_connected:
+        success, msg = drive_mgr.download_db()
+        if success:
+            st.toast(f"☁️ Cloud Data Loaded: {msg}")
+    
     conn = get_db_connection()
     c = conn.cursor()
     
@@ -226,52 +296,64 @@ def extract_ticker(name):
         return "UNKNOWN"
     except: return "UNKNOWN"
 
-# --- v146.0: CORRECTED THETA DECAY MODEL ---
 def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
     t_frac = min(1.0, days_held / dte_at_entry) if dte_at_entry > 0 else 1.0
     if strategy in ['M200', '130/160', '160/190', 'SMSF']:
-        if t_frac < 0.5: decay_factor = 1 - (2 * t_frac) ** 2
-        else: decay_factor = 2 * (1 - t_frac)
+        if t_frac < 0.5:
+            decay_factor = 1 - (2 * t_frac) ** 2
+        else:
+            decay_factor = 2 * (1 - t_frac)
         return initial_theta * max(0, decay_factor)
     elif 'VERTICAL' in str(strategy).upper() or 'DIRECTIONAL' in str(strategy).upper():
-        if t_frac < 0.7: decay_factor = 1 - t_frac
-        else: decay_factor = 0.3 * np.exp(-5 * (t_frac - 0.7))
+        if t_frac < 0.7:
+            decay_factor = 1 - t_frac
+        else:
+            decay_factor = 0.3 * np.exp(-5 * (t_frac - 0.7))
         return initial_theta * decay_factor
     else:
         decay_factor = np.exp(-2 * t_frac)
         return initial_theta * (1 - decay_factor)
 
-# --- v146.0: P&L RECONSTRUCTION HELPER ---
 def reconstruct_daily_pnl(trades_df):
     trades = trades_df.copy()
     trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
     trades['Exit Date'] = pd.to_datetime(trades['Exit Date'])
+    
     start_date = trades['Entry Date'].min()
     end_date = max(trades['Exit Date'].max(), pd.Timestamp.now())
     date_range = pd.date_range(start=start_date, end=end_date)
+    
     daily_pnl_dict = {d.date(): 0.0 for d in date_range}
 
     for _, trade in trades.iterrows():
         if pd.isnull(trade['Exit Date']): continue
+        
         days = trade['Days Held']
         if days <= 0: days = 1
+        
         total_pnl = trade['P&L']
         strategy = trade['Strategy']
         initial_theta = trade['Theta'] if trade['Theta'] != 0 else 1.0
         
         daily_theta_weights = []
         for day in range(days):
-            expected_theta = theta_decay_model(initial_theta, day, strategy, max(45, days))
+            expected_theta = theta_decay_model(
+                initial_theta, day, strategy, max(45, days)
+            )
             daily_theta_weights.append(abs(expected_theta))
 
         total_theta_sum = sum(daily_theta_weights)
-        if total_theta_sum == 0: daily_theta_weights = [1/days] * days
-        else: daily_theta_weights = [w/total_theta_sum for w in daily_theta_weights]
+        if total_theta_sum == 0:
+            daily_theta_weights = [1/days] * days
+        else:
+            daily_theta_weights = [w/total_theta_sum for w in daily_theta_weights]
             
         curr = trade['Entry Date']
         for day_weight in daily_theta_weights:
-            if curr.date() in daily_pnl_dict: daily_pnl_dict[curr.date()] += total_pnl * day_weight
-            else: daily_pnl_dict[curr.date()] = total_pnl * day_weight
+            if curr.date() in daily_pnl_dict:
+                daily_pnl_dict[curr.date()] += total_pnl * day_weight
+            else:
+                daily_pnl_dict[curr.date()] = total_pnl * day_weight
             curr += pd.Timedelta(days=1)
             
     return daily_pnl_dict
@@ -291,6 +373,7 @@ def parse_optionstrat_file(file, file_type, config_dict):
                         break
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
+                
                 if 'Link' in df_raw.columns:
                     try:
                         file.seek(0)
@@ -337,14 +420,18 @@ def parse_optionstrat_file(file, file_type, config_dict):
 
         def finalize_trade(trade_data, legs, f_type):
             if not trade_data.any(): return None
+            
             name = str(trade_data.get('Name', ''))
             group = str(trade_data.get('Group', '')) 
             created = trade_data.get('Created At', '')
             try: start_dt = pd.to_datetime(created)
             except: return None 
+
             strat = get_strategy_dynamic(name, group, config_dict)
+            
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
+            
             pnl = clean_num(trade_data.get('Total Return $', 0))
             debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
             theta = clean_num(trade_data.get('Theta', 0))
@@ -352,23 +439,35 @@ def parse_optionstrat_file(file, file_type, config_dict):
             gamma = clean_num(trade_data.get('Gamma', 0))
             vega = clean_num(trade_data.get('Vega', 0))
             iv = clean_num(trade_data.get('IV', 0))
+
             exit_dt = None
             try:
                 raw_exp = trade_data.get('Expiration')
                 if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
                     exit_dt = pd.to_datetime(raw_exp)
             except: pass
+
             days_held = 1
-            if exit_dt and f_type == "History": days_held = (exit_dt - start_dt).days
-            else: days_held = (datetime.now() - start_dt).days
+            if exit_dt and f_type == "History":
+                  days_held = (exit_dt - start_dt).days
+            else:
+                  days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
+
             strat_config = config_dict.get(strat, {})
             typical_debit = strat_config.get('debit_per_lot', 5000)
+            
             lot_match = re.search(r'(\d+)\s*(?:LOT|L\b)', name, re.IGNORECASE)
-            if lot_match: lot_size = int(lot_match.group(1))
-            else: lot_size = int(round(debit / typical_debit))
+            if lot_match:
+                lot_size = int(lot_match.group(1))
+            else:
+                lot_size = int(round(debit / typical_debit))
+            
             if lot_size < 1: lot_size = 1
-            put_pnl = 0.0; call_pnl = 0.0
+
+            put_pnl = 0.0
+            call_pnl = 0.0
+            
             if f_type == "History":
                 for leg in legs:
                     if len(leg) < 5: continue
@@ -384,25 +483,33 @@ def parse_optionstrat_file(file, file_type, config_dict):
                         elif re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
                         elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
                     except: pass
+            
             t_id = generate_id(name, strat, start_dt)
             return {
                 'id': t_id, 'name': name, 'strategy': strat, 'start_dt': start_dt,
                 'exit_dt': exit_dt, 'days_held': days_held, 'debit': debit,
-                'lot_size': lot_size, 'pnl': pnl, 'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
-                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link, 'group': group
+                'lot_size': lot_size, 'pnl': pnl, 
+                'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
+                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link,
+                'group': group
             }
 
         cols = df_raw.columns
         col_names = [str(c) for c in cols]
-        if 'Name' not in col_names or 'Total Return $' not in col_names: return []
+        if 'Name' not in col_names or 'Total Return $' not in col_names:
+            return []
+
         for index, row in df_raw.iterrows():
             name_val = str(row['Name'])
             if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
                 if current_trade is not None:
                     res = finalize_trade(current_trade, current_legs, file_type)
                     if res: parsed_trades.append(res)
-                current_trade = row; current_legs = []
-            elif name_val.startswith('.'): current_legs.append(row)
+                current_trade = row
+                current_legs = []
+            elif name_val.startswith('.'):
+                current_legs.append(row)
+        
         if current_trade is not None:
              res = finalize_trade(current_trade, current_legs, file_type)
              if res: parsed_trades.append(res)
@@ -424,22 +531,26 @@ def sync_data(file_list, file_type):
             db_active_ids = set(current_active['id'].tolist())
         except: pass
     file_found_ids = set()
+    
     config_dict = load_strategy_config()
 
     for file in file_list:
-        count_new = 0; count_update = 0
+        count_new = 0
+        count_update = 0
         try:
             trades_data = parse_optionstrat_file(file, file_type, config_dict)
             if not trades_data:
                 log.append(f" {file.name}: Skipped (No valid trades found)")
                 continue
+
             for t in trades_data:
                 trade_id = t['id']
-                if file_type == "Active": file_found_ids.add(trade_id)
+                if file_type == "Active":
+                    file_found_ids.add(trade_id)
+                
                 c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
                 existing = c.fetchone()
                 
-                # Rename Logic
                 if existing is None and t['link'] and len(t['link']) > 15:
                     c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
                     link_match = c.fetchone()
@@ -455,26 +566,39 @@ def sync_data(file_list, file_type):
                                 file_found_ids.add(trade_id)
                                 if old_id in db_active_ids: db_active_ids.remove(old_id)
                                 db_active_ids.add(trade_id)
-                        except Exception as rename_err: print(f"Rename failed: {rename_err}")
+                        except Exception as rename_err:
+                            print(f"Rename failed: {rename_err}")
 
                 status = "Active" if file_type == "Active" else "Expired"
+                
                 if existing is None:
                     c.execute('''INSERT INTO trades 
                         (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id, put_pnl, call_pnl, iv, link, original_group)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (trade_id, t['name'], t['strategy'], status, t['start_dt'].date(), t['exit_dt'].date() if t['exit_dt'] else None, 
-                         t['days_held'], t['debit'], t['lot_size'], t['pnl'], t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link'], t['group']))
+                        (trade_id, t['name'], t['strategy'], status, t['start_dt'].date(), 
+                         t['exit_dt'].date() if t['exit_dt'] else None, 
+                         t['days_held'], t['debit'], t['lot_size'], t['pnl'], 
+                         t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link'], t['group']))
                     count_new += 1
                 else:
                     db_lot_size = existing[10]
                     final_lot_size = t['lot_size']
-                    if db_lot_size and db_lot_size > 0: final_lot_size = db_lot_size
+                    if db_lot_size and db_lot_size > 0:
+                        final_lot_size = db_lot_size
+
                     db_strategy = existing[11]
                     final_strategy = db_strategy
-                    if db_strategy == 'Other' and t['strategy'] != 'Other': final_strategy = t['strategy']
-                    old_put = existing[6] if existing[6] else 0.0; old_call = existing[7] if existing[7] else 0.0
-                    old_iv = existing[8] if existing[8] else 0.0; old_link = existing[9] if existing[9] else ""
-                    old_status = existing[1]; old_theta = existing[2]
+                    if db_strategy == 'Other' and t['strategy'] != 'Other':
+                         final_strategy = t['strategy']
+
+                    old_put = existing[6] if existing[6] else 0.0
+                    old_call = existing[7] if existing[7] else 0.0
+                    old_iv = existing[8] if existing[8] else 0.0
+                    old_link = existing[9] if existing[9] else ""
+                    
+                    old_status = existing[1]
+                    old_theta = existing[2]
+
                     final_theta = t['theta'] if t['theta'] != 0 else old_theta
                     final_delta = t['delta'] if t['delta'] != 0 else 0
                     final_gamma = t['gamma'] if t['gamma'] != 0 else 0
@@ -501,10 +625,12 @@ def sync_data(file_list, file_type):
                 if file_type == "Active":
                     today = datetime.now().date()
                     c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
+                    
                     theta_val = t['theta'] if t['theta'] else 0.0
                     delta_val = t['delta'] if t['delta'] else 0.0
                     vega_val = t['vega'] if t['vega'] else 0.0
                     gamma_val = t['gamma'] if t['gamma'] else 0.0
+                    
                     if not c.fetchone():
                         c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega, gamma) VALUES (?,?,?,?,?,?,?,?)",
                                   (trade_id, today, t['pnl'], t['days_held'], theta_val, delta_val, vega_val, gamma_val))
@@ -512,7 +638,8 @@ def sync_data(file_list, file_type):
                         c.execute("UPDATE snapshots SET theta=?, delta=?, vega=?, gamma=? WHERE trade_id=? AND snapshot_date=?",
                                   (theta_val, delta_val, vega_val, gamma_val, trade_id, today))
             log.append(f" {file.name}: {count_new} New, {count_update} Updated")
-        except Exception as e: log.append(f" {file.name}: Error - {str(e)}")
+        except Exception as e:
+            log.append(f" {file.name}: Error - {str(e)}")
             
     if file_type == "Active" and file_found_ids:
         missing_ids = db_active_ids - file_found_ids
@@ -522,11 +649,6 @@ def sync_data(file_list, file_type):
             log.append(f" Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
     conn.commit()
     conn.close()
-    
-    # --- AUTO CLOUD BACKUP ---
-    if perform_cloud_backup():
-        log.append(" ✅ Cloud Backup Synced Successfully.")
-    
     return log
 
 def update_journal(edited_df):
@@ -541,11 +663,10 @@ def update_journal(edited_df):
             pid = str(row['Parent ID'])
             new_lot = int(row['lot_size']) if 'lot_size' in row and row['lot_size'] > 0 else 1
             new_strat = str(row['Strategy']) 
+            
             c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=?, strategy=? WHERE id=?", (notes, tags, pid, new_lot, new_strat, t_id))
             count += 1
         conn.commit()
-        # --- AUTO CLOUD BACKUP ---
-        perform_cloud_backup()
         return count
     except Exception as e: return 0
     finally: conn.close()
@@ -559,8 +680,6 @@ def update_strategy_config(edited_df):
             c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", 
                       (row['Name'], row['Identifier'], row['Target PnL'], row['Target Days'], row['Min Stability'], row['Description'], row['Typical Debit']))
         conn.commit()
-        # --- AUTO CLOUD BACKUP ---
-        perform_cloud_backup()
         return True
     except Exception as e:
         print(e)
@@ -586,7 +705,6 @@ def reprocess_other_trades():
                 updated_count += 1
     conn.commit()
     conn.close()
-    perform_cloud_backup()
     return updated_count
 
 # --- DATA LOADER ---
@@ -642,7 +760,6 @@ def load_data():
         df['lot_size'] = pd.to_numeric(df['lot_size'], errors='coerce').fillna(1).astype(int)
         df['lot_size'] = df['lot_size'].apply(lambda x: 1 if x < 1 else x)
         
-        # --- Ensure Debit/Lot is always calculated ---
         df['Debit/Lot'] = np.where(df['lot_size'] > 0, df['Debit'] / df['lot_size'], df['Debit'])
 
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
@@ -653,7 +770,6 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # Stability Ratio (Theta vs Risk)
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -715,111 +831,61 @@ def load_snapshots():
 
 # --- INTELLIGENCE FUNCTIONS ---
 def calculate_kelly_fraction(win_rate, avg_win, avg_loss):
-    """
-    Kelly % = (p * b - q) / b
-    where p=win_rate, q=loss_rate, b=avg_win/avg_loss ratio
-    """
     if avg_loss == 0 or avg_win <= 0:
         return 0.0
-        
-    b = abs(avg_win / avg_loss)  # Win/Loss ratio
-    
-    # Kelly Formula
+    b = abs(avg_win / avg_loss)
     kelly = (win_rate * b - (1 - win_rate)) / b
-    
-    # Apply Half-Kelly for safety (never risk more than 25% on one trade)
     return max(0, min(kelly * 0.5, 0.25))
 
 def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total_capital=100000):
-    """
-    Predictive Model: K-Nearest Neighbors + Kelly Criterion
-    """
     if active_df.empty or history_df.empty: return pd.DataFrame()
-    
     features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
-    
-    # Filter only closed trades that have valid feature data
     train_df = history_df.dropna(subset=features).copy()
     if len(train_df) < 5: return pd.DataFrame()
-    
     predictions = []
-    
     for _, row in active_df.iterrows():
-        # Get current trade vector
         curr_vec = np.nan_to_num(row[features].values.astype(float)).reshape(1, -1)
         hist_vecs = np.nan_to_num(train_df[features].values.astype(float))
-        
-        # Calculate distances (Similarity)
         distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
-        
-        # Get Top 7 similar trades
         top_k_idx = np.argsort(distances)[:7]
         nearest_neighbors = train_df.iloc[top_k_idx]
-        
-        # Forecast Logic
         win_prob = (nearest_neighbors['P&L'] > 0).mean()
         avg_pnl = nearest_neighbors['P&L'].mean()
-        
-        # Kelly Logic
         avg_win = nearest_neighbors[nearest_neighbors['P&L'] > 0]['P&L'].mean()
         avg_loss = nearest_neighbors[nearest_neighbors['P&L'] < 0]['P&L'].mean()
         if pd.isna(avg_win): avg_win = 0
-        if pd.isna(avg_loss): avg_loss = -avg_pnl * 0.5 # Fallback assumption
-        
+        if pd.isna(avg_loss): avg_loss = -avg_pnl * 0.5
         kelly_size = calculate_kelly_fraction(win_prob, avg_win, avg_loss)
         rec_dollars = kelly_size * total_capital
-        
-        # Confidence logic
         avg_dist = distances[top_k_idx].mean()
         confidence = max(0, 100 - (avg_dist * 10)) 
-        
         rec = "HOLD"
         if win_prob * 100 < prob_low: rec = "REDUCE/CLOSE"
         elif win_prob * 100 > prob_high: rec = "PRESS WINNER"
-        
         predictions.append({
-            'Trade Name': row['Name'],
-            'Strategy': row['Strategy'],
-            'Win Prob %': win_prob * 100,
-            'Expected PnL': avg_pnl,
-            'Kelly Size %': kelly_size * 100,
-            'Rec. Size ($)': rec_dollars,
-            'AI Rec': rec,
-            'Confidence': confidence
+            'Trade Name': row['Name'], 'Strategy': row['Strategy'], 'Win Prob %': win_prob * 100,
+            'Expected PnL': avg_pnl, 'Kelly Size %': kelly_size * 100, 'Rec. Size ($)': rec_dollars,
+            'AI Rec': rec, 'Confidence': confidence
         })
-        
     return pd.DataFrame(predictions)
 
 def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
-    """
-    Time-Decay Intelligence: Checks if active trades are 'rotting'
-    """
     if active_df.empty or history_df.empty: return pd.DataFrame()
-    
     history_df['Eff_Score'] = (history_df['P&L'] / history_df['Days Held'].clip(lower=1)) / (history_df['Debit'] / 1000)
     baseline_eff = history_df.groupby('Strategy')['Eff_Score'].median().to_dict()
-    
     rot_alerts = []
-    
     for _, row in active_df.iterrows():
         strat = row['Strategy']
         days = row['Days Held']
         if days < min_days: continue
-        
         curr_eff = (row['P&L'] / days) / (row['Debit'] / 1000) if row['Debit'] > 0 else 0
         base = baseline_eff.get(strat, 0)
-        
         if base > 0 and curr_eff < (base * threshold_pct):
             rot_alerts.append({
-                'Trade': row['Name'],
-                'Strategy': strat,
-                'Current Speed': f"${curr_eff:.1f}/day",
-                'Baseline Speed': f"${base:.1f}/day",
-                'Raw Current': curr_eff, 
-                'Raw Baseline': base,    
+                'Trade': row['Name'], 'Strategy': strat, 'Current Speed': f"${curr_eff:.1f}/day",
+                'Baseline Speed': f"${base:.1f}/day", 'Raw Current': curr_eff, 'Raw Baseline': base,    
                 'Status': ' ROTTING' if row['P&L'] > 0 else ' DEAD MONEY'
             })
-            
     return pd.DataFrame(rot_alerts)
 
 def get_dynamic_targets(history_df, percentile):
@@ -849,52 +915,34 @@ def find_similar_trades(current_trade, historical_df, top_n=3):
     similar['Similarity %'] = 100 * (1 - distances[similar_idx] / max_dist)
     return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
 
-# --- v146.0: FIXED SHARPE & EQUITY CURVE (With Realistic P&L Attribution) ---
 def calculate_portfolio_metrics(trades_df, capital):
     if trades_df.empty or capital <= 0: return 0.0, 0.0
-    
-    # Use the new realistic attribution logic
     daily_pnl_dict = reconstruct_daily_pnl(trades_df)
-    
-    # Create Full Date Range
     trades_df['Entry Date'] = pd.to_datetime(trades_df['Entry Date'])
     trades_df['Exit Date'] = pd.to_datetime(trades_df['Exit Date'])
     start_date = trades_df['Entry Date'].min()
     end_date = max(trades_df['Exit Date'].max(), pd.Timestamp.now())
     date_range = pd.date_range(start=start_date, end=end_date)
-    
-    # Build Equity Curve (Starting Capital + Cumulative PnL)
     equity = capital
     daily_equity_values = []
-    
     for d in date_range:
         day_pnl = daily_pnl_dict.get(d.date(), 0)
         equity += day_pnl
         daily_equity_values.append(equity)
-        
     equity_series = pd.Series(daily_equity_values)
-    
-    # Calculate DAILY RETURNS (% change of equity curve)
     daily_returns = equity_series.pct_change().dropna()
-    
-    # Sharpe Ratio Calculation
     if daily_returns.std() == 0:
         sharpe = 0.0
     else:
-        # Annualized Sharpe (assuming 252 trading days)
         sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
-    
-    # CAGR Calculation
     total_days = (end_date - start_date).days
     if total_days < 1: total_days = 1
     total_pnl = trades_df['P&L'].sum()
     end_val = capital + total_pnl
-    
     try:
         cagr = ( (end_val / capital) ** (365 / total_days) ) - 1
     except:
         cagr = 0.0
-    
     return sharpe, cagr * 100
 
 def check_concentration_risk(active_df, total_equity, threshold=0.15):
@@ -904,29 +952,20 @@ def check_concentration_risk(active_df, total_equity, threshold=0.15):
         concentration = row['Debit'] / total_equity
         if concentration > threshold:
             warnings.append({
-                'Trade': row['Name'],
-                'Strategy': row['Strategy'],
-                'Size %': f"{concentration:.1%}",
-                'Risk': f"${row['Debit']:,.0f}",
-                'Limit': f"{threshold:.0%}"
+                'Trade': row['Name'], 'Strategy': row['Strategy'], 'Size %': f"{concentration:.1%}",
+                'Risk': f"${row['Debit']:,.0f}", 'Limit': f"{threshold:.0%}"
             })
     return pd.DataFrame(warnings)
 
-# --- v146.0: UPDATED MAX DRAWDOWN (With Realistic P&L Attribution) ---
 def calculate_max_drawdown(trades_df, initial_capital):
     if trades_df.empty or initial_capital <= 0: 
         return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
-
-    # 1. Reconstruct Daily PnL (Realistic Model)
     daily_pnl_dict = reconstruct_daily_pnl(trades_df)
-    
     trades_df['Entry Date'] = pd.to_datetime(trades_df['Entry Date'])
     trades_df['Exit Date'] = pd.to_datetime(trades_df['Exit Date'])
     start_date = trades_df['Entry Date'].min()
     end_date = max(trades_df['Exit Date'].max(), pd.Timestamp.now())
     date_range = pd.date_range(start=start_date, end=end_date)
-    
-    # 2. Build Equity Curve
     equity = initial_capital
     equity_curve = []
     dates = []
@@ -935,35 +974,21 @@ def calculate_max_drawdown(trades_df, initial_capital):
         equity += day_pnl
         equity_curve.append(equity)
         dates.append(d.date())
-        
     equity_series = pd.Series(equity_curve, index=pd.to_datetime(dates))
-    
-    # 3. Calculate Drawdown
     running_max = equity_series.cummax()
     drawdown = (equity_series - running_max) / running_max
-    
     max_dd = drawdown.min()
     current_dd = drawdown.iloc[-1]
-    
-    return {
-        'Max Drawdown %': max_dd * 100,
-        'Current DD %': current_dd * 100
-    }
+    return {'Max Drawdown %': max_dd * 100, 'Current DD %': current_dd * 100}
 
 def rolling_correlation_matrix(snaps, window_days=30):
     if snaps.empty: return None
     strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
     if len(strat_daily) < window_days: return None
-    
     last_30 = strat_daily.tail(30)
     corr_30 = last_30.corr()
-    
-    fig = px.imshow(corr_30, 
-                    text_auto=".2f", 
-                    aspect="auto", 
-                    color_continuous_scale="RdBu", 
-                    title="Strategy Correlation (Last 30 Days)",
-                    labels=dict(color="Correlation"))
+    fig = px.imshow(corr_30, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
+                    title="Strategy Correlation (Last 30 Days)", labels=dict(color="Correlation"))
     return fig
 
 def generate_adaptive_rulebook_text(history_df, strategies):
@@ -971,7 +996,6 @@ def generate_adaptive_rulebook_text(history_df, strategies):
     if history_df.empty:
         text += " *Not enough data yet. Complete more trades to unlock adaptive rules.*"
         return text
-
     for strat in strategies:
         strat_df = history_df[history_df['Strategy'] == strat]
         if strat_df.empty: continue
@@ -986,13 +1010,11 @@ def generate_adaptive_rulebook_text(history_df, strategies):
             text += f"* ** Optimal Hold:** {avg_hold:.0f} Days (Avg Winner Duration)\n"
             avg_cost = winners['Debit/Lot'].mean()
             text += f"* ** Target Cost:** ${avg_cost:,.0f} (Avg Winner Debit per Lot)\n"
-        
         losers = strat_df[strat_df['P&L'] < 0]
         if not losers.empty:
              avg_loss_hold = losers['Days Held'].mean()
              text += f"* ** Loss Pattern:** Losers held for avg {avg_loss_hold:.0f} days.\n"
         text += "\n"
-        
     text += "---\n###  Universal AI Gates\n"
     text += "1. **Efficiency Check:** If 'Rot Detector' flags a trade, cut it. Your capital is stuck.\n"
     text += "2. **Probability Gate:** Check 'Win Prob %' before entering. If < 40%, skip even if the chart looks good.\n"
@@ -1001,37 +1023,33 @@ def generate_adaptive_rulebook_text(history_df, strategies):
 # --- INITIALIZE DB ---
 init_db()
 
-# --- SIDEBAR: DAILY WORKFLOW & CLOUD SETTINGS ---
+# --- SIDEBAR ---
 st.sidebar.markdown("###  Daily Workflow")
 
-# NEW: Cloud Settings
-with st.sidebar.expander("☁️ Cloud Sync Settings", expanded=False):
-    app_conf = load_app_config()
-    st.info("Point this to your Google Drive, OneDrive, or Dropbox folder.")
-    new_path = st.text_input("Cloud Folder Path:", value=app_conf.get("cloud_path", ""))
-    auto_bk = st.checkbox("Auto-Backup on Save", value=app_conf.get("auto_backup", False))
-    
-    if st.button("Save Settings"):
-        app_conf["cloud_path"] = new_path
-        app_conf["auto_backup"] = auto_bk
-        save_app_config(app_conf)
-        st.success("Settings Saved!")
-    
-    if new_path and os.path.exists(new_path):
-        backup_file = os.path.join(new_path, "trade_guardian_backup.db")
-        if os.path.exists(backup_file):
-            st.caption(f"Last Backup: {datetime.fromtimestamp(os.path.getmtime(backup_file)).strftime('%Y-%m-%d %H:%M')}")
-            if st.button("📥 Restore from Cloud"):
-                shutil.copy2(backup_file, DB_NAME)
-                st.cache_data.clear()
-                st.success("Restored from Cloud!")
-                st.rerun()
-    elif new_path:
-        st.error("Invalid Path")
+# --- CLOUD SYNC SECTION (NEW) ---
+if GOOGLE_DEPS_INSTALLED:
+    with st.sidebar.expander("☁️ Cloud Sync (Google Drive)", expanded=True):
+        if not drive_mgr.is_connected:
+            st.error("No secrets found. Add 'gcp_service_account' to .streamlit/secrets.toml")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("⬆️ Sync to Cloud"):
+                    success, msg = drive_mgr.upload_db()
+                    if success: st.success(msg)
+                    else: st.error(msg)
+            with c2:
+                if st.button("⬇️ Pull from Cloud"):
+                    success, msg = drive_mgr.download_db()
+                    if success: 
+                        st.cache_data.clear()
+                        st.success(msg)
+                        st.rerun()
+                    else: st.error(msg)
+            st.caption("Press 'Sync to Cloud' after saving journal or processing files.")
 
-# 1. STARTUP
-with st.sidebar.expander("1.  STARTUP (Manual Restore)", expanded=True):
-    restore = st.file_uploader("Upload .db file (if not using Cloud Sync)", type=['db'], key='restore')
+with st.sidebar.expander("1.  STARTUP (Restore Local)", expanded=False):
+    restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
     if restore:
         with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
         st.cache_data.clear()
@@ -1040,7 +1058,6 @@ with st.sidebar.expander("1.  STARTUP (Manual Restore)", expanded=True):
             st.session_state['restored'] = True
             st.rerun()
 
-# 2. WORK
 st.sidebar.markdown(" *then...*")
 with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
     active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
@@ -1054,13 +1071,11 @@ with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
             st.cache_data.clear()
             st.success("Sync Complete!")
 
-# 3. SHUTDOWN
 st.sidebar.markdown(" *finally...*")
-with st.sidebar.expander("3.  SHUTDOWN (Backup)", expanded=True):
+with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
     with open(DB_NAME, "rb") as f:
         st.download_button(" Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
 
-# --- MAINTENANCE ---
 with st.sidebar.expander(" Maintenance", expanded=False):
     st.caption("Fix Duplicates / Rename Issues")
     if st.button(" Vacuum DB"):
@@ -1104,7 +1119,6 @@ with st.sidebar.expander(" Maintenance", expanded=False):
 st.sidebar.divider()
 st.sidebar.header(" Portfolio Settings")
 
-# --- v141: MULTI-ACCOUNT CAPITAL ---
 prime_cap = st.sidebar.number_input("Prime Account (130/160, M200)", min_value=1000, value=115000, step=1000)
 smsf_cap = st.sidebar.number_input("SMSF Account", min_value=1000, value=150000, step=1000)
 total_cap = prime_cap + smsf_cap
@@ -1121,24 +1135,18 @@ def calculate_decision_ladder(row, benchmarks_dict):
     theta = row['Theta']
     stability = row['Stability']
     debit = row['Debit']
-    
     lot_size = row.get('lot_size', 1)
     if lot_size < 1: lot_size = 1
-    
     juice_val = 0.0
     juice_type = "Neutral"
-
     if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
-    
     bench = benchmarks_dict.get(strat, {})
     hist_avg_pnl = bench.get('pnl', 1000)
     target_profit = (hist_avg_pnl * regime_mult) * lot_size
     hist_avg_days = bench.get('dit', 40)
-    
     score = 50 
     action = "HOLD"
     reason = "Normal"
-    
     if pnl < 0:
         juice_type = "Recovery Days"
         if theta > 0:
@@ -1239,10 +1247,8 @@ if not df.empty and 'Status' in df.columns:
             dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
-# v136: Added " AI & Insights" as a separate main tab
 tab_dash, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " Analytics", " AI & Insights", " Strategies", " Rules"])
 
-# 1. ACTIVE DASHBOARD
 with tab_dash:
     with st.expander(" Universal Pre-Flight Calculator", expanded=False):
         pf_c1, pf_c2, pf_c3 = st.columns(3)
@@ -1326,32 +1332,23 @@ with tab_dash:
             total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
             avg_age = active_df['Days Held'].mean()
             
-            # --- UPDATED LOGIC v140.1 ---
             if total_delta_pct > 6 or avg_age > 45:
-                health_status = " CRITICAL"  # High Risk (Greeks/Time)
+                health_status = " CRITICAL" 
             elif allocation_score < 40:
-                health_status = " CRITICAL"  # Severely Broken Allocation
+                health_status = " CRITICAL" 
             elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25:
-                health_status = " REVIEW"    # Suboptimal but not dangerous
+                health_status = " REVIEW"    
             else:
-                health_status = " HEALTHY"   # Perfect
+                health_status = " HEALTHY"   
             
-            # --- v146.0: SIMPLIFIED DASHBOARD (Progressive Disclosure) ---
             with st.container():
-                # CRITICAL METRICS ONLY (Big Numbers)
                 tot_theta = active_df['Theta'].sum()
-                
                 c1, c2, c3, c4 = st.columns(4)
-                
-                # Dynamic Icon for Health
                 h_icon = "🟢" if "HEALTHY" in health_status else ("🔴" if "CRITICAL" in health_status else "🟡")
                 c1.metric("Portfolio Health", f"{h_icon} {health_status}")
-                
                 c2.metric("Daily Income", f"${tot_theta:,.0f}")
-                
                 curr_pnl = active_df['P&L'].sum()
                 c3.metric("Floating P&L", f"${curr_pnl:,.0f}", delta_color="normal" if curr_pnl > 0 else "inverse")
-                
                 ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
                 active_df['Action'] = [x[0] for x in ladder_results]
                 active_df['Urgency Score'] = [x[1] for x in ladder_results]
@@ -1359,11 +1356,9 @@ with tab_dash:
                 active_df['Juice Val'] = [x[3] for x in ladder_results]
                 active_df['Juice Type'] = [x[4] for x in ladder_results]
                 active_df = active_df.sort_values('Urgency Score', ascending=False)
-                
                 todo_df = active_df[active_df['Urgency Score'] >= 70]
                 c4.metric("Action Items", len(todo_df), delta="Urgent" if len(todo_df) > 0 else None)
             
-            # Detailed metrics in expander
             with st.expander("📊 Detailed Metrics (Allocation, Greeks, Age)", expanded=False):
                 d1, d2, d3, d4 = st.columns(4)
                 eff_score = (tot_theta / tot_debit * 100)
@@ -1371,27 +1366,18 @@ with tab_dash:
                 d2.metric("Yield/Cap", f"{eff_score:.2f}%")
                 d3.metric("Net Delta", f"{total_delta_pct:.2f}%")
                 d4.metric("Avg Age", f"{avg_age:.0f} days")
-                
                 stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
                 if stale_capital > tot_debit * 0.3:
                      st.warning(f" ${stale_capital:,.0f} stuck in trades >40 days old. Consider exits.")
 
             st.divider()
-            
-            # --- v146.0: TRADE HEATMAP (New Visualization) ---
             st.subheader("🗺️ Position Heat Map")
-            # Create 2D scatter: Days Held (X) vs. P&L (Y), size = Debit
             fig_heat = px.scatter(
-                active_df, 
-                x='Days Held', 
-                y='P&L', 
-                size='Debit',
-                color='Urgency Score',
-                color_continuous_scale='RdYlGn_r',  # Red = High urgency
+                active_df, x='Days Held', y='P&L', size='Debit',
+                color='Urgency Score', color_continuous_scale='RdYlGn_r',
                 hover_data=['Name', 'Strategy', 'Action'],
                 title="Position Clustering (Size = Capital)"
             )
-            # Add quadrants
             avg_days_current = active_df['Days Held'].mean()
             fig_heat.add_vline(x=avg_days_current, line_dash="dash", opacity=0.5, annotation_text="Avg Age")
             fig_heat.add_hline(y=0, line_dash="dash", opacity=0.5)
@@ -1399,8 +1385,6 @@ with tab_dash:
             st.caption("🎯 Top-Right = Winners aging well | 🚨 Bottom-Right = Losers rotting | 🌱 Left = New positions cooking")
 
             st.divider()
-
-            # --- SMART COLLAPSE: Only expand if action needed ---
             is_expanded = len(todo_df) > 0
             with st.expander(f" Priority Action Queue ({len(todo_df)})", expanded=is_expanded):
                 if not todo_df.empty:
@@ -1417,19 +1401,16 @@ with tab_dash:
                 else: st.success(" No critical actions required. Portfolio is healthy.")
             st.divider()
 
-            # --- NEW LAYOUT: DNA Tool in its own tab ---
             sub_journal, sub_strat, sub_dna = st.tabs([" Journal", " Strategy Detail", " DNA Tool"])
             
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
                 strategy_options = sorted(list(dynamic_benchmarks.keys())) + ["Other"]
-                
                 def fmt_juice(row):
                     if row['Juice Type'] == 'Recovery Days': return f"{row['Juice Val']:.0f} days"
                     return f"${row['Juice Val']:.0f}"
                 active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
 
-                # Updated Columns to include ROI and Ann. ROI
                 display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'ROI', 'Ann. ROI', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
                 column_config = {
                     "id": None, "Name": st.column_config.TextColumn("Trade Name", disabled=True),
@@ -1566,12 +1547,29 @@ with tab_strategies:
     conn = get_db_connection()
     try:
         strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
-        expected_cols = {'name': 'Name', 'identifier': 'Identifier', 'target_pnl': 'Target PnL', 'target_days': 'Target Days', 'min_stability': 'Min Stability', 'description': 'Description', 'typical_debit': 'Typical Debit'}
+        expected_cols = {
+            'name': 'Name',
+            'identifier': 'Identifier',
+            'target_pnl': 'Target PnL',
+            'target_days': 'Target Days',
+            'min_stability': 'Min Stability',
+            'description': 'Description',
+            'typical_debit': 'Typical Debit'
+        }
         for db_col in expected_cols.keys():
             if db_col not in strat_df.columns:
                 strat_df[db_col] = 0.0 if 'pnl' in db_col or 'debit' in db_col else (0 if 'days' in db_col else "")
         strat_df = strat_df[list(expected_cols.keys())].rename(columns=expected_cols)
-        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True, column_config={"Name": st.column_config.TextColumn("Strategy Name", help="Unique name"), "Identifier": st.column_config.TextColumn("Keyword Match"), "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"), "Target Days": st.column_config.NumberColumn("Target DIT (Days)"), "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f"), "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d"), "Description": st.column_config.TextColumn("Notes")})
+        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name"),
+                "Identifier": st.column_config.TextColumn("Keyword Match"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d"),
+                "Description": st.column_config.TextColumn("Notes")
+            })
         c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
             if st.button(" Save Changes"):
@@ -1597,31 +1595,24 @@ with tab_analytics:
                 health_col1, health_col2, health_col3 = st.columns(3)
                 tot_debit = active_df['Debit'].sum()
                 if tot_debit == 0: tot_debit = 1
-                
                 target_allocation = {'130/160': 0.30, '160/190': 0.40, 'M200': 0.20, 'SMSF': 0.10}
                 actual = active_df.groupby('Strategy')['Debit'].sum() / tot_debit
                 allocation_score = 100 - sum(abs(actual.get(s, 0) - target_allocation.get(s, 0)) * 100 for s in target_allocation)
                 health_col1.metric(" Allocation Score", f"{allocation_score:.0f}/100", delta="Optimal" if allocation_score > 80 else "Review")
-                
                 total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
                 greek_health = " Safe" if total_delta_pct < 2 else " Warning" if total_delta_pct < 5 else " Danger"
                 health_col2.metric(" Greek Exposure", greek_health, delta=f"{total_delta_pct:.2f}% Delta/Capital", delta_color="inverse")
-                
                 avg_age = active_df['Days Held'].mean()
                 age_health = " Fresh" if avg_age < 25 else " Aging" if avg_age < 35 else " Stale"
                 health_col3.metric(" Portfolio Age", age_health, delta=f"{avg_age:.0f} days avg", delta_color="inverse")
-                
                 conc_warnings = check_concentration_risk(active_df, total_cap) 
                 if not conc_warnings.empty:
                     st.warning(" **Position Sizing Alert:** The following trades exceed 15% concentration.")
                     st.dataframe(conc_warnings, use_container_width=True)
-                
                 st.divider()
 
             st.markdown("###  Performance Deep Dive")
             realized_pnl = df[df['Status']=='Expired']['P&L'].sum()
-            floating_pnl = df[df['Status']=='Active']['P&L'].sum()
-            
             try:
                 if not expired_df.empty:
                     smsf_trades = expired_df[expired_df['Strategy'].str.contains("SMSF", case=False, na=False)].copy()
@@ -1641,7 +1632,7 @@ with tab_analytics:
                         st.markdown("** PRIME (Income)**")
                         st.metric("Profit", f"${prime_trades['P&L'].sum():,.0f}")
                         st.metric("CAGR", f"{c_prime:.1f}%")
-                        st.metric("Sharpe", f"{s_prime:.2f}", help="Daily Sharpe Ratio (Annualized). >1.0 is Good, >2.0 is Excellent. Calculated by reconstructing daily equity curve from trade start/end dates.")
+                        st.metric("Sharpe", f"{s_prime:.2f}", help="Daily Sharpe Ratio (Annualized). >1.0 is Good, >2.0 is Excellent.")
 
                     with col3:
                         st.markdown("** SMSF (Wealth)**")
@@ -1658,7 +1649,6 @@ with tab_analytics:
                     with r1: st.metric("Total Max DD", f"{mdd_total['Max Drawdown %']:.1f}%", help="Largest peak-to-trough decline in total equity.")
                     with r2: st.metric("Prime Max DD", f"{mdd_prime['Max Drawdown %']:.1f}%")
                     with r3: st.metric("SMSF Max DD", f"{mdd_smsf['Max Drawdown %']:.1f}%")
-
                 else:
                     st.info("Need closed trades for deep dive.")
             except Exception as e: st.error(f"Error calculating metrics: {e}")
@@ -1680,21 +1670,27 @@ with tab_analytics:
             perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
             perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
             perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
+            
             std_roi = expired_df.groupby('Strategy')['ROI'].std().reset_index(name='Std_ROI')
             perf_agg = perf_agg.merge(std_roi, on='Strategy', how='left').fillna(1)
             perf_agg['Sharpe'] = (perf_agg['ROI'] / perf_agg['Std_ROI']) * np.sqrt(perf_agg['id'])
             
             perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI', 'Sharpe']].copy()
             perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI', 'Sharpe']
-            total_pnl = perf_display['Total P&L'].sum(); total_vol = perf_display['Total Volume'].sum()
-            total_cap_days = perf_agg['Cap_Days'].sum(); total_trades = perf_display['Trades'].sum()
-            total_wins = perf_agg['Wins'].sum(); total_win_rate = total_wins / total_trades if total_trades > 0 else 0
+            
+            total_pnl = perf_display['Total P&L'].sum()
+            total_vol = perf_display['Total Volume'].sum()
+            total_cap_days = perf_agg['Cap_Days'].sum()
+            total_trades = perf_display['Trades'].sum()
+            total_wins = perf_agg['Wins'].sum()
+            total_win_rate = total_wins / total_trades if total_trades > 0 else 0
             total_simple_ret = (total_pnl / total_vol * 100) if total_vol > 0 else 0
             total_twr = (total_pnl / total_cap_days * 365 * 100) if total_cap_days > 0 else 0
             avg_trade_roi = expired_df['ROI'].mean()
             
             total_row = pd.DataFrame({'Strategy': ['TOTAL'], 'Trades': [total_trades], 'Win Rate': [total_win_rate], 'Total P&L': [total_pnl], 'Total Volume': [total_vol], 'Simple Return %': [total_simple_ret], 'Ann. TWR %': [total_twr], 'Avg Trade ROI': [avg_trade_roi], 'Sharpe': [0]})
             perf_display = pd.concat([perf_display, total_row], ignore_index=True)
+
             st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%", 'Sharpe': "{:.2f}"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI', 'Sharpe']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
             
             st.subheader(" Efficiency Showdown: Active vs Historical")
@@ -1717,9 +1713,7 @@ with tab_analytics:
                 combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
                 fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group', title="Capital Efficiency Comparison (Annualized Return)", color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'}, text='Return %')
                 fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-                fig_compare.update_yaxes(title="Annualized Return (%)")
                 st.plotly_chart(fig_compare, use_container_width=True)
-            else: st.info("Insufficient data for comparison.")
 
             st.subheader(" Profit Anatomy: Call vs Put Contribution")
             strat_anatomy = expired_df.groupby('Strategy')[['Put P&L', 'Call P&L']].mean().reset_index()
@@ -1739,7 +1733,6 @@ with tab_analytics:
                 fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Call P&L'], name='Call PnL', marker_color='#00CC96'))
                 fig_trade_ana.update_layout(barmode='relative', title=f"Profit Attribution: {sel_strat_ana}", xaxis_title="Trade", yaxis_title="PnL ($)", xaxis_tickangle=-45)
                 st.plotly_chart(fig_trade_ana, use_container_width=True)
-            else: st.info("No closed trades for this strategy.")
 
     with an_trends:
         col1, col2 = st.columns(2)
@@ -1755,8 +1748,6 @@ with tab_analytics:
                     comp_df = pd.concat([avg_win_debit, avg_act_debit])
                     fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group', title="Entry Price per Lot Comparison", color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
                     st.plotly_chart(fig_price, use_container_width=True)
-                else: st.info("Need more data.")
-            else: st.info("No data available.")
         with col2:
             st.subheader(" Profit Drivers (Puts vs Calls)")
             if not df.empty and 'Status' in df.columns:
@@ -1765,8 +1756,6 @@ with tab_analytics:
                     leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
                     fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], title="Profit Source Split", color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
                     st.plotly_chart(fig_legs, use_container_width=True)
-                else: st.info("No closed trades.")
-            else: st.info("No data available.")
         st.divider()
         if not expired_df.empty:
             ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
@@ -1803,11 +1792,9 @@ with tab_analytics:
                 if fig_rolling_corr:
                     st.plotly_chart(fig_rolling_corr, use_container_width=True)
                     st.caption("Heatmap shows correlations of strategy P&L over the last 30 days. Red = Strategies moving together (Risk). Blue = Diversified.")
-                else: st.info("Insufficient snapshot history for correlation analysis (need > 30 days).")
-            else: st.info("Insufficient snapshot data for correlation.")
+                else: st.info("Insufficient snapshot history.")
         with r_mae:
             st.subheader("Excursion Analysis: Pain (MAE) vs Potential (MFE)")
-            st.caption("MAE = Max Drawdown. MFE = Max Unrealized Profit. Ideally, your Final P&L should be close to your MFE.")
             mae_view = st.radio("View:", ["Closed Trades Only (Final Result)", "Include Active Trades (Current Drawdown)"], horizontal=True)
             if not snaps.empty and not df.empty:
                 excursion_df = snaps.groupby('trade_id')['pnl'].agg(['min', 'max']).reset_index()
@@ -1817,19 +1804,16 @@ with tab_analytics:
                 if not viz_mae.empty:
                     mae_c1, mae_c2 = st.columns(2)
                     with mae_c1:
-                        fig_mae_scat = px.scatter(viz_mae, x='MAE', y='P&L', color='Strategy', symbol='Status' if "Include Active" in mae_view else None, hover_data=['Name', 'Days Held'], title="Drawdown (MAE) vs Final P&L", labels={'MAE': 'Max Drawdown ($)', 'P&L': 'Final Profit ($)'})
+                        fig_mae_scat = px.scatter(viz_mae, x='MAE', y='P&L', color='Strategy', symbol='Status' if "Include Active" in mae_view else None, hover_data=['Name', 'Days Held'], title="Drawdown (MAE) vs Final P&L")
                         fig_mae_scat.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.5); fig_mae_scat.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.5)
                         st.plotly_chart(fig_mae_scat, use_container_width=True)
                     with mae_c2:
                         viz_mfe = viz_mae[viz_mae['MFE'] > 0]
-                        fig_mfe = px.scatter(viz_mfe, x='MFE', y='P&L', color='Strategy', hover_data=['Name'], title="Potential (MFE) vs Final P&L", labels={'MFE': 'Max Profit Reached ($)', 'P&L': 'Realized Profit ($)'})
+                        fig_mfe = px.scatter(viz_mfe, x='MFE', y='P&L', color='Strategy', hover_data=['Name'], title="Potential (MFE) vs Final P&L")
                         if not viz_mfe.empty:
                              max_val = max(viz_mfe['MFE'].max(), viz_mfe['P&L'].max())
                              fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
                         st.plotly_chart(fig_mfe, use_container_width=True)
-                        st.caption("Points BELOW the dotted line mean you gave back profits (Greed). Points ON the line mean perfect exit.")
-                else: st.warning("No data available.")
-            else: st.info("Need snapshot data.")
 
     with an_decay:
         st.subheader(" Trade Life Cycle & Decay")
@@ -1845,8 +1829,10 @@ with tab_analytics:
                 strat_snaps['Theta_Anchor'] = strat_snaps['trade_id'].map(anchor_map)
                 strat_snaps['Theta_Expected'] = strat_snaps.apply(lambda r: theta_decay_model(r['Theta_Anchor'], r['days_held'], r['strategy']), axis=1)
                 strat_snaps = strat_snaps[(strat_snaps['Theta_Anchor'] > 0) & (strat_snaps['theta'] != 0) & (strat_snaps['days_held'] < 60)]
-                fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})", labels={'days_held': 'Days Held', 'pnl': 'P&L ($)'}, markers=True)
+                
+                fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})", markers=True)
                 st.plotly_chart(fig_pnl, use_container_width=True)
+
                 if not strat_snaps.empty:
                     d1, d2 = st.columns(2)
                     with d1:
@@ -1865,8 +1851,6 @@ with tab_analytics:
                         else:
                             fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name', title=f"Delta Drift: {decay_strat}", labels={'days_held': 'Days', 'delta': 'Delta'}, trendline="lowess")
                             st.plotly_chart(fig_delta, use_container_width=True)
-                else: st.warning("Insufficient data after filtering.")
-        else: st.info("Upload daily active files to build decay history.")
 
     with an_rolls: 
         st.subheader(" Roll Campaign Analysis")
@@ -1878,6 +1862,7 @@ with tab_analytics:
                 campaign = df[(df['id'] == parent) | (df['Parent ID'] == parent)]
                 if campaign.empty: continue
                 campaign_summary.append({'Campaign': parent[:15], 'Total P&L': campaign['P&L'].sum(), 'Total Days': campaign['Days Held'].sum(), 'Legs': len(campaign), 'Avg P&L/Leg': campaign['P&L'].mean()})
+            
             if campaign_summary:
                 camp_df = pd.DataFrame(campaign_summary)
                 st.dataframe(camp_df.style.format({'Total P&L': '${:,.0f}', 'Avg P&L/Leg': '${:,.0f}'}), use_container_width=True)
@@ -1886,30 +1871,27 @@ with tab_analytics:
                 c1, c2 = st.columns(2)
                 c1.metric("Avg Single Trade P&L", f"${avg_single:,.0f}")
                 c2.metric("Avg Roll Campaign P&L", f"${avg_rolled:,.0f}", delta=f"{avg_rolled-avg_single:,.0f}")
-                if avg_rolled > avg_single: st.success(f" Rolling WORKS: Rolled trades outperform single trades on average.")
-                else: st.warning(f" Rolling HURTS: Consider taking losses earlier.")
-        else: st.info("No rolled trades linked via Parent ID yet. Use the 'Journal' tab to link trades.")
 
-# --- NEW TAB: AI & INTELLIGENCE ---
 with tab_ai:
     st.markdown("###  The Quant Brain (Beta)")
     st.caption("Self-learning insights based on your specific trading history.")
-    if df.empty or expired_df.empty: st.info(" Need more historical data to power the AI engine.")
+    if df.empty or expired_df.empty:
+        st.info(" Need more historical data to power the AI engine.")
     else:
         active_trades = df[df['Status'].isin(['Active', 'Missing'])].copy()
         with st.expander(" Calibration & Thresholds", expanded=False):
             c_set1, c_set2, c_set3 = st.columns(3)
             with c_set1:
                 st.markdown("** Rot Detector**")
-                rot_threshold = st.slider("Efficiency Drop Threshold %", 10, 90, 50, help="Alert if current efficiency is X% of historical average.") / 100.0
+                rot_threshold = st.slider("Efficiency Drop Threshold %", 10, 90, 50) / 100.0
                 min_days_rot = st.number_input("Min Days to Check", 5, 60, 10)
             with c_set2:
                 st.markdown("** Prediction Logic**")
-                prob_high = st.slider("High Confidence Threshold", 60, 95, 75, help="Trades above this % get 'PRESS WINNER' label.")
+                prob_high = st.slider("High Confidence Threshold", 60, 95, 75)
                 prob_low = st.slider("Low Confidence Threshold", 10, 50, 40)
             with c_set3:
                 st.markdown("** Exit Targets**")
-                exit_percentile = st.slider("Optimal Exit Percentile", 50, 95, 75, help="Percentile of historical max wins to target.") / 100.0
+                exit_percentile = st.slider("Optimal Exit Percentile", 50, 95, 75) / 100.0
 
         st.subheader(" Win Probability Forecast (KNN Model + Kelly Size)")
         strategies_avail = sorted(active_trades['Strategy'].unique().tolist())
@@ -1927,9 +1909,7 @@ with tab_ai:
                     st.plotly_chart(fig_pred, use_container_width=True)
                 with c_p2:
                     st.dataframe(preds.style.format({'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%", 'Kelly Size %': "{:.1f}%", 'Rec. Size ($)': "${:,.0f}"}).map(lambda v: 'color: green; font-weight: bold' if v > prob_high else ('color: red; font-weight: bold' if v < prob_low else 'color: orange'), subset=['Win Prob %']), use_container_width=True)
-                    st.info(f" **'Kelly Size'**: Suggested position size based on win probability and payout ratio (Half-Kelly used for safety).")
             else: st.info("Not enough closed trades with matching Greek profiles for prediction.")
-        else: st.info("No active trades to forecast.")
         
         st.divider()
         c_ai_1, c_ai_2 = st.columns(2)
@@ -1958,11 +1938,10 @@ with tab_ai:
                 for s, v in targets.items(): target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit': v['Optimal Exit']})
                 t_df = pd.DataFrame(target_data)
                 st.dataframe(t_df.style.format({'Median Win': '${:,.0f}', 'Optimal Exit': '${:,.0f}'}), use_container_width=True)
-            else: st.info("Need more winning trades to calculate optimal zones.")
 
 with tab_rules:
     strategies_for_rules = sorted(list(dynamic_benchmarks.keys()))
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v147.0")
+    st.caption("Allantis Trade Guardian v146.2 (Cloud Edition)")
