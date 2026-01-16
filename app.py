@@ -27,7 +27,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.6 (Final Polish: Safety Pulls & Retries)")
+st.info("🚀 RUNNING VERSION: v146.7 (Layout & Data Refresh Fixes)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -162,7 +162,7 @@ class DriveManager:
         if not file_id:
             return False, "Database not found in Cloud."
         
-        # --- PULL SAFETY CHECK (New in v146.6) ---
+        # --- PULL SAFETY CHECK ---
         if os.path.exists(DB_NAME) and not force:
             try:
                 local_ts = os.path.getmtime(DB_NAME)
@@ -203,7 +203,7 @@ class DriveManager:
             
         file_id, file_name = self.find_db_file()
         
-        # --- ROBUST CONFLICT RESOLUTION (v146.5) ---
+        # --- ROBUST CONFLICT RESOLUTION ---
         if file_id and not force:
             cloud_time = self.get_cloud_modified_time(file_id)
             
@@ -230,7 +230,7 @@ class DriveManager:
 
         media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
         
-        # --- RETRY LOGIC (New in v146.6) ---
+        # --- RETRY LOGIC ---
         for attempt in range(retries + 1):
             try:
                 if file_id:
@@ -280,7 +280,6 @@ def get_db_connection():
     return sqlite3.connect(DB_NAME)
 
 def init_db():
-    # CLOUD CHECK ON INIT: If local DB missing, try pull from cloud
     if not os.path.exists(DB_NAME) and drive_mgr.is_connected:
         success, msg = drive_mgr.download_db()
         if success:
@@ -930,6 +929,9 @@ def load_data():
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
+        # Clean up Parent ID to ensure strings
+        df['Parent ID'] = df['Parent ID'].astype(str).str.strip().replace('nan', '').replace('None', '')
+        
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         
         def get_grade(row):
@@ -1485,7 +1487,7 @@ if not df.empty and 'Status' in df.columns:
             dynamic_benchmarks[strat] = current_bench
 
 # --- TABS ---
-tab_dash, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " Analytics", " AI & Insights", " Strategies", " Rules"])
+tab_dash, tab_active, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " ⚡ Active Management", " Analytics", " AI & Insights", " Strategies", " Rules"])
 
 with tab_dash:
     with st.expander(" Universal Pre-Flight Calculator", expanded=False):
@@ -1622,7 +1624,21 @@ with tab_dash:
             st.plotly_chart(fig_heat, use_container_width=True)
             st.caption("🎯 Top-Right = Winners aging well | 🚨 Bottom-Right = Losers rotting | 🌱 Left = New positions cooking")
 
-            st.divider()
+    else: st.info(" Database is empty. Sync your first file.")
+
+with tab_active:
+    if not df.empty and 'Status' in df.columns:
+        active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
+        if not active_df.empty:
+            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
+            active_df['Action'] = [x[0] for x in ladder_results]
+            active_df['Urgency Score'] = [x[1] for x in ladder_results]
+            active_df['Reason'] = [x[2] for x in ladder_results]
+            active_df['Juice Val'] = [x[3] for x in ladder_results]
+            active_df['Juice Type'] = [x[4] for x in ladder_results]
+            active_df = active_df.sort_values('Urgency Score', ascending=False)
+            todo_df = active_df[active_df['Urgency Score'] >= 70]
+
             is_expanded = len(todo_df) > 0
             with st.expander(f" Priority Action Queue ({len(todo_df)})", expanded=is_expanded):
                 if not todo_df.empty:
@@ -1639,7 +1655,7 @@ with tab_dash:
                 else: st.success(" No critical actions required. Portfolio is healthy.")
             st.divider()
 
-            sub_journal, sub_strat, sub_dna = st.tabs([" Journal", " Strategy Detail", " DNA Tool"])
+            sub_strat, sub_journal, sub_dna = st.tabs([" Strategy Detail", " Journal", " DNA Tool"])
             
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
@@ -1676,6 +1692,8 @@ with tab_dash:
                         st.success(f"Saved {changes} trades!")
                         st.cache_data.clear()
                         auto_sync_if_connected()
+                        time.sleep(1) 
+                        st.rerun()
             
             with sub_dna:
                 st.subheader(" Trade DNA Fingerprinting")
@@ -1717,7 +1735,12 @@ with tab_dash:
                     display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'Stability', 'P&L Vol', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
                     display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', ' Eff', 'Stability', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
                     
-                    def highlight_trend(val): return 'color: green; font-weight: bold' if '' in str(val) else 'color: red; font-weight: bold' if '' in str(val) else ''
+                    def highlight_trend(val): 
+                        val_str = str(val)
+                        if 'Improving' in val_str: return 'color: green; font-weight: bold'
+                        if 'Lagging' in val_str: return 'color: red; font-weight: bold'
+                        return ''
+                    
                     def style_total(row): return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
 
                     st.dataframe(
@@ -2093,7 +2116,7 @@ with tab_analytics:
 
     with an_rolls: 
         st.subheader(" Roll Campaign Analysis")
-        rolled_trades = df[df['Parent ID'].notna() & (df['Parent ID'] != "")].copy()
+        rolled_trades = df[df['Parent ID'] != ""].copy()
         if not rolled_trades.empty:
             campaign_summary = []
             for parent in rolled_trades['Parent ID'].unique():
@@ -2110,6 +2133,8 @@ with tab_analytics:
                 c1, c2 = st.columns(2)
                 c1.metric("Avg Single Trade P&L", f"${avg_single:,.0f}")
                 c2.metric("Avg Roll Campaign P&L", f"${avg_rolled:,.0f}", delta=f"{avg_rolled-avg_single:,.0f}")
+        else:
+            st.info("No roll campaigns detected. Link trades using the 'Parent ID' column in the Journal.")
 
 with tab_ai:
     st.markdown("###  The Quant Brain (Beta)")
@@ -2183,4 +2208,4 @@ with tab_rules:
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v146.6 (Cloud Edition)")
+    st.caption("Allantis Trade Guardian v146.7 (Cloud Edition)")
