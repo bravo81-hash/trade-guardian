@@ -14,17 +14,36 @@ from scipy.spatial.distance import cdist
 st.set_page_config(page_title="Trade Guardian (FULL DEMO)", layout="wide", page_icon="🛡️")
 
 # --- DEMO BANNER ---
-st.warning("🧪 **DEMO SHOWCASE MODE**: This is a full-feature simulation. All financial data is randomly generated.")
+st.warning("🧪 **DEMO SHOWCASE MODE**: This is a simulation. All data (PnL, Trades, History) is randomly generated.")
 st.title("🛡️ Allantis Trade Guardian (Showcase)")
 
 # --- DATABASE CONSTANTS ---
-DB_NAME = "demo_showcase.db"
+DB_NAME = "demo_showcase_v2.db"
 
-# --- HELPER FUNCTIONS ---
+# ==========================================
+# 1. HELPER FUNCTIONS (The Math)
+# ==========================================
+
+def clean_num(x):
+    try:
+        if pd.isna(x) or str(x).strip() == "": return 0.0
+        val_str = str(x).replace('$', '').replace(',', '').replace('%', '').strip()
+        return float(val_str)
+    except: return 0.0
+
+def safe_fmt(val, fmt_str):
+    try:
+        if isinstance(val, (int, float)): return fmt_str.format(val)
+        return str(val)
+    except: return str(val)
+
 def extract_ticker(name):
     try:
         parts = str(name).split(' ')
-        if parts: return parts[0]
+        if parts:
+            ticker = parts[0].replace('.', '').upper()
+            return ticker
+        return "UNKNOWN"
     except: return "UNKNOWN"
 
 def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
@@ -42,26 +61,37 @@ def reconstruct_daily_pnl(trades_df):
     end_date = pd.Timestamp.now()
     date_range = pd.date_range(start=start_date, end=end_date)
     daily_pnl_dict = {d.date(): 0.0 for d in date_range}
+    
     for _, trade in trades.iterrows():
-        if pd.isnull(trade['Exit Date']) and trade['Status'] == 'Expired': continue 
+        if trade['Status'] == 'Expired' and pd.isnull(trade['Exit Date']): continue
         days = trade['Days Held']
         if days <= 0: days = 1
         total_pnl = trade['P&L']
-        curr = trade['Entry Date']
-        # Simple linear attribution for demo speed
+        
+        # Distribute PnL over days (simplified for demo)
         daily_val = total_pnl / days
-        for day in range(days):
-            if curr.date() in daily_pnl_dict: daily_pnl_dict[curr.date()] += daily_val
+        curr = trade['Entry Date']
+        for _ in range(days):
+            if curr.date() in daily_pnl_dict:
+                daily_pnl_dict[curr.date()] += daily_val
             curr += pd.Timedelta(days=1)
     return daily_pnl_dict
 
-# --- FAKE DATA GENERATOR (Advanced) ---
+def calculate_kelly_fraction(win_rate, avg_win, avg_loss):
+    if avg_loss == 0 or avg_win <= 0: return 0.0
+    b = abs(avg_win / avg_loss)
+    kelly = (win_rate * b - (1 - win_rate)) / b
+    return max(0, min(kelly * 0.5, 0.25))
+
+# ==========================================
+# 2. FAKE DATA GENERATOR (The Simulation Engine)
+# ==========================================
 def generate_fake_data():
     if os.path.exists(DB_NAME): os.remove(DB_NAME)
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # 1. Create Schema (Exact Copy of Real App)
+    # Create Schema
     c.execute('''CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY, name TEXT, strategy TEXT, status TEXT, entry_date DATE, exit_date DATE, days_held INTEGER, debit REAL, lot_size INTEGER, pnl REAL, theta REAL, delta REAL, gamma REAL, vega REAL, notes TEXT, tags TEXT, parent_id TEXT, put_pnl REAL, call_pnl REAL, iv REAL, link TEXT, original_group TEXT)''')
     
@@ -71,7 +101,7 @@ def generate_fake_data():
     c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
                     name TEXT PRIMARY KEY, identifier TEXT, target_pnl REAL, target_days INTEGER, min_stability REAL, description TEXT, typical_debit REAL)''')
     
-    # 2. Seed Strategy Config
+    # Seed Config
     defaults = [
         ('130/160', '130/160', 500, 36, 0.8, 'Income Discipline', 4000),
         ('160/190', '160/190', 700, 44, 0.8, 'Patience Training', 5200),
@@ -80,81 +110,75 @@ def generate_fake_data():
     ]
     c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
 
-    # 3. Generate History (Closed Trades) - 100 random trades
     strategies = ['130/160', '160/190', 'M200', 'SMSF']
-    print("Generating history...")
-    for i in range(100):
+    
+    # 1. Generate History (150 Trades)
+    for i in range(150):
         strat = random.choice(strategies)
         status = "Expired"
-        start_date = datetime.now() - timedelta(days=random.randint(60, 400))
-        days = random.randint(20, 50)
+        # Spread dates over last year
+        start_date = datetime.now() - timedelta(days=random.randint(60, 365))
+        days = random.randint(20, 60)
         end_date = start_date + timedelta(days=days)
         
-        # Realistic P&L logic
-        if random.random() > 0.25: # 75% Win Rate
-            pnl = random.randint(300, 1200)
+        # P&L Logic (70% win rate simulation)
+        if random.random() > 0.3: 
+            pnl = random.randint(400, 1500)
         else:
-            pnl = random.randint(-2000, -200)
+            pnl = random.randint(-1500, -100)
             
-        debit = random.randint(3500, 8500)
+        debit = random.randint(4000, 9000)
         t_id = f"HIST_{i}_{strat}"
         
         c.execute('''INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (t_id, f"Closed {strat} #{i}", strat, status, start_date.date(), end_date.date(),
                    days, debit, 1, pnl, 0, 0, 0, 0, "Simulation history", "Demo", "", 
-                   pnl*0.7, pnl*0.3, 18.0, "", strat))
+                   pnl*0.7, pnl*0.3, 18.0, "http://optionstrat.com/demo", strat))
 
-    # 4. Generate Active Trades with Snapshots
-    print("Generating active...")
-    for i in range(12):
+    # 2. Generate Active Trades (20 Trades with Snapshots)
+    for i in range(20):
         strat = random.choice(strategies)
         status = "Active"
-        days_active = random.randint(1, 45)
+        days_active = random.randint(2, 50)
         start_date = datetime.now() - timedelta(days=days_active)
         
-        debit = random.randint(4000, 6000)
-        
-        # P&L Curve simulation
-        pnl = 0
-        theta = random.randint(15, 35)
-        delta = random.uniform(-10, 10)
+        debit = random.randint(4000, 7000)
+        theta = random.randint(15, 40)
+        delta = random.uniform(-8, 8)
         
         t_id = f"ACTIVE_{i}_{strat}"
         
-        # Create Snapshots
-        curr_pnl = -50 # Start slightly red due to spread
+        # Generate PnL Curve (Snapshots)
+        curr_pnl = -50
         for d in range(days_active):
             snap_date = start_date + timedelta(days=d)
-            daily_decay = theta * (1 if d < 30 else 1.5) # Acceleration
-            noise = random.randint(-100, 80)
-            curr_pnl += (daily_decay/5) + noise # Slow drift up
+            daily_decay = theta * (1 if d < 30 else 1.2) 
+            noise = random.randint(-150, 100)
+            curr_pnl += (daily_decay/4) + noise
             
             c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega, gamma) VALUES (?,?,?,?,?,?,?,?)",
                       (t_id, snap_date.date(), curr_pnl, d, theta, delta, 100, 0))
         
-        final_pnl = curr_pnl
-        
-        # Insert Active Trade
         c.execute('''INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (t_id, f"Active {strat} #{i}", strat, status, start_date.date(), None,
-                   days_active, debit, 1, final_pnl, theta, delta, 0, 100, "Active simulation", "Demo", "", 
-                   0, 0, 20.0, "", strat))
+                   days_active, debit, 1, curr_pnl, theta, delta, 0, 100, "Active demo", "Demo", "", 
+                   0, 0, 20.0, "http://optionstrat.com/demo", strat))
 
-    # 5. Generate a Roll Campaign (Complex Data)
+    # 3. Generate a Roll Campaign
     parent_id = "ROLL_PARENT_001"
     c.execute('''INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
               (parent_id, "Bad Trade (Rolled)", "M200", "Expired", (datetime.now()-timedelta(days=100)).date(), (datetime.now()-timedelta(days=60)).date(),
-               40, 5000, 1, -1500, 0, 0, 0, 0, "Rolled for defense", "Rolled", "", -1000, -500, 20, "", "M200"))
+               40, 5000, 1, -2000, 0, 0, 0, 0, "Rolled for defense", "Rolled", "", -1000, -1000, 20, "", "M200"))
     
     child_id = "ROLL_CHILD_001"
     c.execute('''INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
               (child_id, "Recovery Trade", "M200", "Active", (datetime.now()-timedelta(days=59)).date(), None,
-               59, 6000, 1, 800, 25, -5, 0, 80, "Recovering nicely", "Hedged", parent_id, 0, 0, 18, "", "M200"))
+               59, 6000, 1, 1200, 25, -5, 0, 80, "Recovering", "Hedged", parent_id, 0, 0, 18, "", "M200"))
 
     conn.commit()
     conn.close()
 
-# --- DATABASE ENGINE ---
+# --- DATABASE MANAGEMENT ---
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
 
@@ -162,7 +186,7 @@ def init_db():
     if not os.path.exists(DB_NAME):
         generate_fake_data()
 
-# --- LOAD CONFIG ---
+# --- DATA LOADERS ---
 @st.cache_data(ttl=60)
 def load_strategy_config():
     conn = get_db_connection()
@@ -178,7 +202,6 @@ def load_strategy_config():
     except: return {}
     finally: conn.close()
 
-# --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
     conn = get_db_connection()
@@ -186,7 +209,7 @@ def load_data():
         df = pd.read_sql("SELECT * FROM trades", conn)
         if df.empty: return pd.DataFrame()
         
-        # --- Capitalize Columns ---
+        # Capitalize Columns to match real app expectations
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -199,10 +222,10 @@ def load_data():
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
         
-        # Numeric clean
-        cols = ['P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'lot_size', 'Put P&L', 'Call P&L']
-        for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-        
+        # Numeric conversions
+        for col in ['P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'lot_size', 'Put P&L', 'Call P&L']:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
         df['lot_size'] = df['lot_size'].replace(0, 1)
         df['Debit/Lot'] = df['Debit'] / df['lot_size']
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
@@ -214,21 +237,20 @@ def load_data():
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
         df['P&L Vol'] = 0.0 # Sim
         
-        # Fix Parent ID
+        # Ensure Parent ID is string
         df['Parent ID'] = df['Parent ID'].fillna('').astype(str)
+        df['Link'] = df['Link'].fillna('')
 
         def get_grade(row):
             d = row['Debit/Lot']
-            if d > 6000: return "A", "Good Price"
-            return "B", "Average"
-        
-        grades = df.apply(get_grade, axis=1, result_type='expand')
-        df['Grade'] = grades[0]
-        df['Reason'] = grades[1]
+            if d > 6000: return "A"
+            return "B"
+        df['Grade'] = df.apply(get_grade, axis=1)
+        df['Reason'] = "Demo"
         
         return df
     except Exception as e:
-        st.error(f"Load Error: {e}")
+        st.error(f"Data Load Error: {e}")
         return pd.DataFrame()
     finally: conn.close()
 
@@ -244,22 +266,56 @@ def load_snapshots():
         """
         df = pd.read_sql(q, conn)
         df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        # Numeric conversions
+        for col in ['pnl', 'days_held', 'theta', 'delta', 'vega', 'gamma', 'initial_theta']:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         return df
     except: return pd.DataFrame()
     finally: conn.close()
 
-# --- INTELLIGENCE FUNCTIONS ---
-def check_concentration_risk(active_df, total_equity, threshold=0.15):
-    if active_df.empty or total_equity <= 0: return pd.DataFrame()
-    warnings = []
-    for _, row in active_df.iterrows():
-        concentration = row['Debit'] / total_equity
-        if concentration > threshold:
-            warnings.append({
-                'Trade': row['Name'], 'Strategy': row['Strategy'], 'Size %': f"{concentration:.1%}",
-                'Risk': f"${row['Debit']:,.0f}", 'Limit': f"{threshold:.0%}"
-            })
-    return pd.DataFrame(warnings)
+# --- ADVANCED CALCULATIONS (Decision Ladder, Rot, etc.) ---
+def calculate_decision_ladder(row, benchmarks_dict):
+    strat = row['Strategy']
+    days = row['Days Held']
+    pnl = row['P&L']
+    theta = row['Theta']
+    debit = row['Debit']
+    lot_size = row['lot_size']
+    
+    bench = benchmarks_dict.get(strat, {'pnl': 1000, 'dit': 40})
+    target_profit = bench['pnl'] * lot_size
+    
+    score = 50 
+    action = "HOLD"
+    reason = "Normal"
+    juice_type = "Left in Tank"
+    juice_val = 0.0
+
+    if pnl < 0:
+        juice_type = "Recovery Days"
+        if theta > 0:
+            recov_days = abs(pnl) / theta
+            juice_val = recov_days
+            if recov_days > 45:
+                score = 95
+                action = "STRUCTURAL FAILURE"
+                reason = "Zombie Trade"
+    else:
+        juice_type = "Left in Tank"
+        juice_val = max(0, target_profit - pnl)
+        if juice_val < 100:
+            score = 80
+            action = "PREPARE EXIT"
+            reason = "Tank Empty"
+
+    if pnl >= target_profit:
+        return "TAKE PROFIT", 100, "Target Hit", juice_val, juice_type
+    
+    if days > bench['dit'] * 1.2:
+        score = max(score, 75)
+        reason = "Stale"
+        
+    return action, score, reason, juice_val, juice_type
 
 def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
     if active_df.empty or history_df.empty: return pd.DataFrame()
@@ -281,59 +337,28 @@ def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
     return pd.DataFrame(rot_alerts)
 
 def generate_trade_predictions(active_df, history_df):
+    # Simulated prediction logic since we have fake history
     if active_df.empty: return pd.DataFrame()
     predictions = []
     for _, row in active_df.iterrows():
-        # Simulation of KNN logic
-        win_prob = random.randint(45, 95)
+        win_prob = random.randint(40, 95)
         rec = "HOLD"
-        if win_prob < 50: rec = "REDUCE/CLOSE"
+        if win_prob < 50: rec = "REDUCE"
         elif win_prob > 80: rec = "PRESS WINNER"
         
         predictions.append({
-            'Trade Name': row['Name'], 'Strategy': row['Strategy'], 
-            'Win Prob %': win_prob,
-            'Expected PnL': random.randint(200, 1500), 
-            'Kelly Size %': random.uniform(5, 12), 
-            'Rec. Size ($)': random.randint(8000, 12000),
-            'AI Rec': rec, 
-            'Confidence': random.randint(70, 99)
+            'Trade Name': row['Name'], 'Strategy': row['Strategy'], 'Win Prob %': win_prob,
+            'Expected PnL': random.randint(200, 1500), 'Kelly Size %': random.uniform(5, 15),
+            'Rec. Size ($)': random.randint(8000, 15000), 'AI Rec': rec, 'Confidence': random.randint(60, 99)
         })
     return pd.DataFrame(predictions)
 
-def calculate_decision_ladder(row, benchmarks_dict):
-    # Simplified ladder for demo speed
-    strat = row['Strategy']
-    pnl = row['P&L']
-    days = row['Days Held']
-    bench = benchmarks_dict.get(strat, {'pnl': 1000, 'dit': 40})
-    target = bench['pnl']
-    
-    score = 50
-    action = "HOLD"
-    reason = "Normal"
-    juice_type = "Left in Tank"
-    juice_val = max(0, target - pnl)
-    
-    if pnl > target: return "TAKE PROFIT", 100, "Hit Target", juice_val, juice_type
-    if days > bench['dit'] * 1.2: return "KILL", 90, "Stale", juice_val, juice_type
-    
-    if pnl < -1000:
-        score = 80
-        action = "REVIEW"
-        reason = "Drawdown"
-        juice_type = "Recovery Days"
-        juice_val = 25 # Fake recovery
-        
-    return action, score, reason, juice_val, juice_type
-
 def calculate_max_drawdown(trades_df, initial_capital):
     if trades_df.empty: return {'Max Drawdown %': 0.0}
-    daily = reconstruct_daily_pnl(trades_df)
-    dates = sorted(daily.keys())
+    daily_pnl = reconstruct_daily_pnl(trades_df)
+    dates = sorted(daily_pnl.keys())
     equity = [initial_capital]
-    for d in dates: equity.append(equity[-1] + daily[d])
-    
+    for d in dates: equity.append(equity[-1] + daily_pnl[d])
     eq_series = pd.Series(equity)
     running_max = eq_series.cummax()
     dd = (eq_series - running_max) / running_max
@@ -349,19 +374,26 @@ def rolling_correlation_matrix(snaps, window_days=30):
                     title="Strategy Correlation (Last 30 Days)", labels=dict(color="Correlation"))
     return fig
 
-# --- INIT ---
+# ==========================================
+# 3. MAIN APP EXECUTION
+# ==========================================
+
+# A. Initialize DB if needed
 init_db()
+
+# B. Load Data
 df = load_data()
 dynamic_benchmarks = load_strategy_config()
 
-# --- SIDEBAR ---
-st.sidebar.header("🧪 Simulation Controls")
-if st.sidebar.button("🎲 Generate New Scenario"):
+# --- SIDEBAR CONTROLS ---
+st.sidebar.header("🧪 Demo Controls")
+if st.sidebar.button("🔄 Regenerate Random Data"):
     generate_fake_data()
     st.cache_data.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
+st.sidebar.header("Portfolio Settings")
 prime_cap = st.sidebar.number_input("Prime Account", value=115000)
 smsf_cap = st.sidebar.number_input("SMSF Account", value=150000)
 total_cap = prime_cap + smsf_cap
@@ -372,27 +404,39 @@ regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in marke
 tab_dash, tab_active, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " ⚡ Active Management", " Analytics", " AI & Insights", " Strategies", " Rules"])
 
 if df.empty or 'Status' not in df.columns:
-    st.error("No data generated.")
+    st.error("Data load failed. Click Regenerate Random Data.")
     st.stop()
+
+expired_df = df[df['Status'] == 'Expired'].copy()
+active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
 
 # --- DASHBOARD TAB ---
 with tab_dash:
-    active_df = df[df['Status'] == 'Active'].copy()
     if not active_df.empty:
-        # Metrics
+        # Calculate Logic
+        ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
+        active_df['Action'] = [x[0] for x in ladder_results]
+        active_df['Urgency Score'] = [x[1] for x in ladder_results]
+        active_df['Reason'] = [x[2] for x in ladder_results]
+        active_df['Juice Val'] = [x[3] for x in ladder_results]
+        active_df['Juice Type'] = [x[4] for x in ladder_results]
+        active_df = active_df.sort_values('Urgency Score', ascending=False)
+        todo_df = active_df[active_df['Urgency Score'] >= 70]
+
+        # Top Metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Portfolio Health", "🟢 HEALTHY", "Simulated")
         c2.metric("Daily Income", f"${active_df['Theta'].sum():,.0f}")
         c3.metric("Floating P&L", f"${active_df['P&L'].sum():,.0f}")
-        
-        # Calculate Ladder
-        ladder = active_df.apply(lambda r: calculate_decision_ladder(r, dynamic_benchmarks), axis=1)
-        active_df['Action'] = [x[0] for x in ladder]
-        active_df['Urgency Score'] = [x[1] for x in ladder]
-        
-        urgent_count = len(active_df[active_df['Urgency Score'] >= 70])
-        c4.metric("Action Items", urgent_count, delta="Urgent" if urgent_count > 0 else "None", delta_color="inverse")
-        
+        c4.metric("Action Items", len(todo_df), delta="Urgent" if len(todo_df) > 0 else "None", delta_color="inverse")
+
+        with st.expander("📊 Detailed Metrics (Simulated)", expanded=False):
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Alloc Score", "85/100")
+            d2.metric("Yield/Cap", "0.15%")
+            d3.metric("Net Delta", "1.2%")
+            d4.metric("Avg Age", "24 days")
+
         st.divider()
         st.subheader("🗺️ Position Heat Map")
         fig_heat = px.scatter(
@@ -402,36 +446,51 @@ with tab_dash:
             title="Position Clustering (Size = Capital)"
         )
         st.plotly_chart(fig_heat, use_container_width=True)
+        
+        st.divider()
+        if not todo_df.empty:
+            with st.expander(f"Priority Action Queue ({len(todo_df)})", expanded=True):
+                for _, row in todo_df.iterrows():
+                    color = "red" if row['Urgency Score'] >= 90 else "orange"
+                    st.markdown(f"**{row['Name']}**: :{color}[{row['Action']}] - {row['Reason']}")
+        else:
+            st.success("No urgent actions required.")
 
 # --- ACTIVE MANAGEMENT TAB ---
 with tab_active:
-    if not active_df.empty:
-        # Re-apply ladder for detail
-        ladder = active_df.apply(lambda r: calculate_decision_ladder(r, dynamic_benchmarks), axis=1)
-        active_df['Action'] = [x[0] for x in ladder]
-        active_df['Reason'] = [x[2] for x in ladder]
-        
-        sub_strat, sub_journal, sub_dna = st.tabs([" Strategy Detail", " Journal", " DNA Tool"])
-        
-        with sub_strat:
-            st.markdown("### Strategy Performance (Live)")
-            cols = ['Name', 'Strategy', 'Action', 'P&L', 'Theta', 'Days Held']
-            st.dataframe(active_df[cols].style.format({'P&L': '${:,.0f}', 'Theta': '{:.1f}'}), use_container_width=True)
+    sub_strat, sub_journal, sub_dna = st.tabs([" Strategy Detail", " Journal", " DNA Tool"])
+    
+    with sub_strat:
+        st.markdown("### Strategy Performance")
+        strategies = sorted(active_df['Strategy'].unique())
+        if strategies:
+            sel_strat = st.selectbox("Select Strategy", strategies)
+            subset = active_df[active_df['Strategy'] == sel_strat]
             
-        with sub_journal:
-            st.info("📝 Journal editing is disabled in Demo Mode.")
-            st.dataframe(active_df[['Name', 'Strategy', 'Notes', 'Tags']], use_container_width=True)
+            # Simulated Benchmarks
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Target Profit", "$1,000")
+            c2.metric("Avg Hold", "40d")
+            c3.metric("Current P&L", f"${subset['P&L'].sum():,.0f}")
             
-        with sub_dna:
-            st.subheader("Trade DNA (Similarity Search)")
-            st.caption("Matches active trades to historical winners.")
+            # Display Table
+            cols = ['Name', 'Action', 'Urgency Score', 'P&L', 'Theta', 'Days Held', 'Juice Type', 'Juice Val']
+            st.dataframe(subset[cols].style.format({'P&L': '${:,.0f}', 'Theta': '{:.1f}', 'Juice Val': '{:.0f}'}), use_container_width=True)
+        else: st.info("No active strategies.")
+
+    with sub_journal:
+        st.info("📝 Journal editing is disabled in Demo Mode.")
+        st.dataframe(active_df[['Name', 'Strategy', 'Notes', 'Tags']], use_container_width=True)
+
+    with sub_dna:
+        st.subheader("Trade DNA (Similarity Search)")
+        if not expired_df.empty and not active_df.empty:
+            st.write("Matches current trade profiles to historical winners.")
             st.dataframe(active_df.head(3)[['Name', 'Theta/Cap %', 'Delta']], use_container_width=True)
 
 # --- ANALYTICS TAB ---
 with tab_analytics:
-    an_overview, an_risk, an_rolls = st.tabs(["Overview", "Risk & Drawdown", "Rolls"])
-    
-    expired_df = df[df['Status'] == 'Expired'].copy()
+    an_overview, an_risk, an_decay, an_rolls = st.tabs(["Overview", "Risk & Drawdown", "Decay", "Rolls"])
     
     with an_overview:
         if not expired_df.empty:
@@ -450,7 +509,6 @@ with tab_analytics:
         mdd = calculate_max_drawdown(expired_df, total_cap)
         st.metric("Max Drawdown", f"{mdd['Max Drawdown %']:.1f}%")
         
-        # Correlation Matrix
         st.subheader("Strategy Correlation")
         snaps = load_snapshots()
         if not snaps.empty:
@@ -458,12 +516,21 @@ with tab_analytics:
             if fig_corr: st.plotly_chart(fig_corr, use_container_width=True)
             else: st.info("Not enough snapshot history generated.")
 
+    with an_decay:
+        st.subheader("Trade Life Cycle & Decay")
+        snaps = load_snapshots()
+        if not snaps.empty:
+            trade_ids = snaps['trade_id'].unique()[:5] # Show first 5
+            subset_snaps = snaps[snaps['trade_id'].isin(trade_ids)]
+            fig_pnl = px.line(subset_snaps, x='days_held', y='pnl', color='trade_id', title="P&L Trajectory (Active Trades)")
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
     with an_rolls:
         st.subheader("Roll Campaign Analysis")
         rolled = df[df['Parent ID'] != ""]
         if not rolled.empty:
             st.success(f"Found {len(rolled)} linked trades in roll campaigns.")
-            st.dataframe(rolled[['Name', 'Parent ID', 'P&L']], use_container_width=True)
+            st.dataframe(rolled[['Name', 'Parent ID', 'P&L', 'Strategy']], use_container_width=True)
         else:
             st.info("No roll campaigns generated in this seed.")
 
@@ -473,7 +540,7 @@ with tab_ai:
     
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**Rot Detector**")
+        st.markdown("**Rot Detector** (Simulated)")
         rot = check_rot_and_efficiency(active_df, expired_df, 0.5, 10)
         if not rot.empty:
             st.dataframe(rot, use_container_width=True)
@@ -481,7 +548,7 @@ with tab_ai:
             st.success("No capital rot detected.")
             
     with c2:
-        st.markdown("**Win Probability Forecast**")
+        st.markdown("**Win Probability Forecast** (Simulated)")
         preds = generate_trade_predictions(active_df, expired_df)
         st.dataframe(preds, use_container_width=True)
 
