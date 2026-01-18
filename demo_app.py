@@ -148,33 +148,54 @@ def load_data():
         df = pd.read_sql("SELECT * FROM trades", conn)
         if df.empty: return pd.DataFrame()
         
-        # Basic cleaning for demo
+        # --- CRITICAL FIX: Ensure correct capitalization ---
+        # SQLite columns are lowercase by default in results
+        # We must manually map them to match the app's expectations
+        
+        # 1. Rename columns from DB (lowercase) to App format (Capitalized)
+        df = df.rename(columns={
+            'name': 'Name',
+            'strategy': 'Strategy',
+            'status': 'Status',
+            'pnl': 'P&L',
+            'debit': 'Debit',
+            'days_held': 'Days Held',
+            'theta': 'Theta',
+            'delta': 'Delta',
+            'gamma': 'Gamma',
+            'vega': 'Vega',
+            'entry_date': 'Entry Date',
+            'exit_date': 'Exit Date',
+            'notes': 'Notes',
+            'tags': 'Tags',
+            'parent_id': 'Parent ID',
+            'put_pnl': 'Put P&L',
+            'call_pnl': 'Call P&L',
+            'iv': 'IV',
+            'link': 'Link',
+            'lot_size': 'lot_size' # Keep lowercase for compatibility
+        })
+
+        # 2. Type conversion
         df['Entry Date'] = pd.to_datetime(df['Entry Date'])
         df['Exit Date'] = pd.to_datetime(df['Exit Date'])
-        df['P&L'] = pd.to_numeric(df['pnl'])
-        df['Debit'] = pd.to_numeric(df['debit'])
-        df['Days Held'] = pd.to_numeric(df['days_held'])
-        df['Theta'] = pd.to_numeric(df['theta'])
-        df['Delta'] = pd.to_numeric(df['delta'])
-        df['Gamma'] = pd.to_numeric(df['gamma'])
-        df['Vega'] = pd.to_numeric(df['vega'])
-        df['Name'] = df['name']
-        df['Strategy'] = df['strategy']
-        df['Status'] = df['status']
-        df['Link'] = df['link']
-        df['lot_size'] = pd.to_numeric(df['lot_size'])
-        df['Debit/Lot'] = df['Debit'] / df['lot_size'].replace(0, 1)
+        numeric_cols = ['P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'lot_size', 'Put P&L', 'Call P&L']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
+        # 3. Derived Metrics
+        df['Debit/Lot'] = np.where(df['lot_size'] > 0, df['Debit'] / df['lot_size'], df['Debit'])
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
-        df['Daily Yield %'] = df['ROI'] / df['Days Held'].replace(0, 1)
+        df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         df['Ann. ROI'] = df['Daily Yield %'] * 365
+        
         df['Theta Pot.'] = df['Theta'] * df['Days Held']
         df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
-        df['Theta/Cap %'] = (df['Theta'] / df['Debit'].replace(0,1)) * 100
+        df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
+        
         df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
-        df['P&L Vol'] = 0.0 # Simplified
-        df['Parent ID'] = df['parent_id']
-        df['Put P&L'] = df['put_pnl']
-        df['Call P&L'] = df['call_pnl']
+        df['P&L Vol'] = 0.0 
         
         def get_grade(row):
             d = row['Debit/Lot']
@@ -184,7 +205,9 @@ def load_data():
         df['Reason'] = "Demo"
         
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        print(f"Data Load Error: {e}")
+        return pd.DataFrame()
     finally: conn.close()
 
 # --- INTELLIGENCE FUNCTIONS (Simplified) ---
@@ -218,6 +241,11 @@ st.sidebar.info("This is a demo version. All data is randomly generated on the f
 
 # --- TABS ---
 tab_dash, tab_active, tab_analytics, tab_ai = st.tabs([" Dashboard", " ⚡ Active Management", " Analytics", " AI & Insights"])
+
+# CHECK IF DATA EXISTS
+if df.empty or 'Status' not in df.columns:
+    st.error("⚠️ Error generating demo data. Please click 'Regenerate Random Data' in the sidebar.")
+    st.stop()
 
 with tab_dash:
     active_df = df[df['Status'] == 'Active']
