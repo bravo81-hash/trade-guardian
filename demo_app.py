@@ -18,10 +18,10 @@ st.warning("🧪 **SHOWCASE MODE**: Using simulated market data. No real account
 st.title("🛡️ Quant Trade Guardian")
 
 # --- DATABASE CONSTANTS ---
-DB_NAME = "demo_showcase_v6.db"
+DB_NAME = "demo_showcase_final.db"
 
 # ==========================================
-# 1. EXACT MATH FUNCTIONS (From Real App)
+# 1. HELPER FUNCTIONS & MATH (Exact from Real App)
 # ==========================================
 
 def clean_num(x):
@@ -73,9 +73,10 @@ def reconstruct_daily_pnl(trades_df):
         if days <= 0: days = 1
         total_pnl = trade['P&L']
         
+        # Simplified distribution for demo
         daily_val = total_pnl / days
         curr = trade['Entry Date']
-        for _ in range(days):
+        for _ in range(int(days)):
             if curr.date() in daily_pnl_dict:
                 daily_pnl_dict[curr.date()] += daily_val
             curr += pd.Timedelta(days=1)
@@ -87,6 +88,43 @@ def calculate_kelly_fraction(win_rate, avg_win, avg_loss):
     kelly = (win_rate * b - (1 - win_rate)) / b
     return max(0, min(kelly * 0.5, 0.25))
 
+def calculate_portfolio_metrics(trades_df, capital):
+    if trades_df.empty or capital <= 0: return 0.0, 0.0
+    daily_pnl_dict = reconstruct_daily_pnl(trades_df)
+    dates = sorted(daily_pnl_dict.keys())
+    equity = [capital]
+    for d in dates: equity.append(equity[-1] + daily_pnl_dict[d])
+    equity_series = pd.Series(equity)
+    daily_returns = equity_series.pct_change().dropna()
+    if daily_returns.std() == 0: sharpe = 0.0
+    else: sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+    total_pnl = trades_df['P&L'].sum()
+    try: cagr = ((capital + total_pnl) / capital) ** (365 / max(1, len(dates))) - 1
+    except: cagr = 0.0
+    return sharpe, cagr * 100
+
+def calculate_max_drawdown(trades_df, initial_capital):
+    if trades_df.empty: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
+    daily_pnl = reconstruct_daily_pnl(trades_df)
+    dates = sorted(daily_pnl.keys())
+    equity = [initial_capital]
+    for d in dates: equity.append(equity[-1] + daily_pnl[d])
+    eq_series = pd.Series(equity)
+    running_max = eq_series.cummax()
+    dd = (eq_series - running_max) / running_max
+    if dd.empty: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
+    return {'Max Drawdown %': dd.min() * 100, 'Current DD %': dd.iloc[-1] * 100}
+
+def rolling_correlation_matrix(snaps, window_days=30):
+    if snaps.empty: return None
+    strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
+    if len(strat_daily) < 5: return None 
+    corr = strat_daily.corr()
+    fig = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
+                    title="Strategy Correlation (Simulated)", labels=dict(color="Correlation"))
+    return fig
+
+# --- INTELLIGENCE FUNCTIONS ---
 def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
     if active_df.empty or history_df.empty: return pd.DataFrame()
     history_df['Eff_Score'] = (history_df['P&L'] / history_df['Days Held'].clip(lower=1)) / (history_df['Debit'] / 1000)
@@ -105,87 +143,6 @@ def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
                 'Status': ' ROTTING' if row['P&L'] > 0 else ' DEAD MONEY'
             })
     return pd.DataFrame(rot_alerts)
-
-def get_dynamic_targets(history_df, percentile):
-    if history_df.empty: return {}
-    winners = history_df[history_df['P&L'] > 0]
-    if winners.empty: return {}
-    targets = {}
-    for strat, grp in winners.groupby('Strategy'):
-        targets[strat] = {
-            'Median Win': grp['P&L'].median(),
-            'Optimal Exit': grp['P&L'].quantile(percentile)
-        }
-    return targets
-
-def find_similar_trades(current_trade, historical_df, top_n=3):
-    if historical_df.empty: return pd.DataFrame()
-    # Fake match
-    similar = historical_df.sample(n=min(len(historical_df), top_n)).copy()
-    similar['Similarity %'] = [random.randint(70, 99) for _ in range(len(similar))]
-    return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
-
-def rolling_correlation_matrix(snaps, window_days=30):
-    if snaps.empty: return None
-    strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
-    if len(strat_daily) < 10: return None 
-    corr = strat_daily.corr()
-    fig = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
-                    title="Strategy Correlation (Simulated)", labels=dict(color="Correlation"))
-    return fig
-
-def calculate_max_drawdown(trades_df, initial_capital):
-    if trades_df.empty: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
-    daily_pnl = reconstruct_daily_pnl(trades_df)
-    dates = sorted(daily_pnl.keys())
-    equity = [initial_capital]
-    for d in dates: equity.append(equity[-1] + daily_pnl[d])
-    eq_series = pd.Series(equity)
-    running_max = eq_series.cummax()
-    dd = (eq_series - running_max) / running_max
-    return {'Max Drawdown %': dd.min() * 100, 'Current DD %': dd.iloc[-1] * 100}
-
-def calculate_portfolio_metrics(trades_df, capital):
-    if trades_df.empty or capital <= 0: return 0.0, 0.0
-    daily_pnl_dict = reconstruct_daily_pnl(trades_df)
-    dates = sorted(daily_pnl_dict.keys())
-    equity = [capital]
-    for d in dates: equity.append(equity[-1] + daily_pnl_dict[d])
-    equity_series = pd.Series(equity)
-    daily_returns = equity_series.pct_change().dropna()
-    if daily_returns.std() == 0: sharpe = 0.0
-    else: sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
-    total_pnl = trades_df['P&L'].sum()
-    try: cagr = ((capital + total_pnl) / capital) ** (365 / len(dates)) - 1
-    except: cagr = 0.0
-    return sharpe, cagr * 100
-
-def check_concentration_risk(active_df, total_equity, threshold=0.15):
-    if active_df.empty: return pd.DataFrame()
-    warnings = []
-    for _, row in active_df.iterrows():
-        concentration = row['Debit'] / total_equity
-        if concentration > threshold:
-            warnings.append({
-                'Trade': row['Name'], 'Strategy': row['Strategy'], 'Size %': f"{concentration:.1%}",
-                'Risk': f"${row['Debit']:,.0f}", 'Limit': f"{threshold:.0%}"
-            })
-    return pd.DataFrame(warnings)
-
-def generate_adaptive_rulebook_text(history_df, strategies):
-    text = "#  The Adaptive Trader's Constitution\n*Rules evolve based on simulated data.*\n\n"
-    if history_df.empty: return text
-    for strat in strategies:
-        strat_df = history_df[history_df['Strategy'] == strat]
-        if strat_df.empty: continue
-        winners = strat_df[strat_df['P&L'] > 0]
-        text += f"### {strat}\n"
-        if not winners.empty:
-            avg_win = winners['P&L'].mean()
-            avg_hold = winners['Days Held'].mean()
-            text += f"* ** Target Profit:** ${avg_win:,.0f}\n"
-            text += f"* ** Optimal Hold:** {avg_hold:.0f} Days\n"
-    return text
 
 def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total_capital=100000):
     if active_df.empty: return pd.DataFrame()
@@ -207,8 +164,53 @@ def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total
         })
     return pd.DataFrame(predictions)
 
+def check_concentration_risk(active_df, total_equity, threshold=0.15):
+    if active_df.empty: return pd.DataFrame()
+    warnings = []
+    for _, row in active_df.iterrows():
+        concentration = row['Debit'] / total_equity
+        if concentration > threshold:
+            warnings.append({
+                'Trade': row['Name'], 'Strategy': row['Strategy'], 'Size %': f"{concentration:.1%}",
+                'Risk': f"${row['Debit']:,.0f}", 'Limit': f"{threshold:.0%}"
+            })
+    return pd.DataFrame(warnings)
+
+def get_dynamic_targets(history_df, percentile):
+    if history_df.empty: return {}
+    winners = history_df[history_df['P&L'] > 0]
+    if winners.empty: return {}
+    targets = {}
+    for strat, grp in winners.groupby('Strategy'):
+        targets[strat] = {
+            'Median Win': grp['P&L'].median(),
+            'Optimal Exit': grp['P&L'].quantile(percentile)
+        }
+    return targets
+
+def find_similar_trades(current_trade, historical_df, top_n=3):
+    if historical_df.empty: return pd.DataFrame()
+    similar = historical_df.sample(n=min(len(historical_df), top_n)).copy()
+    similar['Similarity %'] = [random.randint(70, 99) for _ in range(len(similar))]
+    return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
+
+def generate_adaptive_rulebook_text(history_df, strategies):
+    text = "#  The Adaptive Trader's Constitution\n*Rules evolve based on simulated data.*\n\n"
+    if history_df.empty: return text
+    for strat in strategies:
+        strat_df = history_df[history_df['Strategy'] == strat]
+        if strat_df.empty: continue
+        winners = strat_df[strat_df['P&L'] > 0]
+        text += f"### {strat}\n"
+        if not winners.empty:
+            avg_win = winners['P&L'].mean()
+            avg_hold = winners['Days Held'].mean()
+            text += f"* ** Target Profit:** ${avg_win:,.0f}\n"
+            text += f"* ** Optimal Hold:** {avg_hold:.0f} Days\n"
+    return text
+
 # ==========================================
-# 2. FAKE DATA GENERATOR (Schema Matches Real App)
+# 2. FAKE DATA GENERATOR (Simulates OptionStrat Ingestion)
 # ==========================================
 def generate_fake_data():
     if os.path.exists(DB_NAME): os.remove(DB_NAME)
@@ -295,14 +297,14 @@ def generate_fake_data():
     conn.commit()
     conn.close()
 
-# --- INIT ---
-if not os.path.exists(DB_NAME): generate_fake_data()
-conn = sqlite3.connect(DB_NAME)
+# --- INIT DATABASE ---
+def init_db():
+    if not os.path.exists(DB_NAME): generate_fake_data()
 
-# --- LOAD CONFIG ---
+# --- LOADERS ---
 @st.cache_data(ttl=60)
 def load_strategy_config():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_NAME)
     try:
         df = pd.read_sql("SELECT * FROM strategy_config", conn)
         config = {}
@@ -315,15 +317,14 @@ def load_strategy_config():
     except: return {}
     finally: conn.close()
 
-# --- LOAD ALL DATA (Full Columns) ---
 @st.cache_data(ttl=60)
 def load_data():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_NAME)
     try:
         df = pd.read_sql("SELECT * FROM trades", conn)
         if df.empty: return pd.DataFrame()
         
-        # Mapping
+        # --- Capitalize Columns ---
         df = df.rename(columns={
             'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
             'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
@@ -338,6 +339,7 @@ def load_data():
         for col in ['P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'lot_size', 'Put P&L', 'Call P&L']:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
+        # --- DERIVED METRICS (Matched from Real App) ---
         df['lot_size'] = df['lot_size'].replace(0, 1)
         df['Debit/Lot'] = df['Debit'] / df['lot_size']
         df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
@@ -369,7 +371,7 @@ def load_data():
 
 @st.cache_data(ttl=60)
 def load_snaps():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_NAME)
     try:
         q = """SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, s.gamma, t.strategy, t.name, t.id as trade_id, t.theta as initial_theta FROM snapshots s JOIN trades t ON s.trade_id = t.id"""
         df = pd.read_sql(q, conn)
@@ -380,7 +382,7 @@ def load_snaps():
     except: return pd.DataFrame()
     finally: conn.close()
 
-# --- MAIN EXECUTION ---
+# --- MAIN EXECUTION START ---
 init_db()
 df = load_data()
 dynamic_benchmarks = load_strategy_config()
