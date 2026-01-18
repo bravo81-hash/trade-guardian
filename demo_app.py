@@ -20,6 +20,41 @@ st.title("🛡️ Allantis Trade Guardian (Showcase)")
 # --- DATABASE CONSTANTS ---
 DB_NAME = "demo_showcase.db"
 
+# --- HELPER FUNCTIONS ---
+def extract_ticker(name):
+    try:
+        parts = str(name).split(' ')
+        if parts: return parts[0]
+    except: return "UNKNOWN"
+
+def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
+    t_frac = min(1.0, days_held / dte_at_entry) if dte_at_entry > 0 else 1.0
+    if strategy in ['M200', '130/160', '160/190', 'SMSF']:
+        if t_frac < 0.5: decay_factor = 1 - (2 * t_frac) ** 2
+        else: decay_factor = 2 * (1 - t_frac)
+        return initial_theta * max(0, decay_factor)
+    return initial_theta * (1 - t_frac)
+
+def reconstruct_daily_pnl(trades_df):
+    trades = trades_df.copy()
+    trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
+    start_date = trades['Entry Date'].min()
+    end_date = pd.Timestamp.now()
+    date_range = pd.date_range(start=start_date, end=end_date)
+    daily_pnl_dict = {d.date(): 0.0 for d in date_range}
+    for _, trade in trades.iterrows():
+        if pd.isnull(trade['Exit Date']) and trade['Status'] == 'Expired': continue 
+        days = trade['Days Held']
+        if days <= 0: days = 1
+        total_pnl = trade['P&L']
+        curr = trade['Entry Date']
+        # Simple linear attribution for demo speed
+        daily_val = total_pnl / days
+        for day in range(days):
+            if curr.date() in daily_pnl_dict: daily_pnl_dict[curr.date()] += daily_val
+            curr += pd.Timedelta(days=1)
+    return daily_pnl_dict
+
 # --- FAKE DATA GENERATOR (Advanced) ---
 def generate_fake_data():
     if os.path.exists(DB_NAME): os.remove(DB_NAME)
@@ -119,13 +154,13 @@ def generate_fake_data():
     conn.commit()
     conn.close()
 
-# --- INIT DEMO DB ---
-if not os.path.exists(DB_NAME):
-    generate_fake_data()
-
 # --- DATABASE ENGINE ---
 def get_db_connection():
     return sqlite3.connect(DB_NAME)
+
+def init_db():
+    if not os.path.exists(DB_NAME):
+        generate_fake_data()
 
 # --- LOAD CONFIG ---
 @st.cache_data(ttl=60)
@@ -142,41 +177,6 @@ def load_strategy_config():
         return config
     except: return {}
     finally: conn.close()
-
-# --- HELPER FUNCTIONS (From Real App) ---
-def extract_ticker(name):
-    try:
-        parts = str(name).split(' ')
-        if parts: return parts[0]
-    except: return "UNKNOWN"
-
-def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
-    t_frac = min(1.0, days_held / dte_at_entry) if dte_at_entry > 0 else 1.0
-    if strategy in ['M200', '130/160', '160/190', 'SMSF']:
-        if t_frac < 0.5: decay_factor = 1 - (2 * t_frac) ** 2
-        else: decay_factor = 2 * (1 - t_frac)
-        return initial_theta * max(0, decay_factor)
-    return initial_theta * (1 - t_frac)
-
-def reconstruct_daily_pnl(trades_df):
-    trades = trades_df.copy()
-    trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
-    start_date = trades['Entry Date'].min()
-    end_date = pd.Timestamp.now()
-    date_range = pd.date_range(start=start_date, end=end_date)
-    daily_pnl_dict = {d.date(): 0.0 for d in date_range}
-    for _, trade in trades.iterrows():
-        if pd.isnull(trade['Exit Date']) and trade['Status'] == 'Expired': continue 
-        days = trade['Days Held']
-        if days <= 0: days = 1
-        total_pnl = trade['P&L']
-        curr = trade['Entry Date']
-        # Simple linear attribution for demo speed
-        daily_val = total_pnl / days
-        for day in range(days):
-            if curr.date() in daily_pnl_dict: daily_pnl_dict[curr.date()] += daily_val
-            curr += pd.Timedelta(days=1)
-    return daily_pnl_dict
 
 # --- DATA LOADER ---
 @st.cache_data(ttl=60)
@@ -338,6 +338,16 @@ def calculate_max_drawdown(trades_df, initial_capital):
     running_max = eq_series.cummax()
     dd = (eq_series - running_max) / running_max
     return {'Max Drawdown %': dd.min() * 100}
+
+def rolling_correlation_matrix(snaps, window_days=30):
+    if snaps.empty: return None
+    strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
+    if len(strat_daily) < window_days: return None
+    last_30 = strat_daily.tail(30)
+    corr_30 = last_30.corr()
+    fig = px.imshow(corr_30, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
+                    title="Strategy Correlation (Last 30 Days)", labels=dict(color="Correlation"))
+    return fig
 
 # --- INIT ---
 init_db()
