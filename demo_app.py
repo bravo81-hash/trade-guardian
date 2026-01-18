@@ -7,7 +7,8 @@ import sqlite3
 import os
 import re
 import random
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone, timedelta
 from scipy.spatial.distance import cdist 
 
 # --- PAGE CONFIG ---
@@ -21,7 +22,7 @@ st.title("🛡️ Quant Trade Guardian")
 DB_NAME = "demo_showcase_final.db"
 
 # ==========================================
-# 1. HELPER FUNCTIONS & MATH (Exact from Real App)
+# 1. HELPER FUNCTIONS & MATH (Exact from Real App v146.7)
 # ==========================================
 
 def clean_num(x):
@@ -53,7 +54,7 @@ def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
         if t_frac < 0.5: decay_factor = 1 - (2 * t_frac) ** 2
         else: decay_factor = 2 * (1 - t_frac)
         return initial_theta * max(0, decay_factor)
-    elif 'VERTICAL' in str(strategy).upper():
+    elif 'VERTICAL' in str(strategy).upper() or 'DIRECTIONAL' in str(strategy).upper():
         if t_frac < 0.7: decay_factor = 1 - t_frac
         else: decay_factor = 0.3 * np.exp(-5 * (t_frac - 0.7))
         return initial_theta * decay_factor
@@ -72,13 +73,24 @@ def reconstruct_daily_pnl(trades_df):
         days = trade['Days Held']
         if days <= 0: days = 1
         total_pnl = trade['P&L']
+        strategy = trade['Strategy']
+        initial_theta = trade['Theta'] if trade['Theta'] != 0 else 1.0
         
-        # Simplified distribution for demo
-        daily_val = total_pnl / days
+        daily_theta_weights = []
+        for day in range(int(days)):
+            expected_theta = theta_decay_model(initial_theta, day, strategy, max(45, days))
+            daily_theta_weights.append(abs(expected_theta))
+            
+        total_theta_sum = sum(daily_theta_weights)
+        if total_theta_sum == 0: daily_theta_weights = [1/days] * int(days)
+        else: daily_theta_weights = [w/total_theta_sum for w in daily_theta_weights]
+            
         curr = trade['Entry Date']
-        for _ in range(int(days)):
+        for day_weight in daily_theta_weights:
             if curr.date() in daily_pnl_dict:
-                daily_pnl_dict[curr.date()] += daily_val
+                daily_pnl_dict[curr.date()] += total_pnl * day_weight
+            else:
+                daily_pnl_dict[curr.date()] = total_pnl * day_weight
             curr += pd.Timedelta(days=1)
     return daily_pnl_dict
 
@@ -104,16 +116,16 @@ def calculate_portfolio_metrics(trades_df, capital):
     return sharpe, cagr * 100
 
 def calculate_max_drawdown(trades_df, initial_capital):
-    if trades_df.empty: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
-    daily_pnl = reconstruct_daily_pnl(trades_df)
-    dates = sorted(daily_pnl.keys())
+    if trades_df.empty or initial_capital <= 0: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
+    daily_pnl_dict = reconstruct_daily_pnl(trades_df)
+    dates = sorted(daily_pnl_dict.keys())
     equity = [initial_capital]
-    for d in dates: equity.append(equity[-1] + daily_pnl[d])
-    eq_series = pd.Series(equity)
-    running_max = eq_series.cummax()
-    dd = (eq_series - running_max) / running_max
-    if dd.empty: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
-    return {'Max Drawdown %': dd.min() * 100, 'Current DD %': dd.iloc[-1] * 100}
+    for d in dates: equity.append(equity[-1] + daily_pnl_dict[d])
+    equity_series = pd.Series(equity, index=pd.to_datetime(dates + [dates[-1] + timedelta(days=1)])) # Fix index length mismatch
+    running_max = equity_series.cummax()
+    drawdown = (equity_series - running_max) / running_max
+    if drawdown.empty: return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
+    return {'Max Drawdown %': drawdown.min() * 100, 'Current DD %': drawdown.iloc[-1] * 100}
 
 def rolling_correlation_matrix(snaps, window_days=30):
     if snaps.empty: return None
@@ -210,7 +222,7 @@ def generate_adaptive_rulebook_text(history_df, strategies):
     return text
 
 # ==========================================
-# 2. FAKE DATA GENERATOR (Simulates OptionStrat Ingestion)
+# 2. FAKE DATA GENERATOR (Schema Matches Real App)
 # ==========================================
 def generate_fake_data():
     if os.path.exists(DB_NAME): os.remove(DB_NAME)
@@ -317,6 +329,7 @@ def load_strategy_config():
     except: return {}
     finally: conn.close()
 
+# --- LOAD ALL DATA (Full Columns) ---
 @st.cache_data(ttl=60)
 def load_data():
     conn = sqlite3.connect(DB_NAME)
