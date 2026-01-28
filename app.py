@@ -1031,24 +1031,92 @@ def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total
         })
     return pd.DataFrame(predictions)
 
-def check_rot_and_efficiency(active_df, history_df, threshold_pct, min_days):
-    if active_df.empty or history_df.empty: return pd.DataFrame()
-    history_df['Eff_Score'] = (history_df['P&L'] / history_df['Days Held'].clip(lower=1)) / (history_df['Debit'] / 1000)
-    baseline_eff = history_df.groupby('Strategy')['Eff_Score'].median().to_dict()
-    rot_alerts = []
-    for _, row in active_df.iterrows():
-        strat = row['Strategy']
-        days = row['Days Held']
-        if days < min_days: continue
-        curr_eff = (row['P&L'] / days) / (row['Debit'] / 1000) if row['Debit'] > 0 else 0
-        base = baseline_eff.get(strat, 0)
-        if base > 0 and curr_eff < (base * threshold_pct):
-            rot_alerts.append({
-                'Trade': row['Name'], 'Strategy': strat, 'Current Speed': f"${curr_eff:.1f}/day",
-                'Baseline Speed': f"${base:.1f}/day", 'Raw Current': curr_eff, 'Raw Baseline': base,    
-                'Status': ' ROTTING' if row['P&L'] > 0 else ' DEAD MONEY'
-            })
-    return pd.DataFrame(rot_alerts)
+
+def get_mae_stats(conn):
+    """
+    FEATURE A: SMART STOP (MAE)
+    Calculates the Maximum Adverse Excursion (Lowest PnL) for historical WINNING trades.
+    Returns the 5th percentile (95% of winners never went below this).
+    """
+    query = """
+    SELECT t.strategy, MIN(s.pnl) as worst_drawdown
+    FROM snapshots s
+    JOIN trades t ON s.trade_id = t.trade_id
+    WHERE t.status = 'CLOSED' AND t.pnl > 0
+    GROUP BY t.trade_id, t.strategy
+    """
+    try:
+        df = pd.read_sql(query, conn)
+        mae_stats = {}
+        if not df.empty:
+            for strategy in df['strategy'].unique():
+                strat_df = df[df['strategy'] == strategy]
+                # 5th percentile of drawdown (Safe Bottom)
+                if not strat_df.empty:
+                    limit = strat_df['worst_drawdown'].quantile(0.05) 
+                    mae_stats[strategy] = limit
+        return mae_stats
+    except Exception as e:
+        return {}
+
+def get_velocity_stats(expired_df):
+    """
+    FEATURE C: PROFIT VELOCITY
+    Calculates Mean and StdDev of $/Day velocity for winning trades.
+    """
+    velocity_stats = {}
+    if expired_df.empty: return velocity_stats
+    
+    winners = expired_df[expired_df['P&L'] > 0].copy()
+    if winners.empty: return velocity_stats
+
+    # Avoid division by zero
+    winners['days_held'] = winners['days_held'].replace(0, 1)
+    winners['velocity'] = winners['P&L'] / winners['days_held']
+
+    for strategy in winners['Strategy'].unique():
+        s_df = winners[winners['Strategy'] == strategy]
+        if len(s_df) > 2:
+            mean_v = s_df['velocity'].mean()
+            std_v = s_df['velocity'].std()
+            # Threshold is Mean + 2 StdDevs
+            velocity_stats[strategy] = {
+                'threshold': mean_v + (2 * std_v),
+                'mean': mean_v
+            }
+    return velocity_stats
+
+def check_rot_and_efficiency(row, hist_avg_days):
+    """
+    UPDATED: Checks for Theta Decay efficiency, Time Rot, AND Velocity.
+    """
+    try:
+        current_pnl = row['P&L']
+        days = row.get('Days', 1)
+        if days == 0: days = 1
+        
+        theta = row.get('Net Theta', 0)
+        
+        # Velocity ($/Day)
+        current_speed = current_pnl / days
+        
+        # Theta Efficiency
+        if theta != 0:
+            theta_efficiency = (current_speed / theta) 
+        else:
+            theta_efficiency = 0
+            
+        status = "Healthy"
+        if days > hist_avg_days * 1.2 and current_pnl < 0:
+            status = "Rotting (Time > Avg & Red)"
+        elif theta_efficiency < 0.2 and days > 10 and current_pnl > 0:
+             status = "Inefficient (Theta Stuck)"
+        elif theta_efficiency < 0 and days > 5:
+             status = "Bleeding (Negative Efficiency)"
+             
+        return current_speed, theta_efficiency, status
+    except:
+        return 0, 0, "Error"
 
 def get_dynamic_targets(history_df, percentile):
     if history_df.empty: return {}
