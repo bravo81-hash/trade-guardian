@@ -615,9 +615,9 @@ def parse_optionstrat_file(file, file_type, config_dict):
 
             days_held = 1
             if exit_dt and f_type == "History":
-                  days_held = (exit_dt - start_dt).days
+                 days_held = (exit_dt - start_dt).days
             else:
-                  days_held = (datetime.now() - start_dt).days
+                 days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
 
             strat_config = config_dict.get(strat, {})
@@ -1543,6 +1543,23 @@ if not dynamic_benchmarks: dynamic_benchmarks = BASE_CONFIG.copy()
 expired_df = pd.DataFrame() 
 if not df.empty and 'Status' in df.columns:
     expired_df = df[df['Status'] == 'Expired']
+    
+    # --- v147.0 STATS CALC ---
+    try:
+        if 'expired_df' in locals() and not expired_df.empty:
+            velocity_stats = get_velocity_stats(expired_df)
+        if 'conn' in locals():
+            mae_stats = get_mae_stats(conn) # Note: conn needs to be open, get_db_connection() creates new
+        else:
+            # Create temp connection for stats
+            try:
+                temp_conn = get_db_connection()
+                mae_stats = get_mae_stats(temp_conn)
+                temp_conn.close()
+            except: pass
+    except Exception as e: print(f"Stats Error: {e}")
+    # -------------------------
+
     if not expired_df.empty:
         hist_grp = expired_df.groupby('Strategy')
         for strat, grp in hist_grp:
@@ -1743,7 +1760,13 @@ with tab_active:
                     "Urgency Score": st.column_config.ProgressColumn(" Urgency Ladder", min_value=0, max_value=100, format="%d"),
                     "Action": st.column_config.TextColumn("Decision", disabled=True),
                     "Gauge": st.column_config.TextColumn("Tank / Recov"),
-                    "Stability": st.column_config.NumberColumn("Stability", format="%.2f", disabled=True),
+                    "Stability": st.column_config.ProgressColumn(
+                        "Stability",
+                        help="Theta / (Delta + 1). Full bar (3.0) = Excellent Health.",
+                        format="%.2f",
+                        min_value=0,
+                        max_value=3,
+                    ),
                     "Theta Eff.": st.column_config.NumberColumn(" Eff", format="%.2f", disabled=True),
                     "ROI": st.column_config.NumberColumn("ROI %", format="%.1f%%", disabled=True),
                     "Ann. ROI": st.column_config.NumberColumn("Ann. ROI %", format="%.1f%%", disabled=True),
@@ -1864,7 +1887,20 @@ with tab_active:
                                     return 'color: orange; font-weight: bold' 
                                 return ''
 
-                            st.dataframe(display_df.style.format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}", 'Stability': "{:.2f}", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"}).map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action']).map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L']).map(yield_color, subset=['Daily Yield %']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), use_container_width=True, column_config={"Link": st.column_config.LinkColumn("OS Link", display_text="Open "), "Urgency Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d"), "Gauge": st.column_config.TextColumn("Tank / Recov")})
+                            st.dataframe(
+                                display_df.style.format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}", 'Stability': "{:.2f}", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
+                                .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
+                                .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
+                                .map(yield_color, subset=['Daily Yield %'])
+                                .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
+                                use_container_width=True, 
+                                column_config={
+                                    "Link": st.column_config.LinkColumn("OS Link", display_text="Open "), 
+                                    "Urgency Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d"), 
+                                    "Gauge": st.column_config.TextColumn("Tank / Recov"),
+                                    "Stability": st.column_config.ProgressColumn("Stability", format="%.2f", min_value=0, max_value=3)
+                                }
+                            )
                         else: st.info("No active trades.")
                 if "Other" not in sorted_strats:
                     with strat_tabs_inner[-1]: 
@@ -2283,23 +2319,32 @@ with tab_ai:
 
             st.subheader("Diagnostics")
             # --- v147.0 UI: Velocity Speedometer ---
-            if 'strat_vel_stats' in locals() and strat_vel_stats:
-                v_thresh = strat_vel_stats['threshold']
-                d_pnl = row.get('P&L', 0) / max(1, row.get('Days', 1))
-                
-                fig_gauge = go.Figure(go.Indicator(
-                    mode = "gauge+number",
-                    value = d_pnl,
-                    title = {'text': "🚀 Velocity ($/Day)"},
-                    gauge = {
-                        'axis': {'range': [None, v_thresh * 1.5]},
-                        'bar': {'color': "#00cc96" if d_pnl < v_thresh else "#EF553B"},
-                        'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': v_thresh},
-                        'steps': [{'range': [0, v_thresh], 'color': "lightgray"}]
-                    }
-                ))
-                fig_gauge.update_layout(height=200, margin=dict(l=20,r=20,t=30,b=20))
-                st.plotly_chart(fig_gauge, use_container_width=True)
+            if 'velocity_stats' in locals() and velocity_stats: # Use velocity_stats (global) not strat_vel_stats
+                # Just show the first active trade or aggregate for demo if multiple
+                # Ideally this should be trade-specific selection, but for dashboard summary:
+                if not active_trades.empty:
+                     # Pick the fastest moving trade as the example
+                     active_trades['daily_pnl'] = active_trades['P&L'] / active_trades['Days Held'].clip(lower=1)
+                     fastest_trade = active_trades.loc[active_trades['daily_pnl'].idxmax()]
+                     strat = fastest_trade['Strategy']
+                     
+                     if strat in velocity_stats:
+                        v_thresh = velocity_stats[strat]['threshold']
+                        d_pnl = fastest_trade['daily_pnl']
+                        
+                        fig_gauge = go.Figure(go.Indicator(
+                            mode = "gauge+number",
+                            value = d_pnl,
+                            title = {'text': f"🚀 Top Velocity: {fastest_trade['Name']}"},
+                            gauge = {
+                                'axis': {'range': [None, v_thresh * 1.5]},
+                                'bar': {'color': "#00cc96" if d_pnl < v_thresh else "#EF553B"},
+                                'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': v_thresh},
+                                'steps': [{'range': [0, v_thresh], 'color': "lightgray"}]
+                            }
+                        ))
+                        fig_gauge.update_layout(height=200, margin=dict(l=20,r=20,t=30,b=20))
+                        st.plotly_chart(fig_gauge, use_container_width=True)
             # ---------------------------------------
             st.subheader(f" Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
             targets = get_dynamic_targets(expired_df, exit_percentile)
@@ -2327,7 +2372,7 @@ with tab_rules:
             with st.expander(f"📊 {strat} Risk Profile"):
                 c_r1, c_r2 = st.columns(2)
                 with c_r1:
-                    st.write(f"**Target Win:** ${data.get('avg_win', 0):.0f}")
+                    st.write(f"**Target Win:** ${data.get('pnl', 0):.0f}")
                     if mae != "N/A":
                         st.error(f"**Smart Stop (MAE):** ${mae:.2f}")
                         safe_range = abs(mae)
@@ -2344,4 +2389,4 @@ with tab_rules:
                     else: st.write("No Velocity data yet.")
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v146.7 (Cloud Edition)")
+    st.caption("Allantis Trade Guardian v147.0 (Cloud Edition)")
