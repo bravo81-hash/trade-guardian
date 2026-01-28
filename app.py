@@ -2280,6 +2280,27 @@ with tab_ai:
                     st.dataframe(rot_df[['Trade', 'Strategy', 'Current Speed', 'Baseline Speed', 'Status']], use_container_width=True)
                 else: st.success(" Capital is moving efficiently. No rot detected.")
         with c_ai_2:
+
+            st.subheader("Diagnostics")
+            # --- v147.0 UI: Velocity Speedometer ---
+            if 'strat_vel_stats' in locals() and strat_vel_stats:
+                v_thresh = strat_vel_stats['threshold']
+                d_pnl = row.get('P&L', 0) / max(1, row.get('Days', 1))
+                
+                fig_gauge = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = d_pnl,
+                    title = {'text': "🚀 Velocity ($/Day)"},
+                    gauge = {
+                        'axis': {'range': [None, v_thresh * 1.5]},
+                        'bar': {'color': "#00cc96" if d_pnl < v_thresh else "#EF553B"},
+                        'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': v_thresh},
+                        'steps': [{'range': [0, v_thresh], 'color': "lightgray"}]
+                    }
+                ))
+                fig_gauge.update_layout(height=200, margin=dict(l=20,r=20,t=30,b=20))
+                st.plotly_chart(fig_gauge, use_container_width=True)
+            # ---------------------------------------
             st.subheader(f" Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
             targets = get_dynamic_targets(expired_df, exit_percentile)
             if targets:
