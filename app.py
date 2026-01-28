@@ -1,4 +1,11 @@
 import streamlit as st
+
+# --- GLOBAL STATE INIT (Critical Fix) ---
+# Initializes variables globally to prevent NameError in Tabs
+if 'velocity_stats' not in globals(): velocity_stats = {}
+if 'mae_stats' not in globals(): mae_stats = {}
+# ----------------------------------------
+
 import pandas as pd
 import numpy as np
 import io
@@ -1030,58 +1037,6 @@ def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total
             'AI Rec': rec, 'Confidence': confidence
         })
     return pd.DataFrame(predictions)
-
-
-def get_mae_stats(conn):
-    """
-    FEATURE A: SMART STOP (MAE)
-    Calculates the Maximum Adverse Excursion (Lowest PnL) for historical WINNING trades.
-    Returns the 5th percentile (95% of winners never went below this).
-    """
-    query = """
-    SELECT t.strategy, MIN(s.pnl) as worst_drawdown
-    FROM snapshots s
-    JOIN trades t ON s.trade_id = t.trade_id
-    WHERE t.status = 'CLOSED' AND t.pnl > 0
-    GROUP BY t.trade_id, t.strategy
-    """
-    try:
-        df = pd.read_sql(query, conn)
-        mae_stats = {}
-        if not df.empty:
-            for strategy in df['strategy'].unique():
-                strat_df = df[df['strategy'] == strategy]
-                if not strat_df.empty:
-                    limit = strat_df['worst_drawdown'].quantile(0.05) 
-                    mae_stats[strategy] = limit
-        return mae_stats
-    except Exception as e:
-        return {}
-
-def get_velocity_stats(expired_df):
-    """
-    FEATURE C: PROFIT VELOCITY
-    Calculates Mean and StdDev of $/Day velocity for winning trades.
-    """
-    velocity_stats = {}
-    if expired_df.empty: return velocity_stats
-    
-    winners = expired_df[expired_df['P&L'] > 0].copy()
-    if winners.empty: return velocity_stats
-
-    winners['days_held'] = winners['days_held'].replace(0, 1)
-    winners['velocity'] = winners['P&L'] / winners['days_held']
-
-    for strategy in winners['Strategy'].unique():
-        s_df = winners[winners['Strategy'] == strategy]
-        if len(s_df) > 2:
-            mean_v = s_df['velocity'].mean()
-            std_v = s_df['velocity'].std()
-            velocity_stats[strategy] = {
-                'threshold': mean_v + (2 * std_v),
-                'mean': mean_v
-            }
-    return velocity_stats
 
 
 def get_mae_stats(conn):
@@ -2340,32 +2295,6 @@ with tab_ai:
 with tab_rules:
     strategies_for_rules = sorted(list(dynamic_benchmarks.keys()))
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
-
-    # --- v147.0 UI UPGRADE: Risk Floor Visuals ---
-    st.markdown("### 🛡️ Smart Stop & Risk Analysis")
-    for strat, data in dynamic_benchmarks.items():
-        mae = mae_stats.get(strat, "N/A")
-        vel = velocity_stats.get(strat)
-        
-        with st.expander(f"📊 {strat} Risk Profile"):
-            c_r1, c_r2 = st.columns(2)
-            with c_r1:
-                st.write(f"**Target Win:** ${data['avg_win']:.0f}")
-                if mae != "N/A":
-                    st.error(f"**Smart Stop (MAE):** ${mae:.2f}")
-                    safe_range = abs(mae)
-                    fig_mae = go.Figure()
-                    fig_mae.add_trace(go.Bar(x=[safe_range], y=["Risk Room"], orientation='h', marker_color='lightgreen', name="Safe Zone"))
-                    fig_mae.update_layout(xaxis_title="Max Drawdown ($)", xaxis=dict(range=[0, safe_range*1.2]), height=100, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
-                    st.plotly_chart(fig_mae, use_container_width=True)
-                else: st.write("No MAE data yet.")
-            
-            with c_r2:
-                if vel:
-                    st.success(f"**Velocity Limit:** ${vel['threshold']:.2f}/day")
-                    st.caption("Profit speed exceeding this is an anomaly.")
-                else: st.write("No Velocity data yet.")
-
     st.markdown(adaptive_content)
     st.divider()
     st.caption("Allantis Trade Guardian v146.7 (Cloud Edition)")
