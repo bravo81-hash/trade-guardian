@@ -1051,7 +1051,6 @@ def get_mae_stats(conn):
         if not df.empty:
             for strategy in df['strategy'].unique():
                 strat_df = df[df['strategy'] == strategy]
-                # 5th percentile of drawdown (Safe Bottom)
                 if not strat_df.empty:
                     limit = strat_df['worst_drawdown'].quantile(0.05) 
                     mae_stats[strategy] = limit
@@ -1070,7 +1069,6 @@ def get_velocity_stats(expired_df):
     winners = expired_df[expired_df['P&L'] > 0].copy()
     if winners.empty: return velocity_stats
 
-    # Avoid division by zero
     winners['days_held'] = winners['days_held'].replace(0, 1)
     winners['velocity'] = winners['P&L'] / winners['days_held']
 
@@ -1079,7 +1077,6 @@ def get_velocity_stats(expired_df):
         if len(s_df) > 2:
             mean_v = s_df['velocity'].mean()
             std_v = s_df['velocity'].std()
-            # Threshold is Mean + 2 StdDevs
             velocity_stats[strategy] = {
                 'threshold': mean_v + (2 * std_v),
                 'mean': mean_v
@@ -1096,11 +1093,8 @@ def check_rot_and_efficiency(row, hist_avg_days):
         if days == 0: days = 1
         
         theta = row.get('Net Theta', 0)
-        
-        # Velocity ($/Day)
         current_speed = current_pnl / days
         
-        # Theta Efficiency
         if theta != 0:
             theta_efficiency = (current_speed / theta) 
         else:
@@ -2248,7 +2242,24 @@ with tab_ai:
         with c_ai_1:
             st.subheader(" Capital Rot Detector")
             if not active_trades.empty:
-                rot_df = check_rot_and_efficiency(active_trades, expired_df, rot_threshold, min_days_rot)
+                # --- v147.0 FIX: Reconstruct rot_df using new row-based function ---
+                rot_rows = []
+                for idx, row in active_trades.iterrows():
+                    s_name = row.get('Strategy', 'Unknown')
+                    h_days = dynamic_benchmarks.get(s_name, {}).get('avg_days', 30)
+                    h_win = dynamic_benchmarks.get(s_name, {}).get('avg_win', 100)
+                    
+                    curr_spd, t_eff, status = check_rot_and_efficiency(row, h_days)
+                    base_spd = h_win / max(1, h_days)
+                    
+                    rot_rows.append({
+                        'Trade': row.get('Symbol', f"Trade {idx}"), 
+                        'Strategy': s_name,
+                        'Current Speed': curr_spd,
+                        'Baseline Speed': base_spd,
+                        'Status': status
+                    })
+                rot_df = pd.DataFrame(rot_rows)
                 if not rot_df.empty:
                     rot_viz = rot_df.copy()
                     fig_rot = go.Figure()
