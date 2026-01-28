@@ -2257,9 +2257,12 @@ with tab_ai:
                         'Strategy': s_name,
                         'Current Speed': curr_spd,
                         'Baseline Speed': base_spd,
-                        'Status': status
+                        'Status': status,
+                        'Raw Current': curr_spd,  # Fix for plotting key
+                        'Raw Baseline': base_spd  # Fix for plotting key
                     })
                 rot_df = pd.DataFrame(rot_rows)
+                rot_viz = rot_df.copy() # Ensure viz copy exists
                 if not rot_df.empty:
                     rot_viz = rot_df.copy()
                     fig_rot = go.Figure()
