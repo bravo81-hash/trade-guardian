@@ -1,0 +1,275 @@
+import re
+import os
+
+# --- CONFIGURATION ---
+INPUT_FILE = "v146.7.txt"
+OUTPUT_FILE = "v147.0_complete.py"
+
+# --- NEW CODE BLOCKS ---
+
+# 1. NEW ANALYTICS FUNCTIONS (MAE & Velocity)
+BLOCK_NEW_ANALYTICS = r"""
+def get_mae_stats(conn):
+    """
+    FEATURE A: SMART STOP (MAE)
+    Calculates the Maximum Adverse Excursion (Lowest PnL) for historical WINNING trades.
+    Returns the 5th percentile (95% of winners never went below this).
+    """
+    query = """
+    SELECT t.strategy, MIN(s.pnl) as worst_drawdown
+    FROM snapshots s
+    JOIN trades t ON s.trade_id = t.trade_id
+    WHERE t.status = 'CLOSED' AND t.pnl > 0
+    GROUP BY t.trade_id, t.strategy
+    """
+    try:
+        df = pd.read_sql(query, conn)
+        mae_stats = {}
+        if not df.empty:
+            for strategy in df['strategy'].unique():
+                strat_df = df[df['strategy'] == strategy]
+                # 5th percentile of drawdown (Safe Bottom)
+                if not strat_df.empty:
+                    limit = strat_df['worst_drawdown'].quantile(0.05) 
+                    mae_stats[strategy] = limit
+        return mae_stats
+    except Exception as e:
+        return {}
+
+def get_velocity_stats(expired_df):
+    """
+    FEATURE C: PROFIT VELOCITY
+    Calculates Mean and StdDev of $/Day velocity for winning trades.
+    """
+    velocity_stats = {}
+    if expired_df.empty: return velocity_stats
+    
+    winners = expired_df[expired_df['P&L'] > 0].copy()
+    if winners.empty: return velocity_stats
+
+    # Avoid division by zero
+    winners['days_held'] = winners['days_held'].replace(0, 1)
+    winners['velocity'] = winners['P&L'] / winners['days_held']
+
+    for strategy in winners['Strategy'].unique():
+        s_df = winners[winners['Strategy'] == strategy]
+        if len(s_df) > 2:
+            mean_v = s_df['velocity'].mean()
+            std_v = s_df['velocity'].std()
+            # Threshold is Mean + 2 StdDevs
+            velocity_stats[strategy] = {
+                'threshold': mean_v + (2 * std_v),
+                'mean': mean_v
+            }
+    return velocity_stats
+
+def check_rot_and_efficiency(row, hist_avg_days):
+    """
+    UPDATED: Checks for Theta Decay efficiency, Time Rot, AND Velocity.
+    """
+    try:
+        current_pnl = row['P&L']
+        days = row.get('Days', 1)
+        if days == 0: days = 1
+        
+        theta = row.get('Net Theta', 0)
+        
+        # Velocity ($/Day)
+        current_speed = current_pnl / days
+        
+        # Theta Efficiency
+        if theta != 0:
+            theta_efficiency = (current_speed / theta) 
+        else:
+            theta_efficiency = 0
+            
+        status = "Healthy"
+        if days > hist_avg_days * 1.2 and current_pnl < 0:
+            status = "Rotting (Time > Avg & Red)"
+        elif theta_efficiency < 0.2 and days > 10 and current_pnl > 0:
+             status = "Inefficient (Theta Stuck)"
+        elif theta_efficiency < 0 and days > 5:
+             status = "Bleeding (Negative Efficiency)"
+             
+        return current_speed, theta_efficiency, status
+    except:
+        return 0, 0, "Error"
+"""
+
+# 2. NEW DECISION LADDER
+BLOCK_NEW_LADDER = r"""def calculate_decision_ladder(row, hist_avg_pnl, hist_avg_days, target_pnl, target_days, strategy_name="", velocity_stats=None, mae_limit=None):
+    """
+    The Brain v147.0.
+    Evaluates trade status against targets, health, MAE, and Velocity.
+    Includes 'Overdrive' logic to hold winning trades longer if health is good.
+    """
+    pnl = row['P&L']
+    days_held = max(1, row.get('Days', 1))
+    theta = row.get('Net Theta', 0)
+    delta = row.get('Net Delta', 0)
+    
+    # 0. CALCULATE HEALTH METRICS
+    # Stability: Ratio of Income (Theta) to Risk (Delta)
+    stability = theta / (abs(delta) + 1) # +1 to avoid div zero
+    
+    # Efficiency: PnL per day vs Theta
+    daily_pnl = pnl / days_held
+    theta_eff = daily_pnl / theta if theta != 0 else 0
+
+    # 1. MAE CHECK (FEATURE A: SMART STOP)
+    if mae_limit is not None and pnl < mae_limit:
+        return f"KILL: Structural Failure (PnL < {mae_limit:.0f})"
+
+    # 2. VELOCITY CHECK (FEATURE C: PROFIT VELOCITY)
+    if velocity_stats and strategy_name in velocity_stats:
+        v_thresh = velocity_stats[strategy_name]['threshold']
+        if pnl > 0 and daily_pnl > v_thresh:
+            return f"TAKE PROFIT: Velocity Anomaly (${daily_pnl:.1f}/day)"
+
+    # 3. OVERDRIVE ENGINE (Let Winners Run)
+    if pnl >= target_pnl:
+        is_stable = stability > 1.5 
+        is_efficient = theta_eff > 0.4
+        not_rotting = days_held < (target_days * 1.5)
+        
+        if is_stable and is_efficient and not_rotting:
+            return "OVERDRIVE: Targets Met but Health Excellent. HOLD."
+        else:
+            return "TAKE PROFIT: Target Hit"
+
+    # 4. STANDARD DECISION LADDER LOGIC
+    remaining_pnl = target_pnl - pnl
+    if theta > 0:
+        recov_days = remaining_pnl / theta
+        if recov_days > (target_days * 2) and days_held > (target_days * 0.5):
+            return "KILL: Theta insufficient to reach target"
+            
+    cooking_limit = max(30, hist_avg_days * 0.7)
+    
+    if days_held < cooking_limit and pnl > (-0.5 * target_pnl):
+        return "COOKING: Let it bake"
+        
+    if days_held > target_days * 1.5:
+        if pnl > 0: return "CLOSE: Overstayed (Green)"
+        else: return "CLOSE: Overstayed (Red - Rot)"
+
+    if pnl < -2.0 * target_pnl:
+        return "STOP LOSS: Hard Limit"
+        
+    return "MONITOR"
+"""
+
+# 3. NEW COLOR LOGIC
+BLOCK_NEW_COLORS = r"""        def color_decision(val):
+            color = ''
+            if 'KILL' in val: color = 'background-color: #ffcccc; color: black'
+            elif 'TAKE PROFIT' in val: color = 'background-color: #ccffcc; color: black'
+            elif 'OVERDRIVE' in val: color = 'background-color: #ffffcc; color: black' # Gold
+            elif 'COOKING' in val: color = 'background-color: #e6f7ff; color: black'
+            return color
+"""
+
+def main():
+    if not os.path.exists(INPUT_FILE):
+        print(f"❌ Error: Could not find '{INPUT_FILE}' in this directory.")
+        return
+
+    print(f"📖 Reading {INPUT_FILE}...")
+    with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    original_len = len(content)
+    
+    # --- PATCH 1: IMPORTS ---
+    if "from scipy.spatial.distance import cdist" not in content:
+        content = content.replace("import scipy.stats", "import scipy.stats\nfrom scipy.spatial.distance import cdist")
+        print("✅ Added Imports")
+
+    # --- PATCH 2: REPLACE HELPER FUNCTIONS ---
+    # We use regex to identify the old function blocks and replace them
+    # Find check_rot_and_efficiency and replace it + inject new stats functions before it
+    
+    # Regex to capture the whole function body (assuming indentation)
+    pattern_rot = re.compile(r'def check_rot_and_efficiency\(.*?\):.*?return .*?(?=\n\S|\Z)', re.DOTALL)
+    
+    match_rot = pattern_rot.search(content)
+    if match_rot:
+        # We replace the old check_rot with: New Stats Funcs + New Check Rot
+        content = content.replace(match_rot.group(0), BLOCK_NEW_ANALYTICS)
+        print("✅ Upgraded Analytics Engine (Added MAE & Velocity)")
+    else:
+        print("⚠️ Warning: Could not find 'check_rot_and_efficiency' function.")
+
+    # --- PATCH 3: REPLACE DECISION LADDER ---
+    pattern_ladder = re.compile(r'def calculate_decision_ladder\(.*?\):.*?return "MONITOR"', re.DOTALL)
+    # If the regex is too strict, we try a simpler replace based on header
+    
+    # Try simple split strategy for safety
+    if "def calculate_decision_ladder(" in content:
+        # Find start
+        start_idx = content.find("def calculate_decision_ladder(")
+        # Find end (heuristic: look for "return \"MONITOR\"" which is standard in your code, or next def)
+        end_idx = content.find('return "MONITOR"', start_idx) + len('return "MONITOR"')
+        
+        if start_idx != -1 and end_idx != -1:
+            old_block = content[start_idx:end_idx]
+            content = content.replace(old_block, BLOCK_NEW_LADDER.strip())
+            print("✅ Upgraded Decision Ladder (Added Overdrive Logic)")
+    else:
+        print("⚠️ Warning: Could not find 'calculate_decision_ladder' function.")
+
+    # --- PATCH 4: UPDATE DASHBOARD LOGIC (TAB 1) ---
+    # 1. Inject Stats Calculation before loop
+    loop_marker = "active_df = st.session_state['active_data'].copy()"
+    injection = "\n        # --- v147.0 UPGRADE ---\n        velocity_stats = get_velocity_stats(expired_df)\n        mae_stats = get_mae_stats(conn)\n        # ----------------------\n"
+    
+    if loop_marker in content and "velocity_stats =" not in content:
+        content = content.replace(loop_marker, loop_marker + injection)
+        print("✅ Injected Stats Calculation into Dashboard")
+
+    # 2. Update Function Call inside Loop
+    # We look for the variable assignments inside the loop to find the call
+    # Logic: Find the line calling calculate_decision_ladder and replace it
+    
+    # We construct a regex that matches the function call loosely
+    pattern_call = re.compile(r'decision = calculate_decision_ladder\(.*?\)', re.DOTALL)
+    
+    new_call = """strat_vel_stats = velocity_stats.get(strat, None)
+            strat_mae = mae_stats.get(strat, -1000)
+            
+            decision = calculate_decision_ladder(
+                row, 
+                bench.get('avg_win', 500), 
+                bench.get('avg_days', 30), 
+                bench.get('avg_win', 500), 
+                bench.get('avg_days', 30),
+                strategy_name=strat,
+                velocity_stats=velocity_stats,
+                mae_limit=strat_mae
+            )"""
+
+    match_call = pattern_call.search(content)
+    if match_call:
+        # We need to make sure we don't replace the definition, only the call
+        # The definition starts with 'def ', the call starts with 'decision ='
+        content = content.replace(match_call.group(0), new_call)
+        print("✅ Updated Decision Ladder Call Arguments")
+
+    # --- PATCH 5: UPDATE COLORS ---
+    # Find the color_decision function and replace it
+    pattern_color = re.compile(r'def color_decision\(val\):.*?return color', re.DOTALL)
+    match_color = pattern_color.search(content)
+    if match_color:
+        content = content.replace(match_color.group(0), BLOCK_NEW_COLORS.strip())
+        print("✅ Updated Dashboard Colors")
+
+    # --- WRITE OUTPUT ---
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    print(f"\n🎉 SUCCESS! Generated {OUTPUT_FILE}")
+    print(f"Original size: {original_len} chars -> New size: {len(content)} chars")
+    print("Run this new file with Streamlit to see your v147.0 features.")
+
+if __name__ == "__main__":
+    main()
