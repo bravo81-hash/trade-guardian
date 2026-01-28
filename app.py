@@ -34,7 +34,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v147.0 (Layout & Data Refresh Fixes)")
+st.info("🚀 RUNNING VERSION: v147.0 (Self-Learning AI + UI Overhaul)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -2295,6 +2295,32 @@ with tab_ai:
 with tab_rules:
     strategies_for_rules = sorted(list(dynamic_benchmarks.keys()))
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
+
+    # --- v147.0 UI: Risk Floor Visuals ---
+    st.markdown("### 🛡️ Smart Stop & Risk Analysis")
+    if 'dynamic_benchmarks' in globals():
+        for strat, data in dynamic_benchmarks.items():
+            mae = mae_stats.get(strat, "N/A") if 'mae_stats' in globals() else "N/A"
+            vel = velocity_stats.get(strat) if 'velocity_stats' in globals() else None
+            
+            with st.expander(f"📊 {strat} Risk Profile"):
+                c_r1, c_r2 = st.columns(2)
+                with c_r1:
+                    st.write(f"**Target Win:** ${data.get('avg_win', 0):.0f}")
+                    if mae != "N/A":
+                        st.error(f"**Smart Stop (MAE):** ${mae:.2f}")
+                        safe_range = abs(mae)
+                        fig_mae = go.Figure()
+                        fig_mae.add_trace(go.Bar(x=[safe_range], y=["Risk Room"], orientation='h', marker_color='lightgreen', name="Safe Zone"))
+                        fig_mae.update_layout(xaxis_title="Max Drawdown ($)", xaxis=dict(range=[0, safe_range*1.2]), height=100, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
+                        st.plotly_chart(fig_mae, use_container_width=True)
+                    else: st.write("No MAE data yet.")
+                
+                with c_r2:
+                    if vel:
+                        st.success(f"**Velocity Limit:** ${vel['threshold']:.2f}/day")
+                        st.caption("Profit speed exceeding this is an anomaly.")
+                    else: st.write("No Velocity data yet.")
     st.markdown(adaptive_content)
     st.divider()
     st.caption("Allantis Trade Guardian v146.7 (Cloud Edition)")
