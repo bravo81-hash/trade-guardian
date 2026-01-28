@@ -2323,4 +2323,4 @@ with tab_rules:
                     else: st.write("No Velocity data yet.")
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v146.7 (Cloud Edition)")
+    st.caption("Allantis Trade Guardian v147.0 (Cloud Edition)")
