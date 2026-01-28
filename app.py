@@ -27,7 +27,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v146.7 (Layout & Data Refresh Fixes)")
+st.info("🚀 RUNNING VERSION: v147.0 (Layout & Data Refresh Fixes)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
