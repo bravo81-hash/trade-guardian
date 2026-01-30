@@ -34,7 +34,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v147.0 (Lifecycle Intelligence + Profit Timing)")
+st.info("🚀 RUNNING VERSION: v147.1 (Enhanced Visuals + Capital Efficiency Logic)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -1595,6 +1595,24 @@ def calculate_decision_ladder(row, benchmarks_dict):
         score += 15
         reason += " + Bad Decay"
     
+    # NEW: Capital Efficiency Check (Redeployment Logic)
+    if pnl > 0 and days > 5:
+        # Calculate historical baseline velocity ($/day)
+        hist_vel = hist_avg_pnl / max(1, hist_avg_days)
+        # Calculate current velocity ($/day)
+        curr_vel = pnl / days
+        
+        # If current trade is dragging the average down significantly
+        if curr_vel < (hist_vel * 0.6): # Earning less than 60% of average speed
+             # Check if it's because it's super old (already handled by stale check) 
+             # or just slow performance.
+             # Only trigger if we have decent profit to take (e.g. > 20% of target)
+             if pnl > (target_profit * 0.2):
+                 score += 15
+                 if action == "HOLD": # Only override if currently neutral
+                     action = "REDEPLOY?"
+                     reason = f"Slow Capital (Vel ${curr_vel:.0f}/d vs Avg ${hist_vel:.0f}/d)"
+
     score = min(100, max(0, score))
     if score >= 90: action = "CRITICAL"
     elif score >= 70: action = "WATCH"
@@ -2299,10 +2317,10 @@ with tab_analytics:
                     color='Strategy', 
                     line_group='Trade Name', 
                     hover_data=['Trade Name'],
-                    color_discrete_sequence=px.colors.qualitative.Bold
+                    color_discrete_sequence=px.colors.qualitative.Vivid # BRIGHTER COLORS
                 )
-                # Make lines semi-transparent
-                fig_harvest.update_traces(opacity=0.15, line=dict(width=1))
+                # Make lines semi-transparent but visible
+                fig_harvest.update_traces(opacity=0.4, line=dict(width=1.5)) # INCREASED VISIBILITY
                 
                 # Add Average Lines
                 avg_curves = full_lifecycle_df.groupby(['Strategy', 'Pct_Duration'])['Pct_PnL'].mean().reset_index()
@@ -2410,6 +2428,38 @@ with tab_analytics:
                         st.caption("Trades significantly above the diagonal line achieved their bulk profit early but were held too long.")
                     else:
                         st.info("Not enough closed winning trades for Stagnation Analysis.")
+                
+                # --- NEW FEATURE: CAPITAL REDEPLOYMENT SUGGESTIONS ---
+                st.markdown("### 💡 Capital Efficiency Engine")
+                st.caption("AI Suggestions: Trades where capital is earning less than your historical average.")
+                
+                redeploy_list = []
+                for strat in selected_lifecycle_strat:
+                    # Get baseline for this strat
+                    bench = dynamic_benchmarks.get(strat, {})
+                    avg_daily_yield_pct = bench.get('yield', 0.1) # Default 0.1% if missing
+                    
+                    # Check active trades for this strat
+                    strat_active = df[(df['Status'] == 'Active') & (df['Strategy'] == strat)]
+                    
+                    for idx, row in strat_active.iterrows():
+                        curr_yield = row['Daily Yield %']
+                        # If earning less than 50% of strategy average and profitable
+                        if row['P&L'] > 0 and curr_yield < (avg_daily_yield_pct * 0.5):
+                             opportunity_cost = (avg_daily_yield_pct - curr_yield) * row['Days Held'] # Roughly points lost
+                             redeploy_list.append({
+                                 'Trade': row['Name'],
+                                 'Strategy': strat,
+                                 'Current Yield': f"{curr_yield:.2f}%/day",
+                                 'Target Yield': f"{avg_daily_yield_pct:.2f}%/day",
+                                 'Action': "Harvest & Redeploy",
+                                 'Reason': "Capital Stagnation"
+                             })
+                
+                if redeploy_list:
+                    st.dataframe(pd.DataFrame(redeploy_list), use_container_width=True)
+                else:
+                    st.success("All active capital is performing near or above historical baselines.")
 
     with an_rolls: 
         st.subheader(" Roll Campaign Analysis")
