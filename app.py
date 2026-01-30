@@ -34,7 +34,7 @@ except ImportError:
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
 # --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v147.0 (Self-Learning AI + UI Overhaul)")
+st.info("🚀 RUNNING VERSION: v147.0 (Lifecycle Intelligence + Profit Timing)")
 
 st.title("🛡️ Allantis Trade Guardian")
 
@@ -479,6 +479,78 @@ def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
     else:
         decay_factor = np.exp(-2 * t_frac)
         return initial_theta * (1 - decay_factor)
+
+def get_trade_lifecycle_data(row, snapshots_df):
+    """
+    Generates a daily PnL curve for a trade.
+    Prioritizes real snapshots. Falls back to reconstruction if snaps missing.
+    Returns DataFrame: [Day, Cumulative_PnL, Pct_Duration, Pct_PnL]
+    """
+    days = int(row['Days Held'])
+    if days < 1: days = 1
+    total_pnl = row['P&L']
+    
+    # 1. Try Real Snapshots
+    if snapshots_df is not None and not snapshots_df.empty:
+        trade_snaps = snapshots_df[snapshots_df['trade_id'] == row['id']].sort_values('days_held').copy()
+        if len(trade_snaps) >= 2:
+            # Clean data
+            trade_snaps['Cumulative_PnL'] = trade_snaps['pnl']
+            trade_snaps['Day'] = trade_snaps['days_held']
+            
+            # Ensure start at 0
+            if trade_snaps['Day'].min() > 0:
+                start_row = pd.DataFrame({'Day': [0], 'Cumulative_PnL': [0]})
+                trade_snaps = pd.concat([start_row, trade_snaps], ignore_index=True)
+            
+            # Ensure end matches final result if closed
+            if row['Status'] == 'Expired':
+                last_snap_day = trade_snaps['Day'].max()
+                if last_snap_day < days:
+                    end_row = pd.DataFrame({'Day': [days], 'Cumulative_PnL': [total_pnl]})
+                    trade_snaps = pd.concat([trade_snaps, end_row], ignore_index=True)
+            
+            trade_snaps['Pct_Duration'] = (trade_snaps['Day'] / days) * 100
+            # Avoid div by zero for PnL
+            denom = abs(total_pnl) if abs(total_pnl) > 0 else 1
+            trade_snaps['Pct_PnL'] = (trade_snaps['Cumulative_PnL'] / denom) * 100
+            return trade_snaps[['Day', 'Cumulative_PnL', 'Pct_Duration', 'Pct_PnL']]
+
+    # 2. Reconstruction (Theoretical Model)
+    # Generate daily points
+    daily_data = []
+    initial_theta = row['Theta'] if row['Theta'] != 0 else 1.0
+    
+    # Calculate weights for distribution
+    weights = []
+    for d in range(1, days + 1):
+        w = theta_decay_model(initial_theta, d, row['Strategy'], max(45, days))
+        weights.append(abs(w))
+    
+    total_w = sum(weights)
+    if total_w == 0: weights = [1/days] * days
+    else: weights = [w/total_w for w in weights]
+    
+    cum_pnl = 0
+    daily_data.append({'Day': 0, 'Cumulative_PnL': 0, 'Pct_Duration': 0, 'Pct_PnL': 0})
+    
+    for i, w in enumerate(weights):
+        day_num = i + 1
+        day_gain = total_pnl * w
+        cum_pnl += day_gain
+        
+        pct_dur = (day_num / days) * 100
+        denom = abs(total_pnl) if abs(total_pnl) > 0 else 1
+        pct_pnl = (cum_pnl / denom) * 100
+        
+        daily_data.append({
+            'Day': day_num,
+            'Cumulative_PnL': cum_pnl,
+            'Pct_Duration': pct_dur,
+            'Pct_PnL': pct_pnl
+        })
+        
+    return pd.DataFrame(daily_data)
 
 def reconstruct_daily_pnl(trades_df):
     trades = trades_df.copy()
@@ -1952,7 +2024,7 @@ with tab_strategies:
     st.info(" **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
 
 with tab_analytics:
-    an_overview, an_trends, an_risk, an_decay, an_rolls = st.tabs([" Overview", " Trends & Seasonality", " Risk & Excursion", " Decay & DNA", " Rolls"])
+    an_overview, an_trends, an_risk, an_lifecycle, an_rolls = st.tabs([" Overview", " Trends & Seasonality", " Risk & Excursion", " Lifecycle (Timing)", " Rolls"])
 
     with an_overview:
         if not df.empty and 'Status' in df.columns:
@@ -2182,42 +2254,158 @@ with tab_analytics:
                              fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
                         st.plotly_chart(fig_mfe, use_container_width=True)
 
-    with an_decay:
-        st.subheader(" Trade Life Cycle & Decay")
+    with an_lifecycle:
+        st.subheader("⏳ Profit Timing & Capital Efficiency")
+        st.caption("Analyze WHERE in the trade duration the profit is actually made to optimize churn.")
+        
         snaps = load_snapshots()
-        if not snaps.empty:
-            decay_strat = st.selectbox("Select Strategy for Decay", snaps['strategy'].unique(), key="decay_strat")
-            strat_snaps = snaps[snaps['strategy'] == decay_strat].copy()
-            if not strat_snaps.empty:
-                def get_theta_anchor(group):
-                    earliest = group.sort_values('days_held').iloc[0]
-                    return earliest['theta'] if earliest['theta'] > 0 else group['theta'].max()
-                anchor_map = strat_snaps.groupby('trade_id').apply(get_theta_anchor)
-                strat_snaps['Theta_Anchor'] = strat_snaps['trade_id'].map(anchor_map)
-                strat_snaps['Theta_Expected'] = strat_snaps.apply(lambda r: theta_decay_model(r['Theta_Anchor'], r['days_held'], r['strategy']), axis=1)
-                strat_snaps = strat_snaps[(strat_snaps['Theta_Anchor'] > 0) & (strat_snaps['theta'] != 0) & (strat_snaps['days_held'] < 60)]
+        all_lifecycle_data = []
+        
+        # Select strategies to analyze
+        strategies_avail = df['Strategy'].unique()
+        selected_lifecycle_strat = st.multiselect("Select Strategies", strategies_avail, default=strategies_avail[:2] if len(strategies_avail) > 0 else strategies_avail)
+        
+        subset_df = df[df['Strategy'].isin(selected_lifecycle_strat)].copy()
+        
+        if not subset_df.empty:
+            progress_text = "Reconstructing Lifecycle Curves..."
+            my_bar = st.progress(0, text=progress_text)
+            
+            for idx, row in subset_df.iterrows():
+                curve_df = get_trade_lifecycle_data(row, snaps)
+                if not curve_df.empty:
+                    curve_df['Strategy'] = row['Strategy']
+                    curve_df['Trade Name'] = row['Name']
+                    curve_df['Status'] = row['Status']
+                    all_lifecycle_data.append(curve_df)
+                my_bar.progress((idx + 1) / len(subset_df), text=progress_text)
+            my_bar.empty()
+            
+            if all_lifecycle_data:
+                full_lifecycle_df = pd.concat(all_lifecycle_data, ignore_index=True)
                 
-                fig_pnl = px.line(strat_snaps, x='days_held', y='pnl', color='name', title=f"Trade Life Cycle: PnL Trajectory ({decay_strat})", markers=True)
-                st.plotly_chart(fig_pnl, use_container_width=True)
-
-                if not strat_snaps.empty:
-                    d1, d2 = st.columns(2)
-                    with d1:
-                        fig_theta = go.Figure()
-                        for trade_id in strat_snaps['trade_id'].unique():
-                            trade_data = strat_snaps[strat_snaps['trade_id'] == trade_id].sort_values('days_held')
-                            fig_theta.add_trace(go.Scatter(x=trade_data['days_held'], y=trade_data['theta'], mode='lines+markers', name=f"{trade_data['name'].iloc[0][:15]} (Actual)", line=dict(width=2), showlegend=True))
-                            fig_theta.add_trace(go.Scatter(x=trade_data['days_held'], y=trade_data['Theta_Expected'], mode='lines', name=f"{trade_data['name'].iloc[0][:15]} (Expected)", line=dict(dash='dash', width=1), opacity=0.5, showlegend=False))
-                        fig_theta.update_layout(title=f"Theta: Actual vs Expected (Realistic Model)", xaxis_title="Days Held", yaxis_title="Theta ($)", hovermode='x unified')
-                        st.plotly_chart(fig_theta, use_container_width=True)
-                    with d2:
-                        if 'gamma' in strat_snaps.columns and strat_snaps['gamma'].abs().sum() > 0:
-                            strat_snaps['Gamma/Theta'] = np.where(strat_snaps['theta'] != 0, (strat_snaps['gamma'] * 100) / strat_snaps['theta'], 0)
-                            fig_risk = px.line(strat_snaps, x='days_held', y='Gamma/Theta', color='name', title=f"Explosion Ratio (Gamma Risk)", labels={'days_held': 'Days Held', 'Gamma/Theta': 'Gamma% / Theta$ Ratio'})
-                            st.plotly_chart(fig_risk, use_container_width=True)
-                        else:
-                            fig_delta = px.scatter(strat_snaps, x='days_held', y='delta', color='name', title=f"Delta Drift: {decay_strat}", labels={'days_held': 'Days', 'delta': 'Delta'}, trendline="lowess")
-                            st.plotly_chart(fig_delta, use_container_width=True)
+                # --- VISUAL 1: THE HARVEST CURVE ---
+                st.markdown("##### 1. The Harvest Curve (Profit vs Duration %)")
+                st.caption("How fast do these strategies yield profit? Convex (bulging up) = Fast/Front-Loaded. Concave (dipping) = Slow/Back-Loaded.")
+                
+                fig_harvest = px.line(
+                    full_lifecycle_df, 
+                    x='Pct_Duration', 
+                    y='Pct_PnL', 
+                    color='Strategy', 
+                    line_group='Trade Name', 
+                    hover_data=['Trade Name'],
+                    color_discrete_sequence=px.colors.qualitative.Bold
+                )
+                # Make lines semi-transparent
+                fig_harvest.update_traces(opacity=0.15, line=dict(width=1))
+                
+                # Add Average Lines
+                avg_curves = full_lifecycle_df.groupby(['Strategy', 'Pct_Duration'])['Pct_PnL'].mean().reset_index()
+                # Smooth the average line slightly for visual clarity if needed, but grouping by rounded duration helps
+                full_lifecycle_df['Pct_Duration_Bin'] = full_lifecycle_df['Pct_Duration'].round(-1) # Bin to nearest 10%
+                avg_binned = full_lifecycle_df.groupby(['Strategy', 'Pct_Duration_Bin'])['Pct_PnL'].mean().reset_index()
+                
+                for strat in selected_lifecycle_strat:
+                    strat_avg = avg_binned[avg_binned['Strategy'] == strat]
+                    if not strat_avg.empty:
+                        fig_harvest.add_trace(go.Scatter(
+                            x=strat_avg['Pct_Duration_Bin'], 
+                            y=strat_avg['Pct_PnL'], 
+                            mode='lines', 
+                            name=f"AVG: {strat}", 
+                            line=dict(width=4)
+                        ))
+                        
+                fig_harvest.update_layout(xaxis_title="% of Trade Duration", yaxis_title="% of Total Profit", showlegend=True)
+                fig_harvest.add_shape(type="line", x0=0, y0=0, x1=100, y1=100, line=dict(color="white", dash="dot", width=1), opacity=0.5)
+                st.plotly_chart(fig_harvest, use_container_width=True)
+                
+                # --- VISUAL 2: PHASING HISTOGRAM ---
+                st.markdown("##### 2. Profit Phasing (Where is the money made?)")
+                c_p1, c_p2 = st.columns(2)
+                
+                with c_p1:
+                    # Categorize PnL into phases: Early (0-30%), Mid (30-70%), Late (70-100%)
+                    def classify_phase(pct):
+                        if pct <= 30: return "1. Early (0-30%)"
+                        elif pct <= 70: return "2. Mid (30-70%)"
+                        return "3. Late (70-100%)"
+                    
+                    full_lifecycle_df['Phase'] = full_lifecycle_df['Pct_Duration'].apply(classify_phase)
+                    
+                    # Calculate PnL Delta (Marginal PnL per step) to verify where it was EARNED, not just cumulative
+                    # Sort first
+                    full_lifecycle_df = full_lifecycle_df.sort_values(['Trade Name', 'Pct_Duration'])
+                    full_lifecycle_df['Prev_PnL'] = full_lifecycle_df.groupby('Trade Name')['Cumulative_PnL'].shift(1).fillna(0)
+                    full_lifecycle_df['Marginal_PnL'] = full_lifecycle_df['Cumulative_PnL'] - full_lifecycle_df['Prev_PnL']
+                    
+                    # Group by Strategy and Phase, Sum Marginal PnL
+                    phase_attribution = full_lifecycle_df.groupby(['Strategy', 'Phase'])['Marginal_PnL'].sum().reset_index()
+                    
+                    fig_phase = px.bar(
+                        phase_attribution, 
+                        x='Strategy', 
+                        y='Marginal_PnL', 
+                        color='Phase', 
+                        barmode='group',
+                        title="Net Profit Generated by Phase ($)",
+                        color_discrete_map={"1. Early (0-30%)": "#636EFA", "2. Mid (30-70%)": "#00CC96", "3. Late (70-100%)": "#EF553B"}
+                    )
+                    st.plotly_chart(fig_phase, use_container_width=True)
+                    
+                with c_p2:
+                    st.markdown("**Capital Stagnation Analysis**")
+                    # Calculate "Time to 80% Profit" for closed winning trades
+                    closed_winners = subset_df[(subset_df['Status'] == 'Expired') & (subset_df['P&L'] > 0)]['Name'].unique()
+                    winner_curves = full_lifecycle_df[full_lifecycle_df['Trade Name'].isin(closed_winners)].copy()
+                    
+                    stagnation_data = []
+                    for t_name in closed_winners:
+                        t_data = winner_curves[winner_curves['Trade Name'] == t_name]
+                        if t_data.empty: continue
+                        
+                        total_days = t_data['Day'].max()
+                        final_pnl = t_data['Cumulative_PnL'].max()
+                        if final_pnl <= 0: continue
+                        
+                        # Find day where we crossed 80% of final PnL
+                        threshold = final_pnl * 0.80
+                        cross_row = t_data[t_data['Cumulative_PnL'] >= threshold].head(1)
+                        
+                        if not cross_row.empty:
+                            day_reached = cross_row['Day'].values[0]
+                            wasted_days = total_days - day_reached
+                            stagnation_data.append({
+                                'Trade': t_name,
+                                'Strategy': t_data['Strategy'].iloc[0],
+                                'Total Days': total_days,
+                                'Days to 80%': day_reached,
+                                'Zombie Days': wasted_days,
+                                'Zombie %': (wasted_days / total_days) * 100
+                            })
+                            
+                    if stagnation_data:
+                        stag_df = pd.DataFrame(stagnation_data)
+                        fig_stag = px.scatter(
+                            stag_df, 
+                            x='Days to 80%', 
+                            y='Total Days', 
+                            color='Strategy', 
+                            size='Zombie Days',
+                            hover_data=['Trade', 'Zombie %'],
+                            title="Efficiency: Days to 80% Gain vs Total Hold"
+                        )
+                        # Add diagonal line (Perfect Efficiency)
+                        max_d = stag_df['Total Days'].max()
+                        fig_stag.add_shape(type="line", x0=0, y0=0, x1=max_d, y1=max_d, line=dict(color="grey", dash="dash"))
+                        fig_stag.add_annotation(x=max_d*0.8, y=max_d*0.2, text="Efficient Zone", showarrow=False)
+                        fig_stag.add_annotation(x=max_d*0.2, y=max_d*0.8, text="Zombie Zone (Wasted Time)", showarrow=False)
+                        
+                        st.plotly_chart(fig_stag, use_container_width=True)
+                        st.caption("Trades significantly above the diagonal line achieved their bulk profit early but were held too long.")
+                    else:
+                        st.info("Not enough closed winning trades for Stagnation Analysis.")
 
     with an_rolls: 
         st.subheader(" Roll Campaign Analysis")
