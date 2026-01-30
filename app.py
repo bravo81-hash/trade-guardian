@@ -2271,14 +2271,18 @@ with tab_analytics:
             progress_text = "Reconstructing Lifecycle Curves..."
             my_bar = st.progress(0, text=progress_text)
             
-            for idx, row in subset_df.iterrows():
+            total_items = len(subset_df)
+            for i, (idx, row) in enumerate(subset_df.iterrows()):
                 curve_df = get_trade_lifecycle_data(row, snaps)
                 if not curve_df.empty:
                     curve_df['Strategy'] = row['Strategy']
                     curve_df['Trade Name'] = row['Name']
                     curve_df['Status'] = row['Status']
                     all_lifecycle_data.append(curve_df)
-                my_bar.progress((idx + 1) / len(subset_df), text=progress_text)
+                
+                # Safe progress calculation
+                prog_val = min((i + 1) / total_items, 1.0)
+                my_bar.progress(prog_val, text=progress_text)
             my_bar.empty()
             
             if all_lifecycle_data:
