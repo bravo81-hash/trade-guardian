@@ -33,10 +33,166 @@ except ImportError:
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
-# --- DEBUG BANNER ---
-st.info("🚀 RUNNING VERSION: v147.1 (Enhanced Visuals + Capital Efficiency Logic)")
+# --- UI OVERHAUL: CSS INJECTION ---
+def inject_custom_css():
+    st.markdown("""
+        <style>
+        /* IMPORT FONTS */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap');
 
-st.title("🛡️ Allantis Trade Guardian")
+        /* MAIN APP BACKGROUND */
+        .stApp {
+            background-color: #0f172a; /* Slate 900 */
+            color: #e2e8f0; /* Slate 200 */
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* SIDEBAR */
+        [data-testid="stSidebar"] {
+            background-color: #020617; /* Slate 950 */
+            border-right: 1px solid #1e293b;
+        }
+
+        /* HEADERS */
+        h1, h2, h3 {
+            color: #f1f5f9 !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.025em;
+        }
+
+        /* GRADIENT TEXT CLASS */
+        .gradient-text {
+            background: linear-gradient(to right, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+        }
+
+        /* METRIC CARDS */
+        div[data-testid="stMetric"] {
+            background-color: rgba(30, 41, 59, 0.4); /* Slate 800 with opacity */
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        div[data-testid="stMetric"]:hover {
+            transform: translateY(-2px);
+            border-color: rgba(56, 189, 248, 0.3);
+            box-shadow: 0 10px 30px -10px rgba(56, 189, 248, 0.1);
+        }
+        [data-testid="stMetricLabel"] {
+            color: #94a3b8 !important; /* Slate 400 */
+            font-size: 0.85rem !important;
+        }
+        [data-testid="stMetricValue"] {
+            color: #f8fafc !important; /* Slate 50 */
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* EXPANDERS (GLASSMORPHISM) */
+        div[data-testid="stExpander"] {
+            background-color: rgba(30, 41, 59, 0.3);
+            border: 1px solid rgba(56, 189, 248, 0.1);
+            border-radius: 12px;
+        }
+        
+        /* TABS */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 24px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            white-space: pre-wrap;
+            background-color: transparent;
+            border-radius: 4px;
+            color: #94a3b8;
+            font-weight: 600;
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            color: #38bdf8;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: transparent !important;
+            color: #38bdf8 !important;
+            border-bottom: 2px solid #38bdf8;
+        }
+
+        /* DATAFRAMES */
+        [data-testid="stDataFrame"] {
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+        }
+
+        /* BUTTONS */
+        .stButton button {
+            background-color: #38bdf8;
+            color: #0f172a;
+            font-weight: 600;
+            border-radius: 8px;
+            border: none;
+            transition: all 0.3s ease;
+        }
+        .stButton button:hover {
+            background-color: #0ea5e9;
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+        }
+        div[data-testid="stButton"] button[kind="secondary"] {
+            background-color: transparent;
+            border: 1px solid #475569;
+            color: #cbd5e1;
+        }
+
+        /* ALERTS */
+        div[data-baseweb="notification"] {
+            border-radius: 8px;
+        }
+        
+        </style>
+    """, unsafe_allow_html=True)
+
+inject_custom_css()
+
+# --- PLOTLY THEME CONFIG ---
+# Updates default plotly charts to match the UI theme
+def apply_chart_theme(fig):
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Inter, sans-serif", color="#94a3b8"),
+        title_font=dict(family="Inter, sans-serif", size=20, color="#f1f5f9"),
+        hoverlabel=dict(bgcolor="#1e293b", font_size=14, font_family="JetBrains Mono"),
+        colorway=['#38bdf8', '#34d399', '#818cf8', '#f472b6', '#fbbf24'], # Sky, Emerald, Indigo, Pink, Amber
+        xaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
+        yaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
+    )
+    return fig
+
+# --- DEBUG BANNER ---
+# Using custom HTML for a cleaner banner
+st.markdown("""
+    <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 8px 16px; margin-bottom: 20px; font-size: 0.8rem; color: #38bdf8; display: flex; align-items: center; gap: 10px;">
+        <i class="fas fa-rocket"></i> 
+        <span>RUNNING VERSION: v148.0 (UI Overhaul + Cloud Core)</span>
+    </div>
+""", unsafe_allow_html=True)
+
+# --- HERO HEADER (REPLACES st.title) ---
+st.markdown("""
+    <div style="margin-bottom: 40px;">
+        <div style="display: inline-block; padding: 4px 12px; background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); border-radius: 20px; color: #38bdf8; font-size: 0.75rem; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.05em;">
+            INSTITUTIONAL GRADE
+        </div>
+        <h1 style="font-size: 3.5rem; line-height: 1.1; margin-bottom: 10px;">
+            Allantis <span class="gradient-text">Trade Guardian</span>
+        </h1>
+        <p style="font-size: 1.2rem; color: #94a3b8; max-width: 600px;">
+            Cloud-enabled portfolio intelligence. Automated decision ladders, capital efficiency tracking, and predictive analytics.
+        </p>
+    </div>
+""", unsafe_allow_html=True)
+
 
 # --- DATABASE CONSTANTS ---
 DB_NAME = "trade_guardian_v4.db"
@@ -1292,6 +1448,7 @@ def rolling_correlation_matrix(snaps, window_days=30):
     corr_30 = last_30.corr()
     fig = px.imshow(corr_30, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
                     title="Strategy Correlation (Last 30 Days)", labels=dict(color="Correlation"))
+    fig = apply_chart_theme(fig) # UI OVERHAUL
     return fig
 
 def generate_adaptive_rulebook_text(history_df, strategies):
@@ -1797,6 +1954,7 @@ with tab_dash:
             avg_days_current = active_df['Days Held'].mean()
             fig_heat.add_vline(x=avg_days_current, line_dash="dash", opacity=0.5, annotation_text="Avg Age")
             fig_heat.add_hline(y=0, line_dash="dash", opacity=0.5)
+            fig_heat = apply_chart_theme(fig_heat) # UI OVERHAUL
             st.plotly_chart(fig_heat, use_container_width=True)
             st.caption("🎯 Top-Right = Winners aging well | 🚨 Bottom-Right = Losers rotting | 🌱 Left = New positions cooking")
 
@@ -2170,6 +2328,7 @@ with tab_analytics:
                 combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
                 fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group', title="Capital Efficiency Comparison (Annualized Return)", color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'}, text='Return %')
                 fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_compare = apply_chart_theme(fig_compare) # UI OVERHAUL
                 st.plotly_chart(fig_compare, use_container_width=True)
 
             st.subheader(" Profit Anatomy: Call vs Put Contribution")
@@ -2178,6 +2337,7 @@ with tab_analytics:
             fig_strat_ana.add_trace(go.Bar(y=strat_anatomy['Strategy'], x=strat_anatomy['Put P&L'], name='Avg Put Profit', orientation='h', marker_color='#EF553B'))
             fig_strat_ana.add_trace(go.Bar(y=strat_anatomy['Strategy'], x=strat_anatomy['Call P&L'], name='Avg Call Profit', orientation='h', marker_color='#00CC96'))
             fig_strat_ana.update_layout(barmode='relative', title="Average Profit Sources per Strategy (Stacked)", xaxis_title="Average P&L ($)")
+            fig_strat_ana = apply_chart_theme(fig_strat_ana) # UI OVERHAUL
             st.plotly_chart(fig_strat_ana, use_container_width=True)
 
             st.markdown("#####  Trade-by-Trade Attribution")
@@ -2189,6 +2349,7 @@ with tab_analytics:
                 fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Put P&L'], name='Put PnL', marker_color='#EF553B'))
                 fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Call P&L'], name='Call PnL', marker_color='#00CC96'))
                 fig_trade_ana.update_layout(barmode='relative', title=f"Profit Attribution: {sel_strat_ana}", xaxis_title="Trade", yaxis_title="PnL ($)", xaxis_tickangle=-45)
+                fig_trade_ana = apply_chart_theme(fig_trade_ana) # UI OVERHAUL
                 st.plotly_chart(fig_trade_ana, use_container_width=True)
 
     with an_trends:
@@ -2204,6 +2365,7 @@ with tab_analytics:
                     avg_win_debit['Type'] = 'Winning History'; avg_act_debit['Type'] = 'Active (Current)'
                     comp_df = pd.concat([avg_win_debit, avg_act_debit])
                     fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group', title="Entry Price per Lot Comparison", color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
+                    fig_price = apply_chart_theme(fig_price) # UI OVERHAUL
                     st.plotly_chart(fig_price, use_container_width=True)
         with col2:
             st.subheader(" Profit Drivers (Puts vs Calls)")
@@ -2212,12 +2374,14 @@ with tab_analytics:
                 if not expired.empty:
                     leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
                     fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], title="Profit Source Split", color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
+                    fig_legs = apply_chart_theme(fig_legs) # UI OVERHAUL
                     st.plotly_chart(fig_legs, use_container_width=True)
         st.divider()
         if not expired_df.empty:
             ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
             ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
             fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Realized Equity Curve", markers=True)
+            fig = apply_chart_theme(fig) # UI OVERHAUL
             st.plotly_chart(fig, use_container_width=True)
         st.divider()
         hm1, hm2, hm3 = st.tabs([" Seasonality", " Duration", " Entry Day"])
@@ -2228,15 +2392,18 @@ with tab_analytics:
                 hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True, color_continuous_scale="RdBu")
+                fig = apply_chart_theme(fig) # UI OVERHAUL
                 st.plotly_chart(fig, use_container_width=True)
             with hm2:
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", title="Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                fig2 = apply_chart_theme(fig2) # UI OVERHAUL
                 st.plotly_chart(fig2, use_container_width=True)
             with hm3:
                 if 'Entry Date' in exp_hm.columns:
                     exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
                     days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
                     fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg", title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                    fig3 = apply_chart_theme(fig3) # UI OVERHAUL
                     st.plotly_chart(fig3, use_container_width=True)
 
     with an_risk:
@@ -2263,6 +2430,7 @@ with tab_analytics:
                     with mae_c1:
                         fig_mae_scat = px.scatter(viz_mae, x='MAE', y='P&L', color='Strategy', symbol='Status' if "Include Active" in mae_view else None, hover_data=['Name', 'Days Held'], title="Drawdown (MAE) vs Final P&L")
                         fig_mae_scat.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.5); fig_mae_scat.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.5)
+                        fig_mae_scat = apply_chart_theme(fig_mae_scat) # UI OVERHAUL
                         st.plotly_chart(fig_mae_scat, use_container_width=True)
                     with mae_c2:
                         viz_mfe = viz_mae[viz_mae['MFE'] > 0]
@@ -2270,6 +2438,7 @@ with tab_analytics:
                         if not viz_mfe.empty:
                              max_val = max(viz_mfe['MFE'].max(), viz_mfe['P&L'].max())
                              fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
+                        fig_mfe = apply_chart_theme(fig_mfe) # UI OVERHAUL
                         st.plotly_chart(fig_mfe, use_container_width=True)
 
     with an_lifecycle:
@@ -2341,6 +2510,7 @@ with tab_analytics:
                         
                 fig_harvest.update_layout(xaxis_title="% of Trade Duration", yaxis_title="% of Total Profit", showlegend=True)
                 fig_harvest.add_shape(type="line", x0=0, y0=0, x1=100, y1=100, line=dict(color="white", dash="dot", width=1), opacity=0.5)
+                fig_harvest = apply_chart_theme(fig_harvest) # UI OVERHAUL
                 st.plotly_chart(fig_harvest, use_container_width=True)
                 
                 # --- VISUAL 2: PHASING HISTOGRAM ---
@@ -2374,6 +2544,7 @@ with tab_analytics:
                         title="Net Profit Generated by Phase ($)",
                         color_discrete_map={"1. Early (0-30%)": "#636EFA", "2. Mid (30-70%)": "#00CC96", "3. Late (70-100%)": "#EF553B"}
                     )
+                    fig_phase = apply_chart_theme(fig_phase) # UI OVERHAUL
                     st.plotly_chart(fig_phase, use_container_width=True)
                     
                 with c_p2:
@@ -2424,6 +2595,7 @@ with tab_analytics:
                         fig_stag.add_annotation(x=max_d*0.8, y=max_d*0.2, text="Efficient Zone", showarrow=False)
                         fig_stag.add_annotation(x=max_d*0.2, y=max_d*0.8, text="Zombie Zone (Wasted Time)", showarrow=False)
                         
+                        fig_stag = apply_chart_theme(fig_stag) # UI OVERHAUL
                         st.plotly_chart(fig_stag, use_container_width=True)
                         st.caption("Trades significantly above the diagonal line achieved their bulk profit early but were held too long.")
                     else:
@@ -2517,6 +2689,7 @@ with tab_ai:
                 with c_p1:
                     fig_pred = px.scatter(preds, x="Win Prob %", y="Expected PnL", color="Confidence", size="Rec. Size ($)", hover_data=["Trade Name", "Strategy", "Kelly Size %"], color_continuous_scale="RdYlGn", title="Risk/Reward Map (Size = Kelly Rec)")
                     fig_pred.add_vline(x=50, line_dash="dash", line_color="gray"); fig_pred.add_hline(y=0, line_dash="dash", line_color="gray")
+                    fig_pred = apply_chart_theme(fig_pred) # UI OVERHAUL
                     st.plotly_chart(fig_pred, use_container_width=True)
                 with c_p2:
                     st.dataframe(preds.style.format({'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%", 'Kelly Size %': "{:.1f}%", 'Rec. Size ($)': "${:,.0f}"}).map(lambda v: 'color: green; font-weight: bold' if v > prob_high else ('color: red; font-weight: bold' if v < prob_low else 'color: orange'), subset=['Win Prob %']), use_container_width=True)
@@ -2554,6 +2727,7 @@ with tab_ai:
                     fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Current'], name='Current Speed', marker_color='#EF553B'))
                     fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Baseline'], name='Baseline Speed', marker_color='gray'))
                     fig_rot.update_layout(title="Capital Velocity Lag ($/Day/1k)", barmode='group')
+                    fig_rot = apply_chart_theme(fig_rot) # UI OVERHAUL
                     st.plotly_chart(fig_rot, use_container_width=True)
                     st.dataframe(rot_df[['Trade', 'Strategy', 'Current Speed', 'Baseline Speed', 'Status']], use_container_width=True)
                 else: st.success(" Capital is moving efficiently. No rot detected.")
@@ -2586,6 +2760,7 @@ with tab_ai:
                             }
                         ))
                         fig_gauge.update_layout(height=200, margin=dict(l=20,r=20,t=30,b=20))
+                        fig_gauge = apply_chart_theme(fig_gauge) # UI OVERHAUL
                         st.plotly_chart(fig_gauge, use_container_width=True)
             # ---------------------------------------
             st.subheader(f" Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
@@ -2594,6 +2769,7 @@ with tab_ai:
                 winners = expired_df[expired_df['P&L'] > 0]
                 if not winners.empty:
                     fig_exit = px.box(winners, x="Strategy", y="P&L", points="all", title="Historical Win Distribution & Targets")
+                    fig_exit = apply_chart_theme(fig_exit) # UI OVERHAUL
                     st.plotly_chart(fig_exit, use_container_width=True)
                 target_data = []
                 for s, v in targets.items(): target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit': v['Optimal Exit']})
@@ -2621,6 +2797,7 @@ with tab_rules:
                         fig_mae = go.Figure()
                         fig_mae.add_trace(go.Bar(x=[safe_range], y=["Risk Room"], orientation='h', marker_color='lightgreen', name="Safe Zone"))
                         fig_mae.update_layout(xaxis_title="Max Drawdown ($)", xaxis=dict(range=[0, safe_range*1.2]), height=100, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
+                        fig_mae = apply_chart_theme(fig_mae) # UI OVERHAUL
                         st.plotly_chart(fig_mae, use_container_width=True)
                     else: st.write("No MAE data yet.")
                 
@@ -2631,4 +2808,4 @@ with tab_rules:
                     else: st.write("No Velocity data yet.")
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v147.0 (Cloud Edition)")
+    st.caption("Allantis Trade Guardian v148.0 (UI Overhaul + Cloud Edition)")
