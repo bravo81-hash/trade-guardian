@@ -68,14 +68,15 @@ def inject_custom_css():
             font-weight: 800;
         }
 
-        /* METRIC CARDS */
+        /* METRIC CARDS - COMPACT VERSION */
         div[data-testid="stMetric"] {
             background-color: rgba(30, 41, 59, 0.4); /* Slate 800 with opacity */
-            padding: 20px;
-            border-radius: 12px;
+            padding: 10px 15px !important; /* REDUCED PADDING */
+            border-radius: 8px;
             border: 1px solid rgba(148, 163, 184, 0.1);
             backdrop-filter: blur(10px);
             transition: transform 0.2s ease, border-color 0.2s ease;
+            min-height: 80px; /* Force smaller height */
         }
         div[data-testid="stMetric"]:hover {
             transform: translateY(-2px);
@@ -84,11 +85,17 @@ def inject_custom_css():
         }
         [data-testid="stMetricLabel"] {
             color: #94a3b8 !important; /* Slate 400 */
-            font-size: 0.85rem !important;
+            font-size: 0.75rem !important; /* Smaller Label */
+            margin-bottom: 0px !important;
         }
         [data-testid="stMetricValue"] {
             color: #f8fafc !important; /* Slate 50 */
             font-family: 'JetBrains Mono', monospace;
+            font-size: 1.5rem !important; /* Compact Value */
+            padding-bottom: 0px !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-size: 0.75rem !important;
         }
 
         /* EXPANDERS (GLASSMORPHISM) */
@@ -98,7 +105,7 @@ def inject_custom_css():
             border-radius: 12px;
         }
         
-        /* TABS */
+        /* TABS - BOLD HEADERS */
         .stTabs [data-baseweb="tab-list"] {
             gap: 24px;
         }
@@ -108,7 +115,10 @@ def inject_custom_css():
             background-color: transparent;
             border-radius: 4px;
             color: #94a3b8;
-            font-weight: 600;
+            font-weight: 800 !important; /* BOLD LETTERS */
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
         .stTabs [data-baseweb="tab"]:hover {
             color: #38bdf8;
@@ -174,22 +184,19 @@ def apply_chart_theme(fig):
 st.markdown("""
     <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 8px 16px; margin-bottom: 20px; font-size: 0.8rem; color: #38bdf8; display: flex; align-items: center; gap: 10px;">
         <i class="fas fa-rocket"></i> 
-        <span>RUNNING VERSION: v148.0 (UI Overhaul + Cloud Core)</span>
+        <span>RUNNING VERSION: v148.1 (Compact UI + Radar Chart)</span>
     </div>
 """, unsafe_allow_html=True)
 
 # --- HERO HEADER (REPLACES st.title) ---
 st.markdown("""
-    <div style="margin-bottom: 40px;">
+    <div style="margin-bottom: 30px;">
         <div style="display: inline-block; padding: 4px 12px; background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); border-radius: 20px; color: #38bdf8; font-size: 0.75rem; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.05em;">
             INSTITUTIONAL GRADE
         </div>
         <h1 style="font-size: 3.5rem; line-height: 1.1; margin-bottom: 10px;">
             Allantis <span class="gradient-text">Trade Guardian</span>
         </h1>
-        <p style="font-size: 1.2rem; color: #94a3b8; max-width: 600px;">
-            Cloud-enabled portfolio intelligence. Automated decision ladders, capital efficiency tracking, and predictive analytics.
-        </p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -1904,6 +1911,8 @@ with tab_dash:
             allocation_score = 100 - sum(abs(actual_alloc.get(s, 0) - target_allocation.get(s, 0)) * 100 for s in target_allocation)
             total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
             avg_age = active_df['Days Held'].mean()
+            tot_theta = active_df['Theta'].sum()
+            curr_pnl = active_df['P&L'].sum()
             
             if total_delta_pct > 6 or avg_age > 45:
                 health_status = " CRITICAL" 
@@ -1914,14 +1923,31 @@ with tab_dash:
             else:
                 health_status = " HEALTHY"   
             
-            with st.container():
-                tot_theta = active_df['Theta'].sum()
-                c1, c2, c3, c4 = st.columns(4)
+            # --- NEW LAYOUT: Metrics + Radar Chart ---
+            
+            # 1. Calculate Radar Metrics
+            # Normalize to 0-100 scale for chart
+            score_stability = min(100, (active_df['Stability'].mean() / 1.5) * 100) 
+            score_yield = min(100, (tot_theta / tot_debit * 100) * 500) # Approx 0.2%/day = 100 score
+            score_hedge = min(100, abs(active_df['Vega'].sum() / (tot_theta if tot_theta !=0 else 1)) * 20) 
+            score_freshness = max(0, 100 - (avg_age / 45 * 100))
+            score_neutral = max(0, 100 - (total_delta_pct * 20))
+            score_div = allocation_score
+
+            dash_c1, dash_c2 = st.columns([1.8, 1.2]) # Metrics take slightly more space
+            
+            with dash_c1:
+                st.subheader("Command Center")
+                # Top Row Metrics
+                m1, m2 = st.columns(2)
                 h_icon = "🟢" if "HEALTHY" in health_status else ("🔴" if "CRITICAL" in health_status else "🟡")
-                c1.metric("Portfolio Health", f"{h_icon} {health_status}")
-                c2.metric("Daily Income", f"${tot_theta:,.0f}")
-                curr_pnl = active_df['P&L'].sum()
-                c3.metric("Floating P&L", f"${curr_pnl:,.0f}", delta_color="normal" if curr_pnl > 0 else "inverse")
+                m1.metric("Health", f"{h_icon} {health_status}")
+                m2.metric("Floating P&L", f"${curr_pnl:,.0f}", delta_color="normal" if curr_pnl > 0 else "inverse")
+                
+                # Bottom Row Metrics
+                m3, m4 = st.columns(2)
+                m3.metric("Daily Income", f"${tot_theta:,.0f}")
+                
                 ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
                 active_df['Action'] = [x[0] for x in ladder_results]
                 active_df['Urgency Score'] = [x[1] for x in ladder_results]
@@ -1930,7 +1956,43 @@ with tab_dash:
                 active_df['Juice Type'] = [x[4] for x in ladder_results]
                 active_df = active_df.sort_values('Urgency Score', ascending=False)
                 todo_df = active_df[active_df['Urgency Score'] >= 70]
-                c4.metric("Action Items", len(todo_df), delta="Urgent" if len(todo_df) > 0 else None)
+                m4.metric("Action Items", len(todo_df), delta="Urgent" if len(todo_df) > 0 else None)
+
+            with dash_c2:
+                # Radar Chart
+                categories = ['Stability', 'Yield', 'Hedge', 'Freshness', 'Neutrality', 'Diversification']
+                r_values = [score_stability, score_yield, score_hedge, score_freshness, score_neutral, score_div]
+                
+                fig_radar = go.Figure(data=go.Scatterpolar(
+                    r=r_values,
+                    theta=categories,
+                    fill='toself',
+                    name='Current Portfolio',
+                    line_color='#38bdf8',
+                    fillcolor='rgba(56, 189, 248, 0.2)'
+                ))
+
+                fig_radar.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, 100],
+                            showticklabels=False,
+                            gridcolor='rgba(148, 163, 184, 0.2)'
+                        ),
+                        angularaxis=dict(
+                            gridcolor='rgba(148, 163, 184, 0.2)',
+                            linecolor='rgba(148, 163, 184, 0.2)'
+                        ),
+                        bgcolor='rgba(0,0,0,0)'
+                    ),
+                    margin=dict(l=40, r=40, t=30, b=30),
+                    height=250, # Compact height
+                    title=dict(text="Portfolio Composition", x=0.5, font=dict(size=14, color="#94a3b8")),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#94a3b8", family="Inter")
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
             
             with st.expander("📊 Detailed Metrics (Allocation, Greeks, Age)", expanded=False):
                 d1, d2, d3, d4 = st.columns(4)
@@ -2808,4 +2870,4 @@ with tab_rules:
                     else: st.write("No Velocity data yet.")
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v148.0 (UI Overhaul + Cloud Edition)")
+    st.caption("Allantis Trade Guardian v148.1 (UI Overhaul + Compact Tiles)")
