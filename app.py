@@ -1768,9 +1768,17 @@ def main():
                 if selected_status != 'All':
                     filtered_df = filtered_df[filtered_df['status'] == selected_status]
                 
-                # Sort
+                # Sort - map display names to actual column names
+                sort_column_map = {
+                    'P&L': 'pnl',
+                    'Days Held': 'days_held',
+                    'Debit': 'debit',
+                    'ROI': 'roi',
+                    'Stability': 'stability'
+                }
+                
                 filtered_df = filtered_df.sort_values(
-                    sort_by.lower().replace(' ', '_'),
+                    sort_column_map[sort_by],
                     ascending=False
                 )
                 
@@ -1792,7 +1800,7 @@ def main():
                         'theta': '{:.2f}',
                         'stability': '{:.2f}',
                         'daily_yield': '{:.3f}%'
-                    }).applymap(
+                    }).map(
                         lambda x: 'color: #10b981' if isinstance(x, (int, float)) and x > 0 else 'color: #ef4444' if isinstance(x, (int, float)) and x < 0 else '',
                         subset=['pnl', 'roi']
                     ),
