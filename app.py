@@ -2603,8 +2603,9 @@ with tab_analytics:
                         # The "Sweet Spot" Bar (25th to 75th percentile)
                         fig_harvest_range.add_trace(go.Bar(
                             y=[s], x=[p75 - p25], base=[p25], orientation='h',
-                            name=f"{s} Sweet Spot", marker_color='rgba(56, 189, 248, 0.6)',
-                            text=f"Optimal: {p25:.0f} - {p75:.0f}d", textposition='inside',
+                            name=f"{s} Sweet Spot", marker_color='rgba(56, 189, 248, 0.85)',
+                            text=f"<b>Optimal: {p25:.0f} - {p75:.0f}d</b>", textposition='inside',
+                            textfont=dict(color='#020617', size=13),
                             hoverinfo='text', hovertext=f"{s}: Middle 50% of winners close between Day {p25:.0f} and {p75:.0f}"
                         ))
                         # Median Exit Dot
