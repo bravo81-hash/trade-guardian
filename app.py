@@ -1,11 +1,4 @@
 import streamlit as st
-
-# --- GLOBAL STATE INIT (Critical Fix) ---
-# Initializes variables globally to prevent NameError in Tabs
-if 'velocity_stats' not in globals(): velocity_stats = {}
-if 'mae_stats' not in globals(): mae_stats = {}
-# ----------------------------------------
-
 import pandas as pd
 import numpy as np
 import io
@@ -20,6 +13,23 @@ from datetime import datetime, timezone, timedelta
 from openpyxl import load_workbook
 from scipy import stats 
 from scipy.spatial.distance import cdist 
+
+# --- V150: ROBUST STATE INITIALIZATION ---
+def initialize_session_state():
+    """Improved State Management replacing globals()"""
+    keys = {
+        'velocity_stats': {},
+        'mae_stats': {},
+        'last_cloud_sync': None,
+        'show_conflict': False,
+        'show_pull_conflict': False
+    }
+    for key, default in keys.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+initialize_session_state()
+# -----------------------------------------
 
 # --- GOOGLE DRIVE IMPORTS ---
 try:
@@ -165,7 +175,6 @@ def inject_custom_css():
 inject_custom_css()
 
 # --- PLOTLY THEME CONFIG ---
-# Updates default plotly charts to match the UI theme
 def apply_chart_theme(fig):
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
@@ -173,22 +182,21 @@ def apply_chart_theme(fig):
         font=dict(family="Inter, sans-serif", color="#94a3b8"),
         title_font=dict(family="Inter, sans-serif", size=20, color="#f1f5f9"),
         hoverlabel=dict(bgcolor="#1e293b", font_size=14, font_family="JetBrains Mono"),
-        colorway=['#38bdf8', '#34d399', '#818cf8', '#f472b6', '#fbbf24'], # Sky, Emerald, Indigo, Pink, Amber
+        colorway=['#38bdf8', '#34d399', '#818cf8', '#f472b6', '#fbbf24'],
         xaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
         yaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
     )
     return fig
 
 # --- DEBUG BANNER ---
-# Using custom HTML for a cleaner banner
 st.markdown("""
     <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 8px 16px; margin-bottom: 20px; font-size: 0.8rem; color: #38bdf8; display: flex; align-items: center; gap: 10px;">
         <i class="fas fa-rocket"></i> 
-        <span>RUNNING VERSION: v148.1 (Compact UI + Radar Chart)</span>
+        <span>RUNNING VERSION: v150.0 (Quant Logic + State Management Overhaul)</span>
     </div>
 """, unsafe_allow_html=True)
 
-# --- HERO HEADER (REPLACES st.title) ---
+# --- HERO HEADER ---
 st.markdown("""
     <div style="margin-bottom: 30px;">
         <div style="display: inline-block; padding: 4px 12px; background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); border-radius: 20px; color: #38bdf8; font-size: 0.75rem; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.05em;">
@@ -200,23 +208,20 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-
 # --- DATABASE CONSTANTS ---
 DB_NAME = "trade_guardian_v4.db"
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-# --- CLOUD SYNC ENGINE ---
+# --- V150: CLOUD SYNC ENGINE w/ EXPONENTIAL BACKOFF ---
 class DriveManager:
     def __init__(self):
         self.creds = None
         self.service = None
         self.is_connected = False
-        self.cached_file_id = None # Cache to reduce API calls
+        self.cached_file_id = None
         
-        # Check for secrets in Streamlit Cloud
         if 'gcp_service_account' in st.secrets:
             try:
-                # Load credentials from Streamlit secrets
                 service_account_info = st.secrets["gcp_service_account"]
                 self.creds = service_account.Credentials.from_service_account_info(
                     service_account_info, scopes=SCOPES)
@@ -226,47 +231,35 @@ class DriveManager:
                 st.error(f"Cloud Config Error: {e}")
 
     def list_files_debug(self):
-        """Helper to show user what files the bot sees"""
         if not self.is_connected: return []
         try:
-            results = self.service.files().list(
-                pageSize=10, fields="files(id, name, modifiedTime)").execute()
+            results = self.service.files().list(pageSize=10, fields="files(id, name, modifiedTime)").execute()
             return results.get('files', [])
         except Exception as e:
             return []
 
     def find_db_file(self):
         if not self.is_connected: return None, None
-        
-        # Try cache first
         if self.cached_file_id:
             try:
-                file = self.service.files().get(
-                    fileId=self.cached_file_id, 
-                    fields='id,name'
-                ).execute()
+                file = self.service.files().get(fileId=self.cached_file_id, fields='id,name').execute()
                 return file['id'], file['name']
             except:
-                self.cached_file_id = None  # Invalidate cache if stale
+                self.cached_file_id = None
 
         try:
-            # 1. Try Exact Match First
             query_exact = f"name='{DB_NAME}' and trashed=false"
-            results = self.service.files().list(
-                q=query_exact, pageSize=1, fields="files(id, name)").execute()
+            results = self.service.files().list(q=query_exact, pageSize=1, fields="files(id, name)").execute()
             items = results.get('files', [])
             if items: 
                 self.cached_file_id = items[0]['id']
                 return items[0]['id'], items[0]['name']
 
-            # 2. Try Fuzzy Match (e.g. "trade_guardian_v4 (9).db")
             query_fuzzy = "name contains 'trade_guardian' and name contains '.db' and trashed=false"
-            results = self.service.files().list(
-                q=query_fuzzy, pageSize=5, fields="files(id, name)").execute()
+            results = self.service.files().list(q=query_fuzzy, pageSize=5, fields="files(id, name)").execute()
             items = results.get('files', [])
             
             if items:
-                # Prefer one starting with correct prefix
                 selected = items[0]
                 for item in items:
                     if item['name'].startswith("trade_guardian_v4"):
@@ -274,7 +267,6 @@ class DriveManager:
                         break
                 self.cached_file_id = selected['id']
                 return selected['id'], selected['name']
-            
             return None, None
         except Exception as e:
             st.error(f"Drive Search Error: {e}")
@@ -283,28 +275,20 @@ class DriveManager:
     def get_cloud_modified_time(self, file_id):
         try:
             file = self.service.files().get(fileId=file_id, fields='modifiedTime').execute()
-            # Parse RFC 3339 timestamp (e.g., 2023-10-25T14:00:00.000Z)
             dt = datetime.strptime(file['modifiedTime'].replace('Z', '+0000'), '%Y-%m-%dT%H:%M:%S.%f%z')
             return dt
         except:
             return None
 
     def create_backup(self, file_id, file_name):
-        """Creates a timestamped copy in the cloud before overwriting"""
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_name = f"BACKUP_{timestamp}_{file_name}"
-            
-            # Get parent folder of original file to put backup in same place
             orig_file = self.service.files().get(fileId=file_id, fields='parents').execute()
             parents = orig_file.get('parents', [])
-            
             metadata = {'name': backup_name}
             if parents: metadata['parents'] = parents
-            
             self.service.files().copy(fileId=file_id, body=metadata).execute()
-            
-            # Cleanup old backups (Keep last 5)
             self.cleanup_backups(file_name)
             return True
         except Exception as e:
@@ -313,13 +297,9 @@ class DriveManager:
 
     def cleanup_backups(self, original_name):
         try:
-            # Find files starting with BACKUP_ and ending with original name
             query = f"name contains 'BACKUP_' and name contains '{original_name}' and trashed=false"
-            results = self.service.files().list(
-                q=query, pageSize=20, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
+            results = self.service.files().list(q=query, pageSize=20, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
             items = results.get('files', [])
-            
-            # Keep top 5, delete rest
             if len(items) > 5:
                 for item in items[5:]:
                     try:
@@ -332,23 +312,18 @@ class DriveManager:
         if not file_id:
             return False, "Database not found in Cloud."
         
-        # --- PULL SAFETY CHECK ---
         if os.path.exists(DB_NAME) and not force:
             try:
                 local_ts = os.path.getmtime(DB_NAME)
                 local_mod = datetime.fromtimestamp(local_ts, tz=timezone.utc)
                 cloud_time = self.get_cloud_modified_time(file_id)
-                
-                # If local is significantly newer (> 2 mins) than cloud
                 if cloud_time and (local_mod > cloud_time + timedelta(minutes=2)):
                     return False, f"CONFLICT: Your local database is NEWER ({local_mod.strftime('%H:%M')}) than the cloud file ({cloud_time.strftime('%H:%M')}).\n\nIf you pull now, you will lose your recent local changes."
             except Exception as e:
                 print(f"Pull check warning: {e}")
 
         try:
-            # Close any local connections first
-            try:
-                sqlite3.connect(DB_NAME).close()
+            try: sqlite3.connect(DB_NAME).close()
             except: pass
 
             request = self.service.files().get_media(fileId=file_id)
@@ -361,32 +336,24 @@ class DriveManager:
             with open(DB_NAME, "wb") as f:
                 f.write(fh.getbuffer())
             
-            # Update session state timestamp
             st.session_state['last_cloud_sync'] = datetime.now()
             return True, f"Downloaded '{file_name}' successfully."
         except Exception as e:
             return False, str(e)
 
-    def upload_db(self, force=False, retries=2):
+    def upload_db(self, force=False, retries=3):
         if not os.path.exists(DB_NAME):
             return False, "No local database found to upload."
             
         file_id, file_name = self.find_db_file()
         
-        # --- ROBUST CONFLICT RESOLUTION ---
         if file_id and not force:
             cloud_time = self.get_cloud_modified_time(file_id)
-            
-            # Get local time in UTC for fair comparison
             local_ts = os.path.getmtime(DB_NAME)
             local_time = datetime.fromtimestamp(local_ts, tz=timezone.utc) 
-            
-            # If cloud is newer (allowing for slight clock skew of 2 seconds)
             if cloud_time and (cloud_time > local_time + timedelta(seconds=2)):
                  return False, f"CONFLICT: Cloud file is newer ({cloud_time.strftime('%H:%M')}) than local ({local_time.strftime('%H:%M')}). Please Pull first."
 
-        # --- SAFETY LOCK ---
-        # Verify integrity and ensure closed
         try:
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
@@ -400,40 +367,32 @@ class DriveManager:
 
         media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
         
-        # --- RETRY LOGIC ---
+        # --- V150: EXPONENTIAL BACKOFF LOGIC ---
+        delay = 1
         for attempt in range(retries + 1):
             try:
                 if file_id:
-                    # 1. Create Backup first (only on first attempt)
                     if attempt == 0: 
                         self.create_backup(file_id, file_name)
-                    
-                    # 2. Update existing file
-                    self.service.files().update(
-                        fileId=file_id,
-                        media_body=media).execute()
+                    self.service.files().update(fileId=file_id, media_body=media).execute()
                     action = f"Updated '{file_name}' (Backup created)"
                 else:
-                    # Create new file
                     file_metadata = {'name': DB_NAME}
-                    self.service.files().create(
-                        body=file_metadata,
-                        media_body=media,
-                        fields='id').execute()
+                    self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
                     action = "Created New File"
                 
                 st.session_state['last_cloud_sync'] = datetime.now()
                 return True, f"Sync Successful: {action}"
             except Exception as e:
                 if attempt < retries:
-                    time.sleep(1) # Wait 1 sec before retry
+                    time.sleep(delay)
+                    delay *= 2  # Double the delay each time
                     continue
                 return False, f"Upload failed after {retries} retries: {str(e)}"
 
 # Initialize Drive Manager
 drive_mgr = DriveManager()
 
-# --- HELPER: AUTO-SYNC WRAPPER ---
 def auto_sync_if_connected():
     if not drive_mgr.is_connected: return
     with st.spinner("☁️ Auto-syncing to cloud..."):
@@ -552,7 +511,6 @@ def seed_default_strategies(force_reset=False):
     finally:
         conn.close()
 
-# --- LOAD STRATEGY CONFIG ---
 @st.cache_data(ttl=60)
 def load_strategy_config():
     if not os.path.exists(DB_NAME): return {}
@@ -578,20 +536,149 @@ def load_strategy_config():
     except: return {}
     finally: conn.close()
 
+# --- V150 QUANT LOGIC & INTELLIGENCE FUNCTIONS ---
+
+def calculate_kelly_fraction(win_rate, avg_win, avg_loss, correlation_penalty=0.5):
+    """
+    V150: Modified Kelly Criterion for Options Portfolios.
+    Applies a correlation penalty (Half-Kelly equivalent) to prevent massive over-leveraging.
+    """
+    if avg_loss == 0 or avg_win <= 0:
+        return 0.0
+    b = abs(avg_win / avg_loss)
+    kelly = (win_rate * b - (1 - win_rate)) / b
+    # Cap at 25% generally, scale by correlation_penalty to reflect options dependence
+    return max(0, min(kelly * correlation_penalty, 0.25))
+
+def vectorized_theta_efficiency(df):
+    """
+    V150: Vectorized efficiency logic, safely avoiding division by zero.
+    """
+    if df.empty: return df
+    theta_safe = np.where(df['Theta'] == 0, 1, df['Theta'])
+    days_safe = np.where(df['Days Held'] == 0, 1, df['Days Held'])
+    df['Theta_Efficiency_Score'] = df['P&L'] / (theta_safe * days_safe)
+    return df
+
+def calculate_portfolio_var(df, confidence=0.95):
+    """
+    V150: Value at Risk (VaR) Calculation.
+    Estimates the potential loss in the portfolio over a 1-day period based on history.
+    """
+    if df.empty or len(df) < 5: return 0.0
+    daily_returns = df['P&L'].dropna()
+    if len(daily_returns) < 2: return 0.0
+    mu = np.mean(daily_returns)
+    sigma = np.std(daily_returns)
+    var = stats.norm.ppf(1 - confidence, mu, sigma)
+    return min(0, var) # VaR is represented as a negative number
+
+def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total_capital=100000):
+    if active_df.empty or history_df.empty: return pd.DataFrame()
+    features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
+    train_df = history_df.dropna(subset=features).copy()
+    if len(train_df) < 5: return pd.DataFrame()
+    predictions = []
+    for _, row in active_df.iterrows():
+        curr_vec = np.nan_to_num(row[features].values.astype(float)).reshape(1, -1)
+        hist_vecs = np.nan_to_num(train_df[features].values.astype(float))
+        distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
+        top_k_idx = np.argsort(distances)[:7]
+        nearest_neighbors = train_df.iloc[top_k_idx]
+        win_prob = (nearest_neighbors['P&L'] > 0).mean()
+        avg_pnl = nearest_neighbors['P&L'].mean()
+        avg_win = nearest_neighbors[nearest_neighbors['P&L'] > 0]['P&L'].mean()
+        avg_loss = nearest_neighbors[nearest_neighbors['P&L'] < 0]['P&L'].mean()
+        if pd.isna(avg_win): avg_win = 0
+        if pd.isna(avg_loss): avg_loss = -avg_pnl * 0.5
+        
+        kelly_size = calculate_kelly_fraction(win_prob, avg_win, avg_loss)
+        rec_dollars = kelly_size * total_capital
+        avg_dist = distances[top_k_idx].mean()
+        confidence = max(0, 100 - (avg_dist * 10)) 
+        rec = "HOLD"
+        if win_prob * 100 < prob_low: rec = "REDUCE/CLOSE"
+        elif win_prob * 100 > prob_high: rec = "PRESS WINNER"
+        predictions.append({
+            'Trade Name': row['Name'], 'Strategy': row['Strategy'], 'Win Prob %': win_prob * 100,
+            'Expected PnL': avg_pnl, 'Kelly Size %': kelly_size * 100, 'Rec. Size ($)': rec_dollars,
+            'AI Rec': rec, 'Confidence': confidence
+        })
+    return pd.DataFrame(predictions)
+
+def get_mae_stats(conn):
+    query = """
+    SELECT t.strategy, MIN(s.pnl) as worst_drawdown
+    FROM snapshots s
+    JOIN trades t ON s.trade_id = t.id
+    WHERE t.status = 'Expired' AND t.pnl > 0
+    GROUP BY t.id, t.strategy
+    """
+    try:
+        df = pd.read_sql(query, conn)
+        mae_stats = {}
+        if not df.empty:
+            for strategy in df['strategy'].unique():
+                strat_df = df[df['strategy'] == strategy]
+                if not strat_df.empty:
+                    limit = strat_df['worst_drawdown'].quantile(0.05) 
+                    mae_stats[strategy] = limit
+        return mae_stats
+    except Exception as e:
+        return {}
+
+def get_velocity_stats(expired_df):
+    velocity_stats = {}
+    if expired_df.empty: return velocity_stats
+    winners = expired_df[expired_df['P&L'] > 0].copy()
+    if winners.empty: return velocity_stats
+    winners['days_held'] = winners['days_held'].replace(0, 1)
+    winners['velocity'] = winners['P&L'] / winners['days_held']
+    for strategy in winners['Strategy'].unique():
+        s_df = winners[winners['Strategy'] == strategy]
+        if len(s_df) > 2:
+            mean_v = s_df['velocity'].mean()
+            std_v = s_df['velocity'].std()
+            velocity_stats[strategy] = {
+                'threshold': mean_v + (2 * std_v),
+                'mean': mean_v
+            }
+    return velocity_stats
+
+def check_rot_and_efficiency(row, hist_avg_days):
+    try:
+        current_pnl = row['P&L']
+        days = row.get('Days', 1)
+        if days == 0: days = 1
+        theta = row.get('Net Theta', 0)
+        current_speed = current_pnl / days
+        
+        if theta != 0: theta_efficiency = (current_speed / theta) 
+        else: theta_efficiency = 0
+            
+        status = "Healthy"
+        if days > hist_avg_days * 1.2 and current_pnl < 0:
+            status = "Rotting (Time > Avg & Red)"
+        elif theta_efficiency < 0.2 and days > 10 and current_pnl > 0:
+             status = "Inefficient (Theta Stuck)"
+        elif theta_efficiency < 0 and days > 5:
+             status = "Bleeding (Negative Efficiency)"
+             
+        return current_speed, theta_efficiency, status
+    except:
+        return 0, 0, "Error"
+
 # --- HELPER FUNCTIONS ---
 def get_strategy_dynamic(trade_name, group_name, config_dict):
     t_name = str(trade_name).upper().strip()
     g_name = str(group_name).upper().strip()
     sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
-    
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in t_name: return strat_name
-            
     for strat_name, details in sorted_strats:
         key = str(details['id']).upper()
         if key in g_name: return strat_name
-            
     return "Other"
 
 def clean_num(x):
@@ -628,63 +715,42 @@ def extract_ticker(name):
 def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
     t_frac = min(1.0, days_held / dte_at_entry) if dte_at_entry > 0 else 1.0
     if strategy in ['M200', '130/160', '160/190', 'SMSF']:
-        if t_frac < 0.5:
-            decay_factor = 1 - (2 * t_frac) ** 2
-        else:
-            decay_factor = 2 * (1 - t_frac)
+        if t_frac < 0.5: decay_factor = 1 - (2 * t_frac) ** 2
+        else: decay_factor = 2 * (1 - t_frac)
         return initial_theta * max(0, decay_factor)
     elif 'VERTICAL' in str(strategy).upper() or 'DIRECTIONAL' in str(strategy).upper():
-        if t_frac < 0.7:
-            decay_factor = 1 - t_frac
-        else:
-            decay_factor = 0.3 * np.exp(-5 * (t_frac - 0.7))
+        if t_frac < 0.7: decay_factor = 1 - t_frac
+        else: decay_factor = 0.3 * np.exp(-5 * (t_frac - 0.7))
         return initial_theta * decay_factor
     else:
         decay_factor = np.exp(-2 * t_frac)
         return initial_theta * (1 - decay_factor)
 
 def get_trade_lifecycle_data(row, snapshots_df):
-    """
-    Generates a daily PnL curve for a trade.
-    Prioritizes real snapshots. Falls back to reconstruction if snaps missing.
-    Returns DataFrame: [Day, Cumulative_PnL, Pct_Duration, Pct_PnL]
-    """
     days = int(row['Days Held'])
     if days < 1: days = 1
     total_pnl = row['P&L']
     
-    # 1. Try Real Snapshots
     if snapshots_df is not None and not snapshots_df.empty:
         trade_snaps = snapshots_df[snapshots_df['trade_id'] == row['id']].sort_values('days_held').copy()
         if len(trade_snaps) >= 2:
-            # Clean data
             trade_snaps['Cumulative_PnL'] = trade_snaps['pnl']
             trade_snaps['Day'] = trade_snaps['days_held']
-            
-            # Ensure start at 0
             if trade_snaps['Day'].min() > 0:
                 start_row = pd.DataFrame({'Day': [0], 'Cumulative_PnL': [0]})
                 trade_snaps = pd.concat([start_row, trade_snaps], ignore_index=True)
-            
-            # Ensure end matches final result if closed
             if row['Status'] == 'Expired':
                 last_snap_day = trade_snaps['Day'].max()
                 if last_snap_day < days:
                     end_row = pd.DataFrame({'Day': [days], 'Cumulative_PnL': [total_pnl]})
                     trade_snaps = pd.concat([trade_snaps, end_row], ignore_index=True)
-            
             trade_snaps['Pct_Duration'] = (trade_snaps['Day'] / days) * 100
-            # Avoid div by zero for PnL
             denom = abs(total_pnl) if abs(total_pnl) > 0 else 1
             trade_snaps['Pct_PnL'] = (trade_snaps['Cumulative_PnL'] / denom) * 100
             return trade_snaps[['Day', 'Cumulative_PnL', 'Pct_Duration', 'Pct_PnL']]
 
-    # 2. Reconstruction (Theoretical Model)
-    # Generate daily points
     daily_data = []
     initial_theta = row['Theta'] if row['Theta'] != 0 else 1.0
-    
-    # Calculate weights for distribution
     weights = []
     for d in range(1, days + 1):
         w = theta_decay_model(initial_theta, d, row['Strategy'], max(45, days))
@@ -696,58 +762,41 @@ def get_trade_lifecycle_data(row, snapshots_df):
     
     cum_pnl = 0
     daily_data.append({'Day': 0, 'Cumulative_PnL': 0, 'Pct_Duration': 0, 'Pct_PnL': 0})
-    
     for i, w in enumerate(weights):
         day_num = i + 1
         day_gain = total_pnl * w
         cum_pnl += day_gain
-        
         pct_dur = (day_num / days) * 100
         denom = abs(total_pnl) if abs(total_pnl) > 0 else 1
         pct_pnl = (cum_pnl / denom) * 100
-        
-        daily_data.append({
-            'Day': day_num,
-            'Cumulative_PnL': cum_pnl,
-            'Pct_Duration': pct_dur,
-            'Pct_PnL': pct_pnl
-        })
-        
+        daily_data.append({'Day': day_num, 'Cumulative_PnL': cum_pnl, 'Pct_Duration': pct_dur, 'Pct_PnL': pct_pnl})
     return pd.DataFrame(daily_data)
 
 def reconstruct_daily_pnl(trades_df):
     trades = trades_df.copy()
     trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
     trades['Exit Date'] = pd.to_datetime(trades['Exit Date'])
-    
     start_date = trades['Entry Date'].min()
     end_date = max(trades['Exit Date'].max(), pd.Timestamp.now())
     date_range = pd.date_range(start=start_date, end=end_date)
-    
     daily_pnl_dict = {d.date(): 0.0 for d in date_range}
 
     for _, trade in trades.iterrows():
         if pd.isnull(trade['Exit Date']): continue
-        
         days = trade['Days Held']
         if days <= 0: days = 1
-        
         total_pnl = trade['P&L']
         strategy = trade['Strategy']
         initial_theta = trade['Theta'] if trade['Theta'] != 0 else 1.0
         
         daily_theta_weights = []
         for day in range(days):
-            expected_theta = theta_decay_model(
-                initial_theta, day, strategy, max(45, days)
-            )
+            expected_theta = theta_decay_model(initial_theta, day, strategy, max(45, days))
             daily_theta_weights.append(abs(expected_theta))
 
         total_theta_sum = sum(daily_theta_weights)
-        if total_theta_sum == 0:
-            daily_theta_weights = [1/days] * days
-        else:
-            daily_theta_weights = [w/total_theta_sum for w in daily_theta_weights]
+        if total_theta_sum == 0: daily_theta_weights = [1/days] * days
+        else: daily_theta_weights = [w/total_theta_sum for w in daily_theta_weights]
             
         curr = trade['Entry Date']
         for day_weight in daily_theta_weights:
@@ -756,7 +805,6 @@ def reconstruct_daily_pnl(trades_df):
             else:
                 daily_pnl_dict[curr.date()] = total_pnl * day_weight
             curr += pd.Timedelta(days=1)
-            
     return daily_pnl_dict
 
 # --- SMART FILE PARSER ---
@@ -829,7 +877,6 @@ def parse_optionstrat_file(file, file_type, config_dict):
             except: return None 
 
             strat = get_strategy_dynamic(name, group, config_dict)
-            
             link = str(trade_data.get('Link', ''))
             if link == 'nan' or link == 'Open': link = "" 
             
@@ -849,21 +896,16 @@ def parse_optionstrat_file(file, file_type, config_dict):
             except: pass
 
             days_held = 1
-            if exit_dt and f_type == "History":
-                 days_held = (exit_dt - start_dt).days
-            else:
-                 days_held = (datetime.now() - start_dt).days
+            if exit_dt and f_type == "History": days_held = (exit_dt - start_dt).days
+            else: days_held = (datetime.now() - start_dt).days
             if days_held < 1: days_held = 1
 
             strat_config = config_dict.get(strat, {})
             typical_debit = strat_config.get('debit_per_lot', 5000)
             
             lot_match = re.search(r'(\d+)\s*(?:LOT|L\b)', name, re.IGNORECASE)
-            if lot_match:
-                lot_size = int(lot_match.group(1))
-            else:
-                lot_size = int(round(debit / typical_debit))
-            
+            if lot_match: lot_size = int(lot_match.group(1))
+            else: lot_size = int(round(debit / typical_debit))
             if lot_size < 1: lot_size = 1
 
             put_pnl = 0.0
@@ -1167,14 +1209,18 @@ def load_data():
         df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
         df['Ann. ROI'] = df['Daily Yield %'] * 365
         df['Theta Pot.'] = df['Theta'] * df['Days Held']
-        df['Theta Eff.'] = np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0)
+        
+        # V150: Vectorized Theta Efficiency logic applied
+        df = vectorized_theta_efficiency(df)
+        df['Theta Eff.'] = df.get('Theta_Efficiency_Score', np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0))
+        
         df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
-        # Clean up Parent ID to ensure strings
         df['Parent ID'] = df['Parent ID'].astype(str).str.strip().replace('nan', '').replace('None', '')
         
-        df['Stability'] = np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0)
+        # V150: Improved stability formula
+        df['Stability'] = df.get('Stability_Score', np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0))
         
         def get_grade(row):
             s, d = row['Strategy'], row['Debit/Lot']
@@ -1234,126 +1280,6 @@ def load_snapshots():
     finally: conn.close()
 
 # --- INTELLIGENCE FUNCTIONS ---
-def calculate_kelly_fraction(win_rate, avg_win, avg_loss):
-    if avg_loss == 0 or avg_win <= 0:
-        return 0.0
-    b = abs(avg_win / avg_loss)
-    kelly = (win_rate * b - (1 - win_rate)) / b
-    return max(0, min(kelly * 0.5, 0.25))
-
-def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total_capital=100000):
-    if active_df.empty or history_df.empty: return pd.DataFrame()
-    features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
-    train_df = history_df.dropna(subset=features).copy()
-    if len(train_df) < 5: return pd.DataFrame()
-    predictions = []
-    for _, row in active_df.iterrows():
-        curr_vec = np.nan_to_num(row[features].values.astype(float)).reshape(1, -1)
-        hist_vecs = np.nan_to_num(train_df[features].values.astype(float))
-        distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
-        top_k_idx = np.argsort(distances)[:7]
-        nearest_neighbors = train_df.iloc[top_k_idx]
-        win_prob = (nearest_neighbors['P&L'] > 0).mean()
-        avg_pnl = nearest_neighbors['P&L'].mean()
-        avg_win = nearest_neighbors[nearest_neighbors['P&L'] > 0]['P&L'].mean()
-        avg_loss = nearest_neighbors[nearest_neighbors['P&L'] < 0]['P&L'].mean()
-        if pd.isna(avg_win): avg_win = 0
-        if pd.isna(avg_loss): avg_loss = -avg_pnl * 0.5
-        kelly_size = calculate_kelly_fraction(win_prob, avg_win, avg_loss)
-        rec_dollars = kelly_size * total_capital
-        avg_dist = distances[top_k_idx].mean()
-        confidence = max(0, 100 - (avg_dist * 10)) 
-        rec = "HOLD"
-        if win_prob * 100 < prob_low: rec = "REDUCE/CLOSE"
-        elif win_prob * 100 > prob_high: rec = "PRESS WINNER"
-        predictions.append({
-            'Trade Name': row['Name'], 'Strategy': row['Strategy'], 'Win Prob %': win_prob * 100,
-            'Expected PnL': avg_pnl, 'Kelly Size %': kelly_size * 100, 'Rec. Size ($)': rec_dollars,
-            'AI Rec': rec, 'Confidence': confidence
-        })
-    return pd.DataFrame(predictions)
-
-
-def get_mae_stats(conn):
-    """
-    FEATURE A: SMART STOP (MAE)
-    Calculates the Maximum Adverse Excursion (Lowest PnL) for historical WINNING trades.
-    Returns the 5th percentile (95% of winners never went below this).
-    """
-    query = """
-    SELECT t.strategy, MIN(s.pnl) as worst_drawdown
-    FROM snapshots s
-    JOIN trades t ON s.trade_id = t.trade_id
-    WHERE t.status = 'CLOSED' AND t.pnl > 0
-    GROUP BY t.trade_id, t.strategy
-    """
-    try:
-        df = pd.read_sql(query, conn)
-        mae_stats = {}
-        if not df.empty:
-            for strategy in df['strategy'].unique():
-                strat_df = df[df['strategy'] == strategy]
-                if not strat_df.empty:
-                    limit = strat_df['worst_drawdown'].quantile(0.05) 
-                    mae_stats[strategy] = limit
-        return mae_stats
-    except Exception as e:
-        return {}
-
-def get_velocity_stats(expired_df):
-    """
-    FEATURE C: PROFIT VELOCITY
-    Calculates Mean and StdDev of $/Day velocity for winning trades.
-    """
-    velocity_stats = {}
-    if expired_df.empty: return velocity_stats
-    
-    winners = expired_df[expired_df['P&L'] > 0].copy()
-    if winners.empty: return velocity_stats
-
-    winners['days_held'] = winners['days_held'].replace(0, 1)
-    winners['velocity'] = winners['P&L'] / winners['days_held']
-
-    for strategy in winners['Strategy'].unique():
-        s_df = winners[winners['Strategy'] == strategy]
-        if len(s_df) > 2:
-            mean_v = s_df['velocity'].mean()
-            std_v = s_df['velocity'].std()
-            velocity_stats[strategy] = {
-                'threshold': mean_v + (2 * std_v),
-                'mean': mean_v
-            }
-    return velocity_stats
-
-def check_rot_and_efficiency(row, hist_avg_days):
-    """
-    UPDATED: Checks for Theta Decay efficiency, Time Rot, AND Velocity.
-    """
-    try:
-        current_pnl = row['P&L']
-        days = row.get('Days', 1)
-        if days == 0: days = 1
-        
-        theta = row.get('Net Theta', 0)
-        current_speed = current_pnl / days
-        
-        if theta != 0:
-            theta_efficiency = (current_speed / theta) 
-        else:
-            theta_efficiency = 0
-            
-        status = "Healthy"
-        if days > hist_avg_days * 1.2 and current_pnl < 0:
-            status = "Rotting (Time > Avg & Red)"
-        elif theta_efficiency < 0.2 and days > 10 and current_pnl > 0:
-             status = "Inefficient (Theta Stuck)"
-        elif theta_efficiency < 0 and days > 5:
-             status = "Bleeding (Negative Efficiency)"
-             
-        return current_speed, theta_efficiency, status
-    except:
-        return 0, 0, "Error"
-
 def get_dynamic_targets(history_df, percentile):
     if history_df.empty: return {}
     winners = history_df[history_df['P&L'] > 0]
@@ -1455,7 +1381,7 @@ def rolling_correlation_matrix(snaps, window_days=30):
     corr_30 = last_30.corr()
     fig = px.imshow(corr_30, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
                     title="Strategy Correlation (Last 30 Days)", labels=dict(color="Correlation"))
-    fig = apply_chart_theme(fig) # UI OVERHAUL
+    fig = apply_chart_theme(fig)
     return fig
 
 def generate_adaptive_rulebook_text(history_df, strategies):
@@ -1493,7 +1419,6 @@ init_db()
 # --- SIDEBAR ---
 st.sidebar.markdown("###  Daily Workflow")
 
-# --- CLOUD SYNC SECTION (NEW) ---
 if GOOGLE_DEPS_INSTALLED:
     with st.sidebar.expander("☁️ Cloud Sync (Google Drive)", expanded=True):
         if not drive_mgr.is_connected:
@@ -1501,7 +1426,6 @@ if GOOGLE_DEPS_INSTALLED:
         else:
             c1, c2 = st.columns(2)
             with c1:
-                # Main Sync Button
                 if st.button("⬆️ Sync to Cloud"):
                     success, msg = drive_mgr.upload_db()
                     if not success and "CONFLICT" in msg:
@@ -1562,13 +1486,10 @@ if GOOGLE_DEPS_INSTALLED:
             # Persistent Status Indicator
             st.sidebar.divider()
             last_sync_time = st.session_state.get('last_cloud_sync')
-            
-            # Get real cloud status
             cloud_file_id, cloud_file_name = drive_mgr.find_db_file()
             if cloud_file_id:
                 cloud_ts = drive_mgr.get_cloud_modified_time(cloud_file_id)
                 if cloud_ts:
-                    # Convert to local/browser time approximation or just show UTC
                     st.sidebar.caption(f"☁️ Cloud File: {cloud_ts.strftime('%b %d, %H:%M')} (UTC)")
             
             if last_sync_time:
@@ -1759,21 +1680,13 @@ def calculate_decision_ladder(row, benchmarks_dict):
         score += 15
         reason += " + Bad Decay"
     
-    # NEW: Capital Efficiency Check (Redeployment Logic)
     if pnl > 0 and days > 5:
-        # Calculate historical baseline velocity ($/day)
         hist_vel = hist_avg_pnl / max(1, hist_avg_days)
-        # Calculate current velocity ($/day)
         curr_vel = pnl / days
-        
-        # If current trade is dragging the average down significantly
-        if curr_vel < (hist_vel * 0.6): # Earning less than 60% of average speed
-             # Check if it's because it's super old (already handled by stale check) 
-             # or just slow performance.
-             # Only trigger if we have decent profit to take (e.g. > 20% of target)
+        if curr_vel < (hist_vel * 0.6):
              if pnl > (target_profit * 0.2):
                  score += 15
-                 if action == "HOLD": # Only override if currently neutral
+                 if action == "HOLD": 
                      action = "REDEPLOY?"
                      reason = f"Slow Capital (Vel ${curr_vel:.0f}/d vs Avg ${hist_vel:.0f}/d)"
 
@@ -1798,19 +1711,15 @@ expired_df = pd.DataFrame()
 if not df.empty and 'Status' in df.columns:
     expired_df = df[df['Status'] == 'Expired']
     
-    # --- v147.0 STATS CALC ---
+    # --- V150 STATS UPDATE via SESSION_STATE ---
     try:
-        if 'expired_df' in locals() and not expired_df.empty:
-            velocity_stats = get_velocity_stats(expired_df)
-        if 'conn' in locals():
-            mae_stats = get_mae_stats(conn) # Note: conn needs to be open, get_db_connection() creates new
-        else:
-            # Create temp connection for stats
-            try:
-                temp_conn = get_db_connection()
-                mae_stats = get_mae_stats(temp_conn)
-                temp_conn.close()
-            except: pass
+        if not expired_df.empty:
+            st.session_state['velocity_stats'] = get_velocity_stats(expired_df)
+        
+        # Temp Connection for stats extraction
+        temp_conn = get_db_connection()
+        st.session_state['mae_stats'] = get_mae_stats(temp_conn)
+        temp_conn.close()
     except Exception as e: print(f"Stats Error: {e}")
     # -------------------------
 
@@ -1914,37 +1823,31 @@ with tab_dash:
             tot_theta = active_df['Theta'].sum()
             curr_pnl = active_df['P&L'].sum()
             
-            if total_delta_pct > 6 or avg_age > 45:
-                health_status = " CRITICAL" 
-            elif allocation_score < 40:
-                health_status = " CRITICAL" 
-            elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25:
-                health_status = " REVIEW"    
-            else:
-                health_status = " HEALTHY"   
+            # --- V150: PORTFOLIO VaR METRIC ---
+            portfolio_var = calculate_portfolio_var(df[df['Status'] == 'Expired'])
+            est_risk_dollars = (portfolio_var/100) * total_cap if portfolio_var < 0 else 0.0
+
+            if total_delta_pct > 6 or avg_age > 45: health_status = " CRITICAL" 
+            elif allocation_score < 40: health_status = " CRITICAL" 
+            elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25: health_status = " REVIEW"    
+            else: health_status = " HEALTHY"   
             
-            # --- NEW LAYOUT: Metrics + Radar Chart ---
-            
-            # 1. Calculate Radar Metrics
-            # Normalize to 0-100 scale for chart
             score_stability = min(100, (active_df['Stability'].mean() / 1.5) * 100) 
-            score_yield = min(100, (tot_theta / tot_debit * 100) * 500) # Approx 0.2%/day = 100 score
+            score_yield = min(100, (tot_theta / tot_debit * 100) * 500)
             score_hedge = min(100, abs(active_df['Vega'].sum() / (tot_theta if tot_theta !=0 else 1)) * 20) 
             score_freshness = max(0, 100 - (avg_age / 45 * 100))
             score_neutral = max(0, 100 - (total_delta_pct * 20))
             score_div = allocation_score
 
-            dash_c1, dash_c2 = st.columns([1.8, 1.2]) # Metrics take slightly more space
+            dash_c1, dash_c2 = st.columns([1.8, 1.2])
             
             with dash_c1:
                 st.subheader("Command Center")
-                # Top Row Metrics
                 m1, m2 = st.columns(2)
                 h_icon = "🟢" if "HEALTHY" in health_status else ("🔴" if "CRITICAL" in health_status else "🟡")
                 m1.metric("Health", f"{h_icon} {health_status}")
                 m2.metric("Floating P&L", f"${curr_pnl:,.0f}", delta_color="normal" if curr_pnl > 0 else "inverse")
                 
-                # Bottom Row Metrics
                 m3, m4 = st.columns(2)
                 m3.metric("Daily Income", f"${tot_theta:,.0f}")
                 
@@ -1958,53 +1861,34 @@ with tab_dash:
                 todo_df = active_df[active_df['Urgency Score'] >= 70]
                 m4.metric("Action Items", len(todo_df), delta="Urgent" if len(todo_df) > 0 else None)
 
+                # --- V150: THE GREEK WALL ---
+                st.markdown("##### The Greek Wall & Risk Limits")
+                gw1, gw2, gw3 = st.columns(3)
+                gw1.metric("Portfolio VaR (Est.)", f"${est_risk_dollars:,.0f}", help="95% Confidence Value at Risk based on historical returns")
+                gw2.metric("Net Delta Exposure", f"{total_delta_pct:.2f}%", help="Total Delta / Total Capital. Keep under 5% for market neutrality.")
+                gw3.metric("Net Vega", f"{active_df['Vega'].sum():,.0f}", help="Positive vega cushions down-moves. Negative vega increases crash risk.")
+
             with dash_c2:
-                # Radar Chart
                 categories = ['Stability', 'Yield', 'Hedge', 'Freshness', 'Neutrality', 'Diversification']
                 r_values = [score_stability, score_yield, score_hedge, score_freshness, score_neutral, score_div]
                 
                 fig_radar = go.Figure(data=go.Scatterpolar(
-                    r=r_values,
-                    theta=categories,
-                    fill='toself',
-                    name='Current Portfolio',
-                    line_color='#38bdf8',
-                    fillcolor='rgba(56, 189, 248, 0.2)'
+                    r=r_values, theta=categories, fill='toself', name='Current Portfolio',
+                    line_color='#38bdf8', fillcolor='rgba(56, 189, 248, 0.2)'
                 ))
 
                 fig_radar.update_layout(
                     polar=dict(
-                        radialaxis=dict(
-                            visible=True,
-                            range=[0, 100],
-                            showticklabels=False,
-                            gridcolor='rgba(148, 163, 184, 0.2)'
-                        ),
-                        angularaxis=dict(
-                            gridcolor='rgba(148, 163, 184, 0.2)',
-                            linecolor='rgba(148, 163, 184, 0.2)'
-                        ),
+                        radialaxis=dict(visible=True, range=[0, 100], showticklabels=False, gridcolor='rgba(148, 163, 184, 0.2)'),
+                        angularaxis=dict(gridcolor='rgba(148, 163, 184, 0.2)', linecolor='rgba(148, 163, 184, 0.2)'),
                         bgcolor='rgba(0,0,0,0)'
                     ),
-                    margin=dict(l=40, r=40, t=30, b=30),
-                    height=250, # Compact height
+                    margin=dict(l=40, r=40, t=30, b=30), height=250,
                     title=dict(text="Portfolio Composition", x=0.5, font=dict(size=14, color="#94a3b8")),
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color="#94a3b8", family="Inter")
+                    paper_bgcolor='rgba(0,0,0,0)', font=dict(color="#94a3b8", family="Inter")
                 )
                 st.plotly_chart(fig_radar, use_container_width=True)
             
-            with st.expander("📊 Detailed Metrics (Allocation, Greeks, Age)", expanded=False):
-                d1, d2, d3, d4 = st.columns(4)
-                eff_score = (tot_theta / tot_debit * 100)
-                d1.metric("Allocation Score", f"{allocation_score:.0f}/100")
-                d2.metric("Yield/Cap", f"{eff_score:.2f}%")
-                d3.metric("Net Delta", f"{total_delta_pct:.2f}%")
-                d4.metric("Avg Age", f"{avg_age:.0f} days")
-                stale_capital = active_df[active_df['Days Held'] > 40]['Debit'].sum()
-                if stale_capital > tot_debit * 0.3:
-                     st.warning(f" ${stale_capital:,.0f} stuck in trades >40 days old. Consider exits.")
-
             st.divider()
             st.subheader("🗺️ Position Heat Map")
             fig_heat = px.scatter(
@@ -2016,7 +1900,7 @@ with tab_dash:
             avg_days_current = active_df['Days Held'].mean()
             fig_heat.add_vline(x=avg_days_current, line_dash="dash", opacity=0.5, annotation_text="Avg Age")
             fig_heat.add_hline(y=0, line_dash="dash", opacity=0.5)
-            fig_heat = apply_chart_theme(fig_heat) # UI OVERHAUL
+            fig_heat = apply_chart_theme(fig_heat)
             st.plotly_chart(fig_heat, use_container_width=True)
             st.caption("🎯 Top-Right = Winners aging well | 🚨 Bottom-Right = Losers rotting | 🌱 Left = New positions cooking")
 
@@ -2071,11 +1955,7 @@ with tab_active:
                     "Action": st.column_config.TextColumn("Decision", disabled=True),
                     "Gauge": st.column_config.TextColumn("Tank / Recov"),
                     "Stability": st.column_config.ProgressColumn(
-                        "Stability",
-                        help="Theta / (Delta + 1). Full bar (3.0) = Excellent Health.",
-                        format="%.2f",
-                        min_value=0,
-                        max_value=3,
+                        "Stability", help="Theta / (Delta + 1). Full bar (3.0) = Excellent Health.", format="%.2f", min_value=0, max_value=3,
                     ),
                     "Theta Eff.": st.column_config.NumberColumn(" Eff", format="%.2f", disabled=True),
                     "ROI": st.column_config.NumberColumn("ROI %", format="%.1f%%", disabled=True),
@@ -2390,7 +2270,7 @@ with tab_analytics:
                 combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
                 fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group', title="Capital Efficiency Comparison (Annualized Return)", color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'}, text='Return %')
                 fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-                fig_compare = apply_chart_theme(fig_compare) # UI OVERHAUL
+                fig_compare = apply_chart_theme(fig_compare)
                 st.plotly_chart(fig_compare, use_container_width=True)
 
             st.subheader(" Profit Anatomy: Call vs Put Contribution")
@@ -2399,20 +2279,8 @@ with tab_analytics:
             fig_strat_ana.add_trace(go.Bar(y=strat_anatomy['Strategy'], x=strat_anatomy['Put P&L'], name='Avg Put Profit', orientation='h', marker_color='#EF553B'))
             fig_strat_ana.add_trace(go.Bar(y=strat_anatomy['Strategy'], x=strat_anatomy['Call P&L'], name='Avg Call Profit', orientation='h', marker_color='#00CC96'))
             fig_strat_ana.update_layout(barmode='relative', title="Average Profit Sources per Strategy (Stacked)", xaxis_title="Average P&L ($)")
-            fig_strat_ana = apply_chart_theme(fig_strat_ana) # UI OVERHAUL
+            fig_strat_ana = apply_chart_theme(fig_strat_ana) 
             st.plotly_chart(fig_strat_ana, use_container_width=True)
-
-            st.markdown("#####  Trade-by-Trade Attribution")
-            strat_list = sorted(expired_df['Strategy'].unique())
-            sel_strat_ana = st.selectbox("Select Strategy to Analyze:", strat_list, key="ana_strat_sel")
-            trade_subset = expired_df[expired_df['Strategy'] == sel_strat_ana].sort_values('Exit Date')
-            if not trade_subset.empty:
-                fig_trade_ana = go.Figure()
-                fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Put P&L'], name='Put PnL', marker_color='#EF553B'))
-                fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Call P&L'], name='Call PnL', marker_color='#00CC96'))
-                fig_trade_ana.update_layout(barmode='relative', title=f"Profit Attribution: {sel_strat_ana}", xaxis_title="Trade", yaxis_title="PnL ($)", xaxis_tickangle=-45)
-                fig_trade_ana = apply_chart_theme(fig_trade_ana) # UI OVERHAUL
-                st.plotly_chart(fig_trade_ana, use_container_width=True)
 
     with an_trends:
         col1, col2 = st.columns(2)
@@ -2427,7 +2295,7 @@ with tab_analytics:
                     avg_win_debit['Type'] = 'Winning History'; avg_act_debit['Type'] = 'Active (Current)'
                     comp_df = pd.concat([avg_win_debit, avg_act_debit])
                     fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group', title="Entry Price per Lot Comparison", color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
-                    fig_price = apply_chart_theme(fig_price) # UI OVERHAUL
+                    fig_price = apply_chart_theme(fig_price)
                     st.plotly_chart(fig_price, use_container_width=True)
         with col2:
             st.subheader(" Profit Drivers (Puts vs Calls)")
@@ -2436,14 +2304,14 @@ with tab_analytics:
                 if not expired.empty:
                     leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
                     fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], title="Profit Source Split", color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
-                    fig_legs = apply_chart_theme(fig_legs) # UI OVERHAUL
+                    fig_legs = apply_chart_theme(fig_legs) 
                     st.plotly_chart(fig_legs, use_container_width=True)
         st.divider()
         if not expired_df.empty:
             ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
             ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
             fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Realized Equity Curve", markers=True)
-            fig = apply_chart_theme(fig) # UI OVERHAUL
+            fig = apply_chart_theme(fig) 
             st.plotly_chart(fig, use_container_width=True)
         st.divider()
         hm1, hm2, hm3 = st.tabs([" Seasonality", " Duration", " Entry Day"])
@@ -2454,18 +2322,18 @@ with tab_analytics:
                 hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
                 months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
                 fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True, color_continuous_scale="RdBu")
-                fig = apply_chart_theme(fig) # UI OVERHAUL
+                fig = apply_chart_theme(fig) 
                 st.plotly_chart(fig, use_container_width=True)
             with hm2:
                 fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", title="Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
-                fig2 = apply_chart_theme(fig2) # UI OVERHAUL
+                fig2 = apply_chart_theme(fig2) 
                 st.plotly_chart(fig2, use_container_width=True)
             with hm3:
                 if 'Entry Date' in exp_hm.columns:
                     exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
                     days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
                     fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg", title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
-                    fig3 = apply_chart_theme(fig3) # UI OVERHAUL
+                    fig3 = apply_chart_theme(fig3) 
                     st.plotly_chart(fig3, use_container_width=True)
 
     with an_risk:
@@ -2492,7 +2360,7 @@ with tab_analytics:
                     with mae_c1:
                         fig_mae_scat = px.scatter(viz_mae, x='MAE', y='P&L', color='Strategy', symbol='Status' if "Include Active" in mae_view else None, hover_data=['Name', 'Days Held'], title="Drawdown (MAE) vs Final P&L")
                         fig_mae_scat.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.5); fig_mae_scat.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.5)
-                        fig_mae_scat = apply_chart_theme(fig_mae_scat) # UI OVERHAUL
+                        fig_mae_scat = apply_chart_theme(fig_mae_scat) 
                         st.plotly_chart(fig_mae_scat, use_container_width=True)
                     with mae_c2:
                         viz_mfe = viz_mae[viz_mae['MFE'] > 0]
@@ -2500,7 +2368,7 @@ with tab_analytics:
                         if not viz_mfe.empty:
                              max_val = max(viz_mfe['MFE'].max(), viz_mfe['P&L'].max())
                              fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
-                        fig_mfe = apply_chart_theme(fig_mfe) # UI OVERHAUL
+                        fig_mfe = apply_chart_theme(fig_mfe) 
                         st.plotly_chart(fig_mfe, use_container_width=True)
 
     with an_lifecycle:
@@ -2510,7 +2378,6 @@ with tab_analytics:
         snaps = load_snapshots()
         all_lifecycle_data = []
         
-        # Select strategies to analyze
         strategies_avail = df['Strategy'].unique()
         selected_lifecycle_strat = st.multiselect("Select Strategies", strategies_avail, default=strategies_avail[:2] if len(strategies_avail) > 0 else strategies_avail)
         
@@ -2529,7 +2396,6 @@ with tab_analytics:
                     curve_df['Status'] = row['Status']
                     all_lifecycle_data.append(curve_df)
                 
-                # Safe progress calculation
                 prog_val = min((i + 1) / total_items, 1.0)
                 my_bar.progress(prog_val, text=progress_text)
             my_bar.empty()
@@ -2537,81 +2403,57 @@ with tab_analytics:
             if all_lifecycle_data:
                 full_lifecycle_df = pd.concat(all_lifecycle_data, ignore_index=True)
                 
-                # --- VISUAL 1: THE HARVEST CURVE ---
                 st.markdown("##### 1. The Harvest Curve (Profit vs Duration %)")
-                st.caption("How fast do these strategies yield profit? Convex (bulging up) = Fast/Front-Loaded. Concave (dipping) = Slow/Back-Loaded.")
+                st.caption("How fast do these strategies yield profit? Convex = Fast/Front-Loaded. Concave = Slow/Back-Loaded.")
                 
                 fig_harvest = px.line(
-                    full_lifecycle_df, 
-                    x='Pct_Duration', 
-                    y='Pct_PnL', 
-                    color='Strategy', 
-                    line_group='Trade Name', 
-                    hover_data=['Trade Name'],
-                    color_discrete_sequence=px.colors.qualitative.Vivid # BRIGHTER COLORS
+                    full_lifecycle_df, x='Pct_Duration', y='Pct_PnL', color='Strategy', 
+                    line_group='Trade Name', hover_data=['Trade Name'], color_discrete_sequence=px.colors.qualitative.Vivid
                 )
-                # Make lines semi-transparent but visible
-                fig_harvest.update_traces(opacity=0.4, line=dict(width=1.5)) # INCREASED VISIBILITY
+                fig_harvest.update_traces(opacity=0.4, line=dict(width=1.5)) 
                 
-                # Add Average Lines
-                avg_curves = full_lifecycle_df.groupby(['Strategy', 'Pct_Duration'])['Pct_PnL'].mean().reset_index()
-                # Smooth the average line slightly for visual clarity if needed, but grouping by rounded duration helps
-                full_lifecycle_df['Pct_Duration_Bin'] = full_lifecycle_df['Pct_Duration'].round(-1) # Bin to nearest 10%
+                full_lifecycle_df['Pct_Duration_Bin'] = full_lifecycle_df['Pct_Duration'].round(-1)
                 avg_binned = full_lifecycle_df.groupby(['Strategy', 'Pct_Duration_Bin'])['Pct_PnL'].mean().reset_index()
                 
                 for strat in selected_lifecycle_strat:
                     strat_avg = avg_binned[avg_binned['Strategy'] == strat]
                     if not strat_avg.empty:
                         fig_harvest.add_trace(go.Scatter(
-                            x=strat_avg['Pct_Duration_Bin'], 
-                            y=strat_avg['Pct_PnL'], 
-                            mode='lines', 
-                            name=f"AVG: {strat}", 
-                            line=dict(width=4)
+                            x=strat_avg['Pct_Duration_Bin'], y=strat_avg['Pct_PnL'], mode='lines', 
+                            name=f"AVG: {strat}", line=dict(width=4)
                         ))
                         
                 fig_harvest.update_layout(xaxis_title="% of Trade Duration", yaxis_title="% of Total Profit", showlegend=True)
                 fig_harvest.add_shape(type="line", x0=0, y0=0, x1=100, y1=100, line=dict(color="white", dash="dot", width=1), opacity=0.5)
-                fig_harvest = apply_chart_theme(fig_harvest) # UI OVERHAUL
+                fig_harvest = apply_chart_theme(fig_harvest) 
                 st.plotly_chart(fig_harvest, use_container_width=True)
                 
-                # --- VISUAL 2: PHASING HISTOGRAM ---
                 st.markdown("##### 2. Profit Phasing (Where is the money made?)")
                 c_p1, c_p2 = st.columns(2)
                 
                 with c_p1:
-                    # Categorize PnL into phases: Early (0-30%), Mid (30-70%), Late (70-100%)
                     def classify_phase(pct):
                         if pct <= 30: return "1. Early (0-30%)"
                         elif pct <= 70: return "2. Mid (30-70%)"
                         return "3. Late (70-100%)"
                     
                     full_lifecycle_df['Phase'] = full_lifecycle_df['Pct_Duration'].apply(classify_phase)
-                    
-                    # Calculate PnL Delta (Marginal PnL per step) to verify where it was EARNED, not just cumulative
-                    # Sort first
                     full_lifecycle_df = full_lifecycle_df.sort_values(['Trade Name', 'Pct_Duration'])
                     full_lifecycle_df['Prev_PnL'] = full_lifecycle_df.groupby('Trade Name')['Cumulative_PnL'].shift(1).fillna(0)
                     full_lifecycle_df['Marginal_PnL'] = full_lifecycle_df['Cumulative_PnL'] - full_lifecycle_df['Prev_PnL']
                     
-                    # Group by Strategy and Phase, Sum Marginal PnL
                     phase_attribution = full_lifecycle_df.groupby(['Strategy', 'Phase'])['Marginal_PnL'].sum().reset_index()
                     
                     fig_phase = px.bar(
-                        phase_attribution, 
-                        x='Strategy', 
-                        y='Marginal_PnL', 
-                        color='Phase', 
-                        barmode='group',
+                        phase_attribution, x='Strategy', y='Marginal_PnL', color='Phase', barmode='group',
                         title="Net Profit Generated by Phase ($)",
                         color_discrete_map={"1. Early (0-30%)": "#636EFA", "2. Mid (30-70%)": "#00CC96", "3. Late (70-100%)": "#EF553B"}
                     )
-                    fig_phase = apply_chart_theme(fig_phase) # UI OVERHAUL
+                    fig_phase = apply_chart_theme(fig_phase)
                     st.plotly_chart(fig_phase, use_container_width=True)
                     
                 with c_p2:
                     st.markdown("**Capital Stagnation Analysis**")
-                    # Calculate "Time to 80% Profit" for closed winning trades
                     closed_winners = subset_df[(subset_df['Status'] == 'Expired') & (subset_df['P&L'] > 0)]['Name'].unique()
                     winner_curves = full_lifecycle_df[full_lifecycle_df['Trade Name'].isin(closed_winners)].copy()
                     
@@ -2619,12 +2461,10 @@ with tab_analytics:
                     for t_name in closed_winners:
                         t_data = winner_curves[winner_curves['Trade Name'] == t_name]
                         if t_data.empty: continue
-                        
                         total_days = t_data['Day'].max()
                         final_pnl = t_data['Cumulative_PnL'].max()
                         if final_pnl <= 0: continue
                         
-                        # Find day where we crossed 80% of final PnL
                         threshold = final_pnl * 0.80
                         cross_row = t_data[t_data['Cumulative_PnL'] >= threshold].head(1)
                         
@@ -2632,68 +2472,25 @@ with tab_analytics:
                             day_reached = cross_row['Day'].values[0]
                             wasted_days = total_days - day_reached
                             stagnation_data.append({
-                                'Trade': t_name,
-                                'Strategy': t_data['Strategy'].iloc[0],
-                                'Total Days': total_days,
-                                'Days to 80%': day_reached,
-                                'Zombie Days': wasted_days,
-                                'Zombie %': (wasted_days / total_days) * 100
+                                'Trade': t_name, 'Strategy': t_data['Strategy'].iloc[0], 'Total Days': total_days,
+                                'Days to 80%': day_reached, 'Zombie Days': wasted_days, 'Zombie %': (wasted_days / total_days) * 100
                             })
                             
                     if stagnation_data:
                         stag_df = pd.DataFrame(stagnation_data)
                         fig_stag = px.scatter(
-                            stag_df, 
-                            x='Days to 80%', 
-                            y='Total Days', 
-                            color='Strategy', 
-                            size='Zombie Days',
-                            hover_data=['Trade', 'Zombie %'],
-                            title="Efficiency: Days to 80% Gain vs Total Hold"
+                            stag_df, x='Days to 80%', y='Total Days', color='Strategy', size='Zombie Days',
+                            hover_data=['Trade', 'Zombie %'], title="Efficiency: Days to 80% Gain vs Total Hold"
                         )
-                        # Add diagonal line (Perfect Efficiency)
                         max_d = stag_df['Total Days'].max()
                         fig_stag.add_shape(type="line", x0=0, y0=0, x1=max_d, y1=max_d, line=dict(color="grey", dash="dash"))
                         fig_stag.add_annotation(x=max_d*0.8, y=max_d*0.2, text="Efficient Zone", showarrow=False)
                         fig_stag.add_annotation(x=max_d*0.2, y=max_d*0.8, text="Zombie Zone (Wasted Time)", showarrow=False)
-                        
-                        fig_stag = apply_chart_theme(fig_stag) # UI OVERHAUL
+                        fig_stag = apply_chart_theme(fig_stag) 
                         st.plotly_chart(fig_stag, use_container_width=True)
                         st.caption("Trades significantly above the diagonal line achieved their bulk profit early but were held too long.")
                     else:
                         st.info("Not enough closed winning trades for Stagnation Analysis.")
-                
-                # --- NEW FEATURE: CAPITAL REDEPLOYMENT SUGGESTIONS ---
-                st.markdown("### 💡 Capital Efficiency Engine")
-                st.caption("AI Suggestions: Trades where capital is earning less than your historical average.")
-                
-                redeploy_list = []
-                for strat in selected_lifecycle_strat:
-                    # Get baseline for this strat
-                    bench = dynamic_benchmarks.get(strat, {})
-                    avg_daily_yield_pct = bench.get('yield', 0.1) # Default 0.1% if missing
-                    
-                    # Check active trades for this strat
-                    strat_active = df[(df['Status'] == 'Active') & (df['Strategy'] == strat)]
-                    
-                    for idx, row in strat_active.iterrows():
-                        curr_yield = row['Daily Yield %']
-                        # If earning less than 50% of strategy average and profitable
-                        if row['P&L'] > 0 and curr_yield < (avg_daily_yield_pct * 0.5):
-                             opportunity_cost = (avg_daily_yield_pct - curr_yield) * row['Days Held'] # Roughly points lost
-                             redeploy_list.append({
-                                 'Trade': row['Name'],
-                                 'Strategy': strat,
-                                 'Current Yield': f"{curr_yield:.2f}%/day",
-                                 'Target Yield': f"{avg_daily_yield_pct:.2f}%/day",
-                                 'Action': "Harvest & Redeploy",
-                                 'Reason': "Capital Stagnation"
-                             })
-                
-                if redeploy_list:
-                    st.dataframe(pd.DataFrame(redeploy_list), use_container_width=True)
-                else:
-                    st.success("All active capital is performing near or above historical baselines.")
 
     with an_rolls: 
         st.subheader(" Roll Campaign Analysis")
@@ -2718,7 +2515,7 @@ with tab_analytics:
             st.info("No roll campaigns detected. Link trades using the 'Parent ID' column in the Journal.")
 
 with tab_ai:
-    st.markdown("###  The Quant Brain (Beta)")
+    st.markdown("###  The Quant Brain (v150)")
     st.caption("Self-learning insights based on your specific trading history.")
     if df.empty or expired_df.empty:
         st.info(" Need more historical data to power the AI engine.")
@@ -2738,7 +2535,7 @@ with tab_ai:
                 st.markdown("** Exit Targets**")
                 exit_percentile = st.slider("Optimal Exit Percentile", 50, 95, 75) / 100.0
 
-        st.subheader(" Win Probability Forecast (KNN Model + Kelly Size)")
+        st.subheader(" Win Probability Forecast (KNN Model + Half-Kelly Sizing)")
         strategies_avail = sorted(active_trades['Strategy'].unique().tolist())
         selected_strat_ai = st.selectbox("Filter by Strategy", ["All"] + strategies_avail, key="ai_strat_filter")
         if selected_strat_ai != "All": ai_view_df = active_trades[active_trades['Strategy'] == selected_strat_ai].copy()
@@ -2751,7 +2548,7 @@ with tab_ai:
                 with c_p1:
                     fig_pred = px.scatter(preds, x="Win Prob %", y="Expected PnL", color="Confidence", size="Rec. Size ($)", hover_data=["Trade Name", "Strategy", "Kelly Size %"], color_continuous_scale="RdYlGn", title="Risk/Reward Map (Size = Kelly Rec)")
                     fig_pred.add_vline(x=50, line_dash="dash", line_color="gray"); fig_pred.add_hline(y=0, line_dash="dash", line_color="gray")
-                    fig_pred = apply_chart_theme(fig_pred) # UI OVERHAUL
+                    fig_pred = apply_chart_theme(fig_pred) 
                     st.plotly_chart(fig_pred, use_container_width=True)
                 with c_p2:
                     st.dataframe(preds.style.format({'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%", 'Kelly Size %': "{:.1f}%", 'Rec. Size ($)': "${:,.0f}"}).map(lambda v: 'color: green; font-weight: bold' if v > prob_high else ('color: red; font-weight: bold' if v < prob_low else 'color: orange'), subset=['Win Prob %']), use_container_width=True)
@@ -2762,7 +2559,6 @@ with tab_ai:
         with c_ai_1:
             st.subheader(" Capital Rot Detector")
             if not active_trades.empty:
-                # --- v147.0 FIX: Reconstruct rot_df using new row-based function ---
                 rot_rows = []
                 for idx, row in active_trades.iterrows():
                     s_name = row.get('Strategy', 'Unknown')
@@ -2774,34 +2570,25 @@ with tab_ai:
                     
                     rot_rows.append({
                         'Trade': row.get('Symbol', f"Trade {idx}"), 
-                        'Strategy': s_name,
-                        'Current Speed': curr_spd,
-                        'Baseline Speed': base_spd,
-                        'Status': status,
-                        'Raw Current': curr_spd,  # Fix for plotting key
-                        'Raw Baseline': base_spd  # Fix for plotting key
+                        'Strategy': s_name, 'Current Speed': curr_spd, 'Baseline Speed': base_spd, 'Status': status,
+                        'Raw Current': curr_spd, 'Raw Baseline': base_spd 
                     })
                 rot_df = pd.DataFrame(rot_rows)
-                rot_viz = rot_df.copy() # Ensure viz copy exists
                 if not rot_df.empty:
                     rot_viz = rot_df.copy()
                     fig_rot = go.Figure()
                     fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Current'], name='Current Speed', marker_color='#EF553B'))
                     fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Baseline'], name='Baseline Speed', marker_color='gray'))
                     fig_rot.update_layout(title="Capital Velocity Lag ($/Day/1k)", barmode='group')
-                    fig_rot = apply_chart_theme(fig_rot) # UI OVERHAUL
+                    fig_rot = apply_chart_theme(fig_rot) 
                     st.plotly_chart(fig_rot, use_container_width=True)
                     st.dataframe(rot_df[['Trade', 'Strategy', 'Current Speed', 'Baseline Speed', 'Status']], use_container_width=True)
                 else: st.success(" Capital is moving efficiently. No rot detected.")
         with c_ai_2:
-
             st.subheader("Diagnostics")
-            # --- v147.0 UI: Velocity Speedometer ---
-            if 'velocity_stats' in locals() and velocity_stats: # Use velocity_stats (global) not strat_vel_stats
-                # Just show the first active trade or aggregate for demo if multiple
-                # Ideally this should be trade-specific selection, but for dashboard summary:
+            velocity_stats = st.session_state.get('velocity_stats', {})
+            if velocity_stats: 
                 if not active_trades.empty:
-                     # Pick the fastest moving trade as the example
                      active_trades['daily_pnl'] = active_trades['P&L'] / active_trades['Days Held'].clip(lower=1)
                      fastest_trade = active_trades.loc[active_trades['daily_pnl'].idxmax()]
                      strat = fastest_trade['Strategy']
@@ -2811,9 +2598,7 @@ with tab_ai:
                         d_pnl = fastest_trade['daily_pnl']
                         
                         fig_gauge = go.Figure(go.Indicator(
-                            mode = "gauge+number",
-                            value = d_pnl,
-                            title = {'text': f"🚀 Top Velocity: {fastest_trade['Name']}"},
+                            mode = "gauge+number", value = d_pnl, title = {'text': f"🚀 Top Velocity: {fastest_trade['Name']}"},
                             gauge = {
                                 'axis': {'range': [None, v_thresh * 1.5]},
                                 'bar': {'color': "#00cc96" if d_pnl < v_thresh else "#EF553B"},
@@ -2822,16 +2607,16 @@ with tab_ai:
                             }
                         ))
                         fig_gauge.update_layout(height=200, margin=dict(l=20,r=20,t=30,b=20))
-                        fig_gauge = apply_chart_theme(fig_gauge) # UI OVERHAUL
+                        fig_gauge = apply_chart_theme(fig_gauge) 
                         st.plotly_chart(fig_gauge, use_container_width=True)
-            # ---------------------------------------
+            
             st.subheader(f" Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
             targets = get_dynamic_targets(expired_df, exit_percentile)
             if targets:
                 winners = expired_df[expired_df['P&L'] > 0]
                 if not winners.empty:
                     fig_exit = px.box(winners, x="Strategy", y="P&L", points="all", title="Historical Win Distribution & Targets")
-                    fig_exit = apply_chart_theme(fig_exit) # UI OVERHAUL
+                    fig_exit = apply_chart_theme(fig_exit) 
                     st.plotly_chart(fig_exit, use_container_width=True)
                 target_data = []
                 for s, v in targets.items(): target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit': v['Optimal Exit']})
@@ -2842,32 +2627,33 @@ with tab_rules:
     strategies_for_rules = sorted(list(dynamic_benchmarks.keys()))
     adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
 
-    # --- v147.0 UI: Risk Floor Visuals ---
     st.markdown("### 🛡️ Smart Stop & Risk Analysis")
-    if 'dynamic_benchmarks' in globals():
-        for strat, data in dynamic_benchmarks.items():
-            mae = mae_stats.get(strat, "N/A") if 'mae_stats' in globals() else "N/A"
-            vel = velocity_stats.get(strat) if 'velocity_stats' in globals() else None
+    mae_stats_dict = st.session_state.get('mae_stats', {})
+    vel_stats_dict = st.session_state.get('velocity_stats', {})
+    
+    for strat, data in dynamic_benchmarks.items():
+        mae = mae_stats_dict.get(strat, "N/A") 
+        vel = vel_stats_dict.get(strat)
+        
+        with st.expander(f"📊 {strat} Risk Profile"):
+            c_r1, c_r2 = st.columns(2)
+            with c_r1:
+                st.write(f"**Target Win:** ${data.get('pnl', 0):.0f}")
+                if mae != "N/A":
+                    st.error(f"**Smart Stop (MAE):** ${mae:.2f}")
+                    safe_range = abs(mae)
+                    fig_mae = go.Figure()
+                    fig_mae.add_trace(go.Bar(x=[safe_range], y=["Risk Room"], orientation='h', marker_color='lightgreen', name="Safe Zone"))
+                    fig_mae.update_layout(xaxis_title="Max Drawdown ($)", xaxis=dict(range=[0, safe_range*1.2]), height=100, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
+                    fig_mae = apply_chart_theme(fig_mae)
+                    st.plotly_chart(fig_mae, use_container_width=True)
+                else: st.write("No MAE data yet.")
             
-            with st.expander(f"📊 {strat} Risk Profile"):
-                c_r1, c_r2 = st.columns(2)
-                with c_r1:
-                    st.write(f"**Target Win:** ${data.get('pnl', 0):.0f}")
-                    if mae != "N/A":
-                        st.error(f"**Smart Stop (MAE):** ${mae:.2f}")
-                        safe_range = abs(mae)
-                        fig_mae = go.Figure()
-                        fig_mae.add_trace(go.Bar(x=[safe_range], y=["Risk Room"], orientation='h', marker_color='lightgreen', name="Safe Zone"))
-                        fig_mae.update_layout(xaxis_title="Max Drawdown ($)", xaxis=dict(range=[0, safe_range*1.2]), height=100, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
-                        fig_mae = apply_chart_theme(fig_mae) # UI OVERHAUL
-                        st.plotly_chart(fig_mae, use_container_width=True)
-                    else: st.write("No MAE data yet.")
-                
-                with c_r2:
-                    if vel:
-                        st.success(f"**Velocity Limit:** ${vel['threshold']:.2f}/day")
-                        st.caption("Profit speed exceeding this is an anomaly.")
-                    else: st.write("No Velocity data yet.")
+            with c_r2:
+                if vel:
+                    st.success(f"**Velocity Limit:** ${vel['threshold']:.2f}/day")
+                    st.caption("Profit speed exceeding this is an anomaly.")
+                else: st.write("No Velocity data yet.")
     st.markdown(adaptive_content)
     st.divider()
-    st.caption("Allantis Trade Guardian v148.1 (UI Overhaul + Compact Tiles)")
+    st.caption("Allantis Trade Guardian v150.0 (Quant Engine Upgraded)")
