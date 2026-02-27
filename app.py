@@ -1991,7 +1991,7 @@ with tab_active:
                     st.plotly_chart(fig_matrix, use_container_width=True)
                 else:
                     st.info("No active trades for the matrix.")
-            
+
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
                 strategy_options = sorted(list(dynamic_benchmarks.keys())) + ["Other"]
