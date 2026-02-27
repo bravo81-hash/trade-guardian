@@ -1935,7 +1935,62 @@ with tab_active:
                 else: st.success(" No critical actions required. Portfolio is healthy.")
             st.divider()
 
-            sub_strat, sub_journal, sub_dna = st.tabs([" Strategy Detail", " Journal", " DNA Tool"])
+            sub_matrix, sub_strat, sub_journal, sub_dna = st.tabs([" 🧭 Decision Matrix", " 📊 Strategy Detail", " 📓 Journal", " 🧬 DNA Tool"])
+            
+            with sub_matrix:
+                st.subheader(" 🧭 Active Trade Decision Matrix")
+                st.caption("Top-Left: Ahead of schedule. Bottom-Right: Failing the clock (Capital Efficiency focus).")
+                
+                matrix_data = []
+                for idx, row in active_df.iterrows():
+                    strat = row['Strategy']
+                    bench = dynamic_benchmarks.get(strat, {})
+                    target_days = bench.get('dit', 45)
+                    target_profit = bench.get('pnl', 500) * row.get('lot_size', 1) * regime_mult
+                    
+                    pct_time = (row['Days Held'] / target_days) * 100 if target_days > 0 else 0
+                    pct_profit = (row['P&L'] / target_profit) * 100 if target_profit > 0 else 0
+                    
+                    matrix_data.append({
+                        'Trade': row['Name'],
+                        'Strategy': strat,
+                        'Pct Time Passed': pct_time,
+                        'Pct Target Profit': pct_profit,
+                        'P&L': row['P&L'],
+                        'Action': row['Action'],
+                        'Score': row['Urgency Score']
+                    })
+                    
+                if matrix_data:
+                    matrix_df = pd.DataFrame(matrix_data)
+                    fig_matrix = px.scatter(
+                        matrix_df, x='Pct Time Passed', y='Pct Target Profit', color='Action',
+                        hover_data=['Trade', 'Strategy', 'P&L'],
+                        title="Profit vs Time Progress (%)",
+                        color_discrete_map={
+                            "TAKE PROFIT": "#0f5132", "PREPARE EXIT": "#00cc96", 
+                            "HOLD": "#38bdf8", "WATCH": "#fbbf24", 
+                            "RISK REVIEW": "#fd7e14", "CRITICAL": "#dc3545",
+                            "KILL": "#842029", "STRUCTURAL FAILURE": "#842029",
+                            "COOKING": "#055160", "DAY 14 CHECK": "#6f42c1"
+                        }
+                    )
+                    
+                    # Add Quadrant Crosshairs
+                    fig_matrix.add_hline(y=100, line_dash="dash", line_color="rgba(148, 163, 184, 0.5)", annotation_text="Target Profit (100%)")
+                    fig_matrix.add_vline(x=100, line_dash="dash", line_color="rgba(148, 163, 184, 0.5)", annotation_text="Target Time (100%)")
+                    
+                    fig_matrix.update_layout(
+                        xaxis_title="% of Target Days Passed", 
+                        yaxis_title="% of Target Profit Reached",
+                        xaxis=dict(range=[0, max(120, matrix_df['Pct Time Passed'].max() + 10)]),
+                        yaxis=dict(range=[min(-20, matrix_df['Pct Target Profit'].min() - 10), max(120, matrix_df['Pct Target Profit'].max() + 10)])
+                    )
+                    
+                    fig_matrix = apply_chart_theme(fig_matrix)
+                    st.plotly_chart(fig_matrix, use_container_width=True)
+                else:
+                    st.info("No active trades for the matrix.")
             
             with sub_journal:
                 st.caption("Trades sorted by Urgency.")
