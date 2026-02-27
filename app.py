@@ -1939,7 +1939,7 @@ with tab_active:
             
             with sub_matrix:
                 st.subheader(" 🧭 Active Trade Decision Matrix")
-                st.caption("Top-Left: Ahead of schedule. Bottom-Right: Failing the clock (Capital Efficiency focus).")
+                st.caption("Trades categorized by time efficiency. Focus on eliminating 'Zombies' and harvesting 'Mature' trades.")
                 
                 matrix_data = []
                 for idx, row in active_df.iterrows():
@@ -1951,44 +1951,41 @@ with tab_active:
                     pct_time = (row['Days Held'] / target_days) * 100 if target_days > 0 else 0
                     pct_profit = (row['P&L'] / target_profit) * 100 if target_profit > 0 else 0
                     
+                    quadrant = "⏳ Developing (On Track)"
+                    if pct_profit >= 80 and pct_time <= 100: quadrant = "🌟 Star (Fast Winner)"
+                    elif pct_profit >= 80 and pct_time > 100: quadrant = "💰 Mature (Harvest Now)"
+                    elif pct_profit < 80 and pct_time > 100: quadrant = "🧟 Zombie (Capital Rot)"
+                    
                     matrix_data.append({
-                        'Trade': row['Name'],
-                        'Strategy': strat,
-                        'Pct Time Passed': pct_time,
-                        'Pct Target Profit': pct_profit,
-                        'P&L': row['P&L'],
-                        'Action': row['Action'],
-                        'Score': row['Urgency Score']
+                        'Trade': row['Name'], 'Strategy': strat, 'Quadrant': quadrant,
+                        'Time Passed': f"{pct_time:.0f}%", 'Profit Reached': f"{pct_profit:.0f}%",
+                        'P&L': row['P&L'], 'Days Held': row['Days Held'], 'Action': row['Action']
                     })
                     
                 if matrix_data:
                     matrix_df = pd.DataFrame(matrix_data)
-                    fig_matrix = px.scatter(
-                        matrix_df, x='Pct Time Passed', y='Pct Target Profit', color='Action',
-                        hover_data=['Trade', 'Strategy', 'P&L'],
-                        title="Profit vs Time Progress (%)",
-                        color_discrete_map={
-                            "TAKE PROFIT": "#0f5132", "PREPARE EXIT": "#00cc96", 
-                            "HOLD": "#38bdf8", "WATCH": "#fbbf24", 
-                            "RISK REVIEW": "#fd7e14", "CRITICAL": "#dc3545",
-                            "KILL": "#842029", "STRUCTURAL FAILURE": "#842029",
-                            "COOKING": "#055160", "DAY 14 CHECK": "#6f42c1"
-                        }
+                    
+                    # Top line summary metrics
+                    cq1, cq2, cq3, cq4 = st.columns(4)
+                    cq1.metric("🌟 Stars (Fast Money)", len(matrix_df[matrix_df['Quadrant'].str.contains("Star")]))
+                    cq2.metric("💰 Mature (Take Profit)", len(matrix_df[matrix_df['Quadrant'].str.contains("Mature")]))
+                    cq3.metric("⏳ Developing (Wait)", len(matrix_df[matrix_df['Quadrant'].str.contains("Developing")]))
+                    cq4.metric("🧟 Zombies (Cut)", len(matrix_df[matrix_df['Quadrant'].str.contains("Zombie")]))
+                    
+                    def color_quadrants(val):
+                        if 'Star' in str(val): return 'background-color: rgba(15, 81, 50, 0.4); font-weight: bold; color: #a3e635;'
+                        if 'Mature' in str(val): return 'background-color: rgba(0, 204, 150, 0.2); font-weight: bold; color: #6ee7b7;'
+                        if 'Developing' in str(val): return 'color: #94a3b8;'
+                        if 'Zombie' in str(val): return 'background-color: rgba(132, 32, 41, 0.4); font-weight: bold; color: #fca5a5;'
+                        return ''
+                    
+                    st.dataframe(
+                        matrix_df.style
+                        .map(color_quadrants, subset=['Quadrant'])
+                        .format({'P&L': '${:,.0f}'}), 
+                        use_container_width=True,
+                        hide_index=True
                     )
-                    
-                    # Add Quadrant Crosshairs
-                    fig_matrix.add_hline(y=100, line_dash="dash", line_color="rgba(148, 163, 184, 0.5)", annotation_text="Target Profit (100%)")
-                    fig_matrix.add_vline(x=100, line_dash="dash", line_color="rgba(148, 163, 184, 0.5)", annotation_text="Target Time (100%)")
-                    
-                    fig_matrix.update_layout(
-                        xaxis_title="% of Target Days Passed", 
-                        yaxis_title="% of Target Profit Reached",
-                        xaxis=dict(range=[0, max(120, matrix_df['Pct Time Passed'].max() + 10)]),
-                        yaxis=dict(range=[min(-20, matrix_df['Pct Target Profit'].min() - 10), max(120, matrix_df['Pct Target Profit'].max() + 10)])
-                    )
-                    
-                    fig_matrix = apply_chart_theme(fig_matrix)
-                    st.plotly_chart(fig_matrix, use_container_width=True)
                 else:
                     st.info("No active trades for the matrix.")
 
@@ -2591,27 +2588,49 @@ with tab_analytics:
                 
                 winners_df = expired_df[expired_df['P&L'] > 0].copy()
                 if not winners_df.empty:
-                    fig_harvest_hist = px.histogram(
-                        winners_df, x='Days Held', color='Strategy',
-                        marginal='box', hover_data=['Name', 'P&L'],
-                        title="Winning Trade Duration Distribution",
-                        barmode='overlay'
-                    )
-                    fig_harvest_hist.update_traces(opacity=0.75)
-                    fig_harvest_hist = apply_chart_theme(fig_harvest_hist)
-                    st.plotly_chart(fig_harvest_hist, use_container_width=True)
-                    
-                    # Calculate stats table
+                    # Clean horizontal range bar chart
+                    fig_harvest_range = go.Figure()
                     stats_list = []
+                    
                     for s in winners_df['Strategy'].unique():
                         s_wins = winners_df[winners_df['Strategy'] == s]['Days Held']
+                        if len(s_wins) < 2: continue
+                        
+                        p25 = s_wins.quantile(0.25)
+                        p50 = s_wins.median()
+                        p75 = s_wins.quantile(0.75)
+                        
+                        # The "Sweet Spot" Bar (25th to 75th percentile)
+                        fig_harvest_range.add_trace(go.Bar(
+                            y=[s], x=[p75 - p25], base=[p25], orientation='h',
+                            name=f"{s} Sweet Spot", marker_color='rgba(56, 189, 248, 0.6)',
+                            text=f"Optimal: {p25:.0f} - {p75:.0f}d", textposition='inside',
+                            hoverinfo='text', hovertext=f"{s}: Middle 50% of winners close between Day {p25:.0f} and {p75:.0f}"
+                        ))
+                        # Median Exit Dot
+                        fig_harvest_range.add_trace(go.Scatter(
+                            y=[s], x=[p50], mode='markers', 
+                            marker=dict(color='white', size=12, line=dict(color='#0f172a', width=2)),
+                            name='Median Exit', hoverinfo='text', hovertext=f"Median: {p50:.0f} Days", showlegend=False
+                        ))
+                        
                         stats_list.append({
                             'Strategy': s,
-                            'Most Common Exit (Median)': f"{s_wins.median():.0f} Days",
-                            'Early Harvest (25th %ile)': f"{s_wins.quantile(0.25):.0f} Days",
-                            'Late Harvest (75th %ile)': f"{s_wins.quantile(0.75):.0f} Days"
+                            'Early Harvest (25th %ile)': f"{p25:.0f} Days",
+                            'Most Common Exit (Median)': f"{p50:.0f} Days",
+                            'Late Harvest (75th %ile)': f"{p75:.0f} Days"
                         })
-                    st.dataframe(pd.DataFrame(stats_list), use_container_width=True)
+                        
+                    fig_harvest_range.update_layout(
+                        title="Optimal Harvest Zones (Middle 50% of Winning Trades)",
+                        barmode='overlay', xaxis_title="Days in Trade (DIT)", yaxis_title="Strategy",
+                        showlegend=False, height=max(250, len(stats_list) * 70),
+                        margin=dict(l=20, r=20, t=40, b=20)
+                    )
+                    fig_harvest_range = apply_chart_theme(fig_harvest_range)
+                    st.plotly_chart(fig_harvest_range, use_container_width=True)
+                    
+                    st.dataframe(pd.DataFrame(stats_list), use_container_width=True, hide_index=True)
                 else:
                     st.info("Need more closed winning trades to calculate the Harvest Window.")
 
