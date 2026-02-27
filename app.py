@@ -2531,6 +2531,35 @@ with tab_analytics:
                 else:
                     st.success("All active capital is performing near or above historical baselines.")
 
+                st.markdown("### 🌾 The Harvest Window Variance")
+                st.caption("Identifies the 'Sweet Spot' for exiting trades. When do your winners usually close?")
+                
+                winners_df = expired_df[expired_df['P&L'] > 0].copy()
+                if not winners_df.empty:
+                    fig_harvest_hist = px.histogram(
+                        winners_df, x='Days Held', color='Strategy',
+                        marginal='box', hover_data=['Name', 'P&L'],
+                        title="Winning Trade Duration Distribution",
+                        barmode='overlay'
+                    )
+                    fig_harvest_hist.update_traces(opacity=0.75)
+                    fig_harvest_hist = apply_chart_theme(fig_harvest_hist)
+                    st.plotly_chart(fig_harvest_hist, use_container_width=True)
+                    
+                    # Calculate stats table
+                    stats_list = []
+                    for s in winners_df['Strategy'].unique():
+                        s_wins = winners_df[winners_df['Strategy'] == s]['Days Held']
+                        stats_list.append({
+                            'Strategy': s,
+                            'Most Common Exit (Median)': f"{s_wins.median():.0f} Days",
+                            'Early Harvest (25th %ile)': f"{s_wins.quantile(0.25):.0f} Days",
+                            'Late Harvest (75th %ile)': f"{s_wins.quantile(0.75):.0f} Days"
+                        })
+                    st.dataframe(pd.DataFrame(stats_list), use_container_width=True)
+                else:
+                    st.info("Need more closed winning trades to calculate the Harvest Window.")
+
     with an_rolls: 
         st.subheader(" Roll Campaign Analysis")
         rolled_trades = df[df['Parent ID'] != ""].copy()
