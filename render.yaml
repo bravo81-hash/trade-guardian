@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: trade-guardian-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT api_server:app
+    envVars:
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: DRIVE_DB_FILE_NAME
+        value: trade_guardian_v4.db

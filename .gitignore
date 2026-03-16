@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+trade_guardian_v4.db
