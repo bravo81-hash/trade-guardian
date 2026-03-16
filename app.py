@@ -22,7 +22,9 @@ def initialize_session_state():
         'mae_stats': {},
         'last_cloud_sync': None,
         'show_conflict': False,
-        'show_pull_conflict': False
+        'show_pull_conflict': False,
+        'excluded_groups': [],
+        'group_filter_widget': []
     }
     for key, default in keys.items():
         if key not in st.session_state:
@@ -30,6 +32,57 @@ def initialize_session_state():
 
 initialize_session_state()
 # -----------------------------------------
+
+AUTO_EXCLUDE_GROUP_KEYWORDS = ('test', 'testing', 'experiment', 'exp', 'demo', 'sandbox', 'paper')
+
+PARSER_COLUMN_ALIASES = {
+    'name': {'name', 'symbol', 'trade_name'},
+    'group': {'group', 'strategy_group', 'group_name'},
+    'created_at': {'created_at', 'created', 'open_date', 'entry_date', 'date_opened', 'opened_at'},
+    'expiration': {'expiration', 'expiry', 'expires', 'exp_date', 'close_date', 'closed_at', 'exit_date'},
+    'total_return': {'total_return', 'total_return_dollar', 'total_return_usd', 'pnl', 'p_l', 'profit_loss', 'net_pl'},
+    'net_debit_credit': {'net_debit_credit', 'net_debit', 'debit_credit', 'net_price', 'debit', 'credit'},
+    'theta': {'theta'},
+    'delta': {'delta'},
+    'gamma': {'gamma'},
+    'vega': {'vega'},
+    'iv': {'iv', 'implied_volatility'},
+    'link': {'link', 'url', 'trade_url', 'optionstrat_link'},
+    'high': {'high', 'max_profit', 'max_gain'},
+    'low': {'low', 'max_loss', 'max_drawdown'},
+    'max_profit': {'max_profit'},
+    'max_loss': {'max_loss'},
+    'quantity': {'quantity', 'qty', 'contracts'},
+    'entry_price': {'entry_price', 'open_price', 'entry', 'price_open', 'cost'},
+    'close_price': {'close_price', 'mark', 'exit_price', 'close', 'price_close'}
+}
+
+HEADER_NAME_ALIASES = PARSER_COLUMN_ALIASES['name']
+HEADER_PNL_ALIASES = PARSER_COLUMN_ALIASES['total_return']
+
+def normalize_header_key(value):
+    return re.sub(r'[^a-z0-9]+', '_', str(value).strip().lower()).strip('_')
+
+def normalize_group_value(value):
+    group = str(value).strip()
+    if not group or group.lower() in {'nan', 'none', 'null'}:
+        return "Uncategorized"
+    return group
+
+def detect_header_row_from_preview(preview_df):
+    if preview_df is None or preview_df.empty:
+        return 0
+    for idx, row in preview_df.head(35).iterrows():
+        normalized_values = {normalize_header_key(v) for v in row.values if str(v).strip() != ''}
+        if 'name' in normalized_values and normalized_values.intersection(HEADER_PNL_ALIASES):
+            return int(idx)
+    return 0
+
+def get_first_value(row, keys, default=None):
+    for key in keys:
+        if key in row and pd.notnull(row[key]) and str(row[key]).strip() != '':
+            return row[key]
+    return default
 
 # --- GOOGLE DRIVE IMPORTS ---
 try:
@@ -808,154 +861,211 @@ def reconstruct_daily_pnl(trades_df):
     return daily_pnl_dict
 
 # --- SMART FILE PARSER ---
+def build_parser_column_map(columns):
+    mapping = {}
+    used_canonicals = set()
+    for col in columns:
+        norm = normalize_header_key(col)
+        for canonical, aliases in PARSER_COLUMN_ALIASES.items():
+            if norm in aliases and canonical not in used_canonicals:
+                mapping[col] = canonical
+                used_canonicals.add(canonical)
+                break
+    return mapping
+
+def attach_excel_hyperlinks(file, header_row, df_raw, column_map):
+    link_raw_col = None
+    for raw_col, canonical in column_map.items():
+        if canonical == 'link':
+            link_raw_col = raw_col
+            break
+    if link_raw_col is None:
+        return df_raw
+    try:
+        file.seek(0)
+        wb = load_workbook(file, data_only=False)
+        sheet = wb.active
+        excel_header_row = header_row + 1
+        link_col_idx = None
+        target_key = normalize_header_key(link_raw_col)
+        for cell in sheet[excel_header_row]:
+            cell_key = normalize_header_key(cell.value)
+            if cell_key == target_key or cell_key in PARSER_COLUMN_ALIASES['link']:
+                link_col_idx = cell.col_idx
+                break
+        if not link_col_idx:
+            return df_raw
+        links = []
+        for i in range(len(df_raw)):
+            excel_row_idx = excel_header_row + 1 + i
+            cell = sheet.cell(row=excel_row_idx, column=link_col_idx)
+            url = ""
+            if cell.hyperlink and cell.hyperlink.target:
+                url = cell.hyperlink.target
+            elif cell.value and str(cell.value).startswith('=HYPERLINK'):
+                parts = str(cell.value).split('"')
+                if len(parts) > 1:
+                    url = parts[1]
+            links.append(url if url else "")
+        df_raw[link_raw_col] = links
+    except Exception:
+        pass
+    return df_raw
+
 def parse_optionstrat_file(file, file_type, config_dict):
     try:
+        file_name = str(getattr(file, 'name', '')).lower()
         df_raw = None
-        if file.name.endswith(('.xlsx', '.xls')):
+        header_row = 0
+
+        if file_name.endswith(('.xlsx', '.xls')):
             try:
-                df_temp = pd.read_excel(file, header=None)
-                header_row = 0
-                for i, row in df_temp.head(30).iterrows():
-                    row_vals = [str(v).strip() for v in row.values]
-                    if "Name" in row_vals and "Total Return $" in row_vals:
-                        header_row = i
-                        break
+                file.seek(0)
+                preview = pd.read_excel(file, header=None, nrows=40)
+                header_row = detect_header_row_from_preview(preview)
                 file.seek(0)
                 df_raw = pd.read_excel(file, header=header_row)
-                
-                if 'Link' in df_raw.columns:
-                    try:
-                        file.seek(0)
-                        wb = load_workbook(file, data_only=False)
-                        sheet = wb.active
-                        excel_header_row = header_row + 1
-                        link_col_idx = None
-                        for cell in sheet[excel_header_row]:
-                            if str(cell.value).strip() == "Link":
-                                link_col_idx = cell.col_idx
-                                break
-                        if link_col_idx:
-                            links = []
-                            for i in range(len(df_raw)):
-                                excel_row_idx = excel_header_row + 1 + i
-                                cell = sheet.cell(row=excel_row_idx, column=link_col_idx)
-                                url = ""
-                                if cell.hyperlink: url = cell.hyperlink.target
-                                elif cell.value and str(cell.value).startswith('=HYPERLINK'):
-                                    try:
-                                        parts = str(cell.value).split('"')
-                                        if len(parts) > 1: url = parts[1]
-                                    except: pass
-                                links.append(url if url else "")
-                            df_raw['Link'] = links
-                    except: pass
-            except: pass
+                column_map = build_parser_column_map(df_raw.columns)
+                df_raw = attach_excel_hyperlinks(file, header_row, df_raw, column_map)
+            except Exception:
+                df_raw = None
 
         if df_raw is None:
-            file.seek(0)
-            content = file.getvalue().decode("utf-8", errors='ignore')
-            lines = content.split('\n')
-            header_row = 0
-            for i, line in enumerate(lines[:30]):
-                if "Name" in line and "Total Return" in line:
-                    header_row = i
-                    break
+            try:
+                file.seek(0)
+                preview_csv = pd.read_csv(file, header=None, nrows=40, dtype=str, engine='python', on_bad_lines='skip')
+                header_row = detect_header_row_from_preview(preview_csv)
+            except Exception:
+                header_row = 0
             file.seek(0)
             df_raw = pd.read_csv(file, skiprows=header_row)
+
+        if df_raw is None or df_raw.empty:
+            return []
+
+        column_map = build_parser_column_map(df_raw.columns)
+        df_norm = df_raw.rename(columns=column_map).copy()
+        if 'name' not in df_norm.columns or 'total_return' not in df_norm.columns:
+            return []
 
         parsed_trades = []
         current_trade = None
         current_legs = []
 
+        def parse_leg_value(leg_row, column_name, fallback_idx):
+            if column_name in leg_row and pd.notnull(leg_row[column_name]):
+                return clean_num(leg_row[column_name])
+            try:
+                return clean_num(leg_row.iloc[fallback_idx])
+            except Exception:
+                return 0.0
+
         def finalize_trade(trade_data, legs, f_type):
-            if not trade_data.any(): return None
-            
-            name = str(trade_data.get('Name', ''))
-            group = str(trade_data.get('Group', '')) 
-            created = trade_data.get('Created At', '')
-            try: start_dt = pd.to_datetime(created)
-            except: return None 
+            if trade_data is None or trade_data.empty:
+                return None
+
+            name = str(trade_data.get('name', '')).strip()
+            if not name or name.lower() in {'nan', 'symbol'}:
+                return None
+            group = normalize_group_value(trade_data.get('group', ''))
+
+            created = get_first_value(trade_data, ['created_at', 'expiration'], '')
+            try:
+                start_dt = pd.to_datetime(created)
+                if pd.isna(start_dt):
+                    return None
+            except Exception:
+                return None
 
             strat = get_strategy_dynamic(name, group, config_dict)
-            link = str(trade_data.get('Link', ''))
-            if link == 'nan' or link == 'Open': link = "" 
-            
-            pnl = clean_num(trade_data.get('Total Return $', 0))
-            debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
-            theta = clean_num(trade_data.get('Theta', 0))
-            delta = clean_num(trade_data.get('Delta', 0))
-            gamma = clean_num(trade_data.get('Gamma', 0))
-            vega = clean_num(trade_data.get('Vega', 0))
-            iv = clean_num(trade_data.get('IV', 0))
+            link = str(trade_data.get('link', '')).strip()
+            if link.lower() in {'nan', 'open'}:
+                link = ""
+
+            pnl = clean_num(trade_data.get('total_return', 0))
+            debit = abs(clean_num(trade_data.get('net_debit_credit', 0)))
+            theta = clean_num(trade_data.get('theta', 0))
+            delta = clean_num(trade_data.get('delta', 0))
+            gamma = clean_num(trade_data.get('gamma', 0))
+            vega = clean_num(trade_data.get('vega', 0))
+            iv = clean_num(trade_data.get('iv', 0))
 
             exit_dt = None
             try:
-                raw_exp = trade_data.get('Expiration')
+                raw_exp = trade_data.get('expiration')
                 if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
                     exit_dt = pd.to_datetime(raw_exp)
-            except: pass
+            except Exception:
+                pass
 
             days_held = 1
-            if exit_dt and f_type == "History": days_held = (exit_dt - start_dt).days
-            else: days_held = (datetime.now() - start_dt).days
-            if days_held < 1: days_held = 1
+            if exit_dt is not None and f_type == "History":
+                days_held = (exit_dt - start_dt).days
+            else:
+                days_held = (datetime.now() - start_dt).days
+            if days_held < 1:
+                days_held = 1
 
             strat_config = config_dict.get(strat, {})
-            typical_debit = strat_config.get('debit_per_lot', 5000)
-            
+            typical_debit = strat_config.get('debit_per_lot', strat_config.get('typical_debit', 5000))
             lot_match = re.search(r'(\d+)\s*(?:LOT|L\b)', name, re.IGNORECASE)
-            if lot_match: lot_size = int(lot_match.group(1))
-            else: lot_size = int(round(debit / typical_debit))
-            if lot_size < 1: lot_size = 1
+            if lot_match:
+                lot_size = int(lot_match.group(1))
+            else:
+                lot_size = int(round(debit / typical_debit)) if typical_debit else 1
+            if lot_size < 1:
+                lot_size = 1
 
             put_pnl = 0.0
             call_pnl = 0.0
-            
             if f_type == "History":
                 for leg in legs:
-                    if len(leg) < 5: continue
-                    sym = str(leg.iloc[0]) 
-                    if not sym.startswith('.'): continue
-                    try:
-                        qty = clean_num(leg.iloc[1])
-                        entry = clean_num(leg.iloc[2])
-                        close_price = clean_num(leg.iloc[4])
-                        leg_pnl = (close_price - entry) * qty * 100
-                        if 'P' in sym and 'C' not in sym: put_pnl += leg_pnl
-                        elif 'C' in sym and 'P' not in sym: call_pnl += leg_pnl
-                        elif re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
-                        elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
-                    except: pass
-            
+                    sym = str(leg.get('name', leg.iloc[0] if len(leg) > 0 else '')).strip()
+                    if not sym.startswith('.'):
+                        continue
+                    qty = parse_leg_value(leg, 'quantity', 1)
+                    entry = parse_leg_value(leg, 'entry_price', 2)
+                    close_price = parse_leg_value(leg, 'close_price', 4)
+                    leg_pnl = (close_price - entry) * qty * 100
+                    if 'P' in sym and 'C' not in sym:
+                        put_pnl += leg_pnl
+                    elif 'C' in sym and 'P' not in sym:
+                        call_pnl += leg_pnl
+                    elif re.search(r'[0-9]P[0-9]', sym):
+                        put_pnl += leg_pnl
+                    elif re.search(r'[0-9]C[0-9]', sym):
+                        call_pnl += leg_pnl
+
             t_id = generate_id(name, strat, start_dt)
             return {
                 'id': t_id, 'name': name, 'strategy': strat, 'start_dt': start_dt,
                 'exit_dt': exit_dt, 'days_held': days_held, 'debit': debit,
-                'lot_size': lot_size, 'pnl': pnl, 
+                'lot_size': lot_size, 'pnl': pnl,
                 'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
                 'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link,
                 'group': group
             }
 
-        cols = df_raw.columns
-        col_names = [str(c) for c in cols]
-        if 'Name' not in col_names or 'Total Return $' not in col_names:
-            return []
-
-        for index, row in df_raw.iterrows():
-            name_val = str(row['Name'])
-            if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
+        for _, row in df_norm.iterrows():
+            name_val = str(row.get('name', '')).strip()
+            if not name_val or name_val.lower() in {'nan', 'symbol'}:
+                continue
+            if name_val.startswith('.'):
                 if current_trade is not None:
-                    res = finalize_trade(current_trade, current_legs, file_type)
-                    if res: parsed_trades.append(res)
-                current_trade = row
-                current_legs = []
-            elif name_val.startswith('.'):
-                current_legs.append(row)
-        
+                    current_legs.append(row)
+                continue
+            if current_trade is not None:
+                result = finalize_trade(current_trade, current_legs, file_type)
+                if result:
+                    parsed_trades.append(result)
+            current_trade = row
+            current_legs = []
+
         if current_trade is not None:
-             res = finalize_trade(current_trade, current_legs, file_type)
-             if res: parsed_trades.append(res)
+            result = finalize_trade(current_trade, current_legs, file_type)
+            if result:
+                parsed_trades.append(result)
+
         return parsed_trades
     except Exception as e:
         print(f"Parser Error: {e}")
@@ -983,7 +1093,7 @@ def sync_data(file_list, file_type):
         try:
             trades_data = parse_optionstrat_file(file, file_type, config_dict)
             if not trades_data:
-                log.append(f" {file.name}: Skipped (No valid trades found)")
+                log.append(f" {file.name}: Skipped (No valid trades found; check headers like Name and Total Return/PnL)")
                 continue
 
             for t in trades_data:
@@ -1158,6 +1268,7 @@ def load_data():
         'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 
         'Entry Date', 'Exit Date', 'Notes', 'Tags', 
         'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link',
+        'Group',
         'lot_size', 'Debit/Lot', 'ROI', 'Daily Yield %', 
         'Ann. ROI', 'Theta Pot.', 'Theta Eff.', 
         'Theta/Cap %', 'Ticker', 'Stability', 'Grade', 'Reason', 'P&L Vol'
@@ -1186,12 +1297,14 @@ def load_data():
             'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
             'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes',
             'tags': 'Tags', 'parent_id': 'Parent ID', 
-            'put_pnl': 'Put P&L', 'call_pnl': 'Call P&L', 'iv': 'IV', 'link': 'Link'
+            'put_pnl': 'Put P&L', 'call_pnl': 'Call P&L', 'iv': 'IV', 'link': 'Link',
+            'original_group': 'Group'
         })
         
-        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link']
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link', 'Group']
         for col in required_cols:
-            if col not in df.columns: df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
+            if col not in df.columns:
+                df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link', 'Group'] else 0.0
         
         numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
         for c in numeric_cols:
@@ -1218,6 +1331,7 @@ def load_data():
         df['Ticker'] = df['Name'].apply(extract_ticker)
         
         df['Parent ID'] = df['Parent ID'].astype(str).str.strip().replace('nan', '').replace('None', '')
+        df['Group'] = df['Group'].apply(normalize_group_value)
         
         # V150: Improved stability formula
         df['Stability'] = df.get('Stability_Score', np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0))
@@ -1278,6 +1392,72 @@ def load_snapshots():
         return df
     except: return pd.DataFrame()
     finally: conn.close()
+
+def get_auto_excluded_groups(groups):
+    auto_excluded = []
+    for group in groups:
+        g_lower = group.lower()
+        if any(keyword in g_lower for keyword in AUTO_EXCLUDE_GROUP_KEYWORDS):
+            auto_excluded.append(group)
+    return sorted(set(auto_excluded))
+
+def render_sidebar_group_filters(raw_df):
+    with st.sidebar.expander(" Group Filters", expanded=False):
+        if raw_df.empty or 'Group' not in raw_df.columns:
+            st.caption("Upload and process trades to enable group filters.")
+            st.session_state['excluded_groups'] = []
+            st.session_state['group_filter_widget'] = []
+            return raw_df
+
+        groups = sorted(raw_df['Group'].dropna().astype(str).map(normalize_group_value).unique().tolist(), key=lambda x: x.lower())
+        valid_selected = [g for g in st.session_state.get('group_filter_widget', []) if g in groups]
+        if valid_selected != st.session_state.get('group_filter_widget', []):
+            st.session_state['group_filter_widget'] = valid_selected
+
+        c1, c2 = st.columns(2)
+        if c1.button("Include all", key="groups_include_all_btn"):
+            st.session_state['group_filter_widget'] = []
+        if c2.button("Auto-exclude likely test groups", key="groups_auto_exclude_btn"):
+            st.session_state['group_filter_widget'] = get_auto_excluded_groups(groups)
+
+        excluded_groups = st.multiselect(
+            "Excluded groups",
+            options=groups,
+            key='group_filter_widget',
+            help="Excluded groups stay in the database but are removed from all portfolio calculations."
+        )
+        st.session_state['excluded_groups'] = excluded_groups
+        excluded_set = set(excluded_groups)
+
+        included_count = len(groups) - len(excluded_set)
+        excluded_count = len(excluded_set)
+        filtered_df = raw_df[~raw_df['Group'].isin(excluded_set)].copy()
+        universe_count = len(filtered_df)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Included", included_count)
+        m2.metric("Excluded", excluded_count)
+        m3.metric("Universe", universe_count)
+
+        if excluded_set:
+            st.caption(f"Active exclusions: {', '.join(sorted(excluded_set))}")
+        return filtered_df
+
+def apply_current_group_filter(raw_df):
+    if raw_df.empty or 'Group' not in raw_df.columns:
+        return raw_df
+    excluded = set(st.session_state.get('excluded_groups', []))
+    if not excluded:
+        return raw_df
+    return raw_df[~raw_df['Group'].isin(excluded)].copy()
+
+def filter_snapshots_for_visible_trades(snaps_df, trades_df):
+    if snaps_df.empty:
+        return snaps_df
+    if trades_df.empty or 'id' not in trades_df.columns or 'trade_id' not in snaps_df.columns:
+        return pd.DataFrame()
+    visible_trade_ids = set(trades_df['id'].astype(str))
+    return snaps_df[snaps_df['trade_id'].astype(str).isin(visible_trade_ids)].copy()
 
 # --- INTELLIGENCE FUNCTIONS ---
 def get_dynamic_targets(history_df, percentile):
@@ -1525,17 +1705,63 @@ with st.sidebar.expander("1.  STARTUP (Restore Local)", expanded=False):
 
 st.sidebar.markdown(" *then...*")
 with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
-    active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
-    history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
-    if st.button(" Process & Reconcile"):
+    st.caption("Primary workflow: upload one consolidated Active file and one consolidated Closed file.")
+    active_up = st.file_uploader(
+        "Active Trades (single file)",
+        type=['xlsx', 'xls', 'csv'],
+        accept_multiple_files=False,
+        key="act_single"
+    )
+    history_up = st.file_uploader(
+        "History / Closed Trades (single file)",
+        type=['xlsx', 'xls', 'csv'],
+        accept_multiple_files=False,
+        key="hist_single"
+    )
+    if active_up:
+        st.caption(f"Active file selected: `{active_up.name}`")
+    if history_up:
+        st.caption(f"Closed file selected: `{history_up.name}`")
+    if st.button(" Process & Reconcile", key="process_primary"):
         logs = []
-        if active_up: logs.extend(sync_data(active_up, "Active"))
-        if history_up: logs.extend(sync_data(history_up, "History"))
-        if logs:
-            for l in logs: st.write(l)
+        if active_up:
+            logs.extend(sync_data(active_up, "Active"))
+        if history_up:
+            logs.extend(sync_data(history_up, "History"))
+        if not active_up and not history_up:
+            st.warning("Upload at least one file to process.")
+        elif logs:
+            st.code("\n".join(logs))
             st.cache_data.clear()
             st.success("Sync Complete!")
             auto_sync_if_connected()
+
+    with st.expander("Advanced / Legacy Import (multi-file)", expanded=False):
+        legacy_active = st.file_uploader(
+            "Legacy Active Trades (multi-file)",
+            type=['xlsx', 'xls', 'csv'],
+            accept_multiple_files=True,
+            key="act_legacy"
+        )
+        legacy_history = st.file_uploader(
+            "Legacy History / Closed (multi-file)",
+            type=['xlsx', 'xls', 'csv'],
+            accept_multiple_files=True,
+            key="hist_legacy"
+        )
+        if st.button(" Process Legacy Files", key="process_legacy"):
+            logs = []
+            if legacy_active:
+                logs.extend(sync_data(legacy_active, "Active"))
+            if legacy_history:
+                logs.extend(sync_data(legacy_history, "History"))
+            if not legacy_active and not legacy_history:
+                st.warning("Upload one or more legacy files to process.")
+            elif logs:
+                st.code("\n".join(logs))
+                st.cache_data.clear()
+                st.success("Legacy sync complete!")
+                auto_sync_if_connected()
 
 st.sidebar.markdown(" *finally...*")
 with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
@@ -1581,6 +1807,9 @@ with st.sidebar.expander(" Maintenance", expanded=False):
         st.cache_data.clear()
         st.success("Wiped & Reset.")
         st.rerun()
+
+raw_df = load_data()
+_ = render_sidebar_group_filters(raw_df)
 
 st.sidebar.divider()
 st.sidebar.header(" Portfolio Settings")
@@ -1697,7 +1926,9 @@ def calculate_decision_ladder(row, benchmarks_dict):
     return action, score, reason, juice_val, juice_type
 
 # --- MAIN APP ---
-df = load_data()
+df = apply_current_group_filter(raw_df)
+if st.session_state.get('excluded_groups'):
+    st.caption(f"Group filter active: excluding {len(st.session_state['excluded_groups'])} group(s) from analytics.")
 BASE_CONFIG = {
     '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
     '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
@@ -2404,7 +2635,7 @@ with tab_analytics:
         r_corr, r_mae = st.tabs([" Correlation Matrix", " MAE vs MFE (Edge Analysis)"])
         with r_corr:
             st.subheader("Strategy Correlation (Daily P&L)")
-            snaps = load_snapshots()
+            snaps = filter_snapshots_for_visible_trades(load_snapshots(), df)
             if not snaps.empty:
                 fig_rolling_corr = rolling_correlation_matrix(snaps)
                 if fig_rolling_corr:
@@ -2439,7 +2670,7 @@ with tab_analytics:
         st.subheader("⏳ Profit Timing & Capital Efficiency")
         st.caption("Analyze WHERE in the trade duration the profit is actually made to optimize churn.")
         
-        snaps = load_snapshots()
+        snaps = filter_snapshots_for_visible_trades(load_snapshots(), df)
         all_lifecycle_data = []
         
         strategies_avail = df['Strategy'].unique()
