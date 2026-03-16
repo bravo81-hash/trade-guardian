@@ -1,2003 +1,2802 @@
-import sys
-import os
-import json
-import sqlite3
-import asyncio
-import math
-import shutil
-import io
-from datetime import datetime, date, timedelta
-import numpy as np
+import streamlit as st
 import pandas as pd
-import scipy.stats as si
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QTabWidget, QSplitter, QTreeWidget, QTreeWidgetItem, QTextEdit, 
-    QLabel, QPushButton, QGroupBox, QSpinBox, QDoubleSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QComboBox, QSlider,
-    QLineEdit, QInputDialog, QDialog, QFormLayout, QDialogButtonBox, QGridLayout,
-    QSizePolicy, QMenu, QDockWidget, QCheckBox
-)
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPointF, QRectF
-from PyQt6.QtGui import QFont, QColor, QPalette, QPainter, QPicture, QPen, QAction
-import pyqtgraph as pg
-from ib_insync import IB, util, Contract, Stock, ComboLeg, LimitOrder, Index, Option
-import qasync
+import numpy as np
+import io
+import plotly.express as px
+import plotly.graph_objects as go
+import sqlite3
+import os
+import re
+import json
+import time
+from datetime import datetime, timezone, timedelta
+from openpyxl import load_workbook
+from scipy import stats 
+from scipy.spatial.distance import cdist 
+
+# --- V150: ROBUST STATE INITIALIZATION ---
+def initialize_session_state():
+    """Improved State Management replacing globals()"""
+    keys = {
+        'velocity_stats': {},
+        'mae_stats': {},
+        'last_cloud_sync': None,
+        'show_conflict': False,
+        'show_pull_conflict': False
+    }
+    for key, default in keys.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+initialize_session_state()
+# -----------------------------------------
 
 # --- GOOGLE DRIVE IMPORTS ---
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-    GOOGLE_DRIVE_AVAILABLE = True
+    GOOGLE_DEPS_INSTALLED = True
 except ImportError:
-    GOOGLE_DRIVE_AVAILABLE = False
+    GOOGLE_DEPS_INSTALLED = False
 
-# ==============================================================================
-# --- CUSTOM UI COMPONENTS ---
-# ==============================================================================
-class SortableTreeWidgetItem(QTreeWidgetItem):
-    def __lt__(self, other):
-        column = self.treeWidget().sortColumn()
-        text1 = self.text(column)
-        text2 = other.text(column)
-        try: return float(text1.replace('$', '').replace(',', '').replace('%', '').strip()) < float(text2.replace('$', '').replace(',', '').replace('%', '').strip())
-        except ValueError: return text1 < text2
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
 
-class GroupStrategyDialog(QDialog):
-    def __init__(self, default_ticker, existing_strategies, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Create Strategy Combo")
-        self.setMinimumWidth(350)
-        self.setStyleSheet("QDialog { background-color: #0d1117; color: #c9d1d9; } QLineEdit, QComboBox { background: #010409; color: #c9d1d9; border: 1px solid #30363d; padding: 6px; font-weight: bold;} QLabel { color: #8b949e; font-weight: bold; }")
-        layout = QFormLayout(self)
-        self.ticker_input = QLineEdit(default_ticker)
-        layout.addRow("Underlying:", self.ticker_input)
-        self.strategy_input = QComboBox()
-        self.strategy_input.setEditable(True)
-        self.strategy_input.addItems(existing_strategies)
-        layout.addRow("Strategy Group:", self.strategy_input)
-        self.combo_input = QLineEdit()
-        layout.addRow("Combo Name:", self.combo_input)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addRow(btns)
-    def get_data(self): return self.ticker_input.text().upper().strip(), self.strategy_input.currentText().strip(), self.combo_input.text().strip()
+# --- UI OVERHAUL: CSS INJECTION ---
+def inject_custom_css():
+    st.markdown("""
+        <style>
+        /* IMPORT FONTS */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap');
 
-class EmittingStream(QObject):
-    textWritten = pyqtSignal(str)
-    def write(self, text): self.textWritten.emit(str(text))
-    def flush(self): pass
+        /* MAIN APP BACKGROUND */
+        .stApp {
+            background-color: #0f172a; /* Slate 900 */
+            color: #e2e8f0; /* Slate 200 */
+            font-family: 'Inter', sans-serif;
+        }
 
-# ==============================================================================
-# --- NATIVE CANDLESTICK CHARTING ENGINE ---
-# ==============================================================================
-class TVViewBox(pg.ViewBox):
-    def __init__(self, *args, **kwds):
-        super().__init__(*args, **kwds)
-        self.setMouseMode(self.PanMode)
+        /* SIDEBAR */
+        [data-testid="stSidebar"] {
+            background-color: #020617; /* Slate 950 */
+            border-right: 1px solid #1e293b;
+        }
 
-class CandlestickItem(pg.GraphicsObject):
-    def __init__(self, data):
-        pg.GraphicsObject.__init__(self)
-        self.data = data
-        self.generatePicture()
-    def generatePicture(self):
-        self.picture = QPicture()
-        p = QPainter(self.picture)
-        p.setPen(pg.mkPen('#8b949e', width=1))
-        w = 86400 * 0.2
-        for (t, open_price, close_price, low_price, high_price) in self.data:
-            p.drawLine(QPointF(t, low_price), QPointF(t, high_price))
-            p.setBrush(pg.mkBrush('#f85149' if open_price > close_price else '#3fb950'))
-            p.drawRect(QRectF(t - w, open_price, w * 2, close_price - open_price))
-        p.end()
-    def paint(self, p, *args): p.drawPicture(0, 0, self.picture)
-    def boundingRect(self): return QRectF(self.picture.boundingRect())
+        /* HEADERS */
+        h1, h2, h3 {
+            color: #f1f5f9 !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.025em;
+        }
 
-# ==============================================================================
-# --- MAIN APPLICATION WINDOW ---
-# ==============================================================================
-class BVSLaunchpad(QMainWindow):
+        /* GRADIENT TEXT CLASS */
+        .gradient-text {
+            background: linear-gradient(to right, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+        }
+
+        /* METRIC CARDS - COMPACT VERSION */
+        div[data-testid="stMetric"] {
+            background-color: rgba(30, 41, 59, 0.4); /* Slate 800 with opacity */
+            padding: 10px 15px !important; /* REDUCED PADDING */
+            border-radius: 8px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+            min-height: 80px; /* Force smaller height */
+        }
+        div[data-testid="stMetric"]:hover {
+            transform: translateY(-2px);
+            border-color: rgba(56, 189, 248, 0.3);
+            box-shadow: 0 10px 30px -10px rgba(56, 189, 248, 0.1);
+        }
+        [data-testid="stMetricLabel"] {
+            color: #94a3b8 !important; /* Slate 400 */
+            font-size: 0.75rem !important; /* Smaller Label */
+            margin-bottom: 0px !important;
+        }
+        [data-testid="stMetricValue"] {
+            color: #f8fafc !important; /* Slate 50 */
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.5rem !important; /* Compact Value */
+            padding-bottom: 0px !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-size: 0.75rem !important;
+        }
+
+        /* EXPANDERS (GLASSMORPHISM) */
+        div[data-testid="stExpander"] {
+            background-color: rgba(30, 41, 59, 0.3);
+            border: 1px solid rgba(56, 189, 248, 0.1);
+            border-radius: 12px;
+        }
+        
+        /* TABS - BOLD HEADERS */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 24px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            white-space: pre-wrap;
+            background-color: transparent;
+            border-radius: 4px;
+            color: #94a3b8;
+            font-weight: 800 !important; /* BOLD LETTERS */
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            color: #38bdf8;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: transparent !important;
+            color: #38bdf8 !important;
+            border-bottom: 2px solid #38bdf8;
+        }
+
+        /* DATAFRAMES */
+        [data-testid="stDataFrame"] {
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+        }
+
+        /* BUTTONS */
+        .stButton button {
+            background-color: #38bdf8;
+            color: #0f172a;
+            font-weight: 600;
+            border-radius: 8px;
+            border: none;
+            transition: all 0.3s ease;
+        }
+        .stButton button:hover {
+            background-color: #0ea5e9;
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+        }
+        div[data-testid="stButton"] button[kind="secondary"] {
+            background-color: transparent;
+            border: 1px solid #475569;
+            color: #cbd5e1;
+        }
+
+        /* ALERTS */
+        div[data-baseweb="notification"] {
+            border-radius: 8px;
+        }
+        
+        </style>
+    """, unsafe_allow_html=True)
+
+inject_custom_css()
+
+# --- PLOTLY THEME CONFIG ---
+def apply_chart_theme(fig):
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Inter, sans-serif", color="#94a3b8"),
+        title_font=dict(family="Inter, sans-serif", size=20, color="#f1f5f9"),
+        hoverlabel=dict(bgcolor="#1e293b", font_size=14, font_family="JetBrains Mono"),
+        colorway=['#38bdf8', '#34d399', '#818cf8', '#f472b6', '#fbbf24'],
+        xaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
+        yaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
+    )
+    return fig
+
+# --- DEBUG BANNER ---
+st.markdown("""
+    <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 8px 16px; margin-bottom: 20px; font-size: 0.8rem; color: #38bdf8; display: flex; align-items: center; gap: 10px;">
+        <i class="fas fa-rocket"></i> 
+        <span>RUNNING VERSION: v150.0 (Quant Logic + State Management Overhaul)</span>
+    </div>
+""", unsafe_allow_html=True)
+
+# --- HERO HEADER ---
+st.markdown("""
+    <div style="margin-bottom: 30px;">
+        <div style="display: inline-block; padding: 4px 12px; background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); border-radius: 20px; color: #38bdf8; font-size: 0.75rem; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.05em;">
+            INSTITUTIONAL GRADE
+        </div>
+        <h1 style="font-size: 3.5rem; line-height: 1.1; margin-bottom: 10px;">
+            Allantis <span class="gradient-text">Trade Guardian</span>
+        </h1>
+    </div>
+""", unsafe_allow_html=True)
+
+# --- DATABASE CONSTANTS ---
+DB_NAME = "trade_guardian_v4.db"
+SCOPES = ['https://www.googleapis.com/auth/drive']
+
+# --- V150: CLOUD SYNC ENGINE w/ EXPONENTIAL BACKOFF ---
+class DriveManager:
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle("BVS Launchpad - Trading OS")
-        self.setMinimumSize(1200, 800)
-        self.setGeometry(50, 50, 1600, 950)
+        self.creds = None
+        self.service = None
+        self.is_connected = False
+        self.cached_file_id = None
         
-        self.ib = IB()
-        self.db_conn = None
-        self.current_df = None 
-        self.working_basket = [] 
-        self.chain_strikes = []
-        self.current_chain_spot = 0.0 
-        self.current_risk_data = None 
-        self.active_chain_contracts = [] 
-        self.active_strategies_file = os.path.join(os.path.dirname(__file__), "active_strategies.json")
-        self.drive_service = None
+        if 'gcp_service_account' in st.secrets:
+            try:
+                service_account_info = st.secrets["gcp_service_account"]
+                self.creds = service_account.Credentials.from_service_account_info(
+                    service_account_info, scopes=SCOPES)
+                self.service = build('drive', 'v3', credentials=self.creds)
+                self.is_connected = True
+            except Exception as e:
+                st.error(f"Cloud Config Error: {e}")
 
-        self.apply_theme()
-        self.init_database()
-        self.build_ui()
-        
-        sys.stdout = EmittingStream(textWritten=self.normal_output_written)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] BVS Launchpad Initialized.")
-        QTimer.singleShot(500, self.connect_to_ibkr)
-
-    def apply_theme(self):
-        self.setStyleSheet("""
-            * { font-family: Inter, Roboto, Helvetica, Arial, sans-serif; }
-            QMainWindow { background-color: #0B0E11; } 
-            QWidget { color: #FFFFFF; background-color: #0B0E11; }
-            QTabWidget::pane { border: 1px solid #1C212A; background: #151921; border-radius: 4px; }
-            QTabBar::tab { background: #151921; border: 1px solid #1C212A; padding: 6px 14px; color: #90A4AE; font-weight: bold; font-size: 13px; border-top-left-radius: 4px; border-top-right-radius: 4px;}
-            QTabBar::tab:selected { background: #0B0E11; color: #26A69A; border-bottom: 2px solid #26A69A; }
-            QTreeWidget, QTableWidget { background-color: #0B0E11; color: #FFFFFF; gridline-color: #1C212A; border: 1px solid #1C212A; font-size: 12px; alternate-background-color: #151921;}
-            QTreeWidget::item, QTableWidget::item { padding: 4px; border-bottom: 1px solid #1C212A; }
-            QHeaderView::section { background-color: #151921; color: #90A4AE; padding: 6px; border: 1px solid #1C212A; font-weight: bold; text-align: center;}
-            QTextEdit { background-color: #151921; border: 1px solid #1C212A; color: #FFFFFF; border-radius: 4px;}
-            QPushButton { background-color: #151921; color: #FFFFFF; font-weight: bold; border: 1px solid #1C212A; padding: 6px 12px; border-radius: 4px; }
-            QPushButton:hover { background-color: #26A69A; color: #0B0E11; }
-            QPushButton:pressed { background-color: #1E8278; border-style: inset;}
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: #151921; color: #FFFFFF; border: 1px solid #1C212A; padding: 4px; font-weight: bold; border-radius: 4px; }
-            QSplitter::handle { background-color: #1C212A; }
-            QDockWidget { color: #FFFFFF; font-weight: bold; font-size: 13px; }
-            QDockWidget::title { background: #151921; padding: 6px; border: 1px solid #1C212A; border-radius: 4px;}
-            QSlider::groove:horizontal { border: 1px solid #1C212A; height: 4px; background: #151921; margin: 2px 0; border-radius: 2px;}
-            QSlider::handle:horizontal { background: #26A69A; border: 1px solid #FFFFFF; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
-            QGroupBox { border: 1px solid #1C212A; font-weight: bold; color: #FFFFFF; margin-top: 10px; border-radius: 4px;}
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; color: #90A4AE;}
-        """)
-
-    def build_ui(self):
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        main_layout = QVBoxLayout(self.central_widget)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-
-        self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
-
-        self.tab_workspace = QWidget()
-        self.tab_charts = QWidget()
-        self.tab_quant = QWidget()
-        self.tab_cloud = QWidget()
-
-        self.tabs.addTab(self.tab_workspace, "Master Workspace (Portfolio + Builder)")
-        self.tabs.addTab(self.tab_charts, "Technical Charts")
-        self.tabs.addTab(self.tab_quant, "Quant Analytics")
-        self.tabs.addTab(self.tab_cloud, "Cloud Sync")
-
-        self.build_master_workspace()
-        self.build_technical_charts()
-        self.build_quant_analytics()
-        self.build_cloud_sync()
-        
-        self.console_output = QTextEdit()
-        self.console_output.setReadOnly(True)
-        self.console_output.setFixedHeight(100)
-        main_layout.addWidget(self.console_output)
-
-    # --------------------------------------------------------------------------
-    # --- PHASE 1 & 3: UNIFIED MASTER WORKSPACE (DOCK ENGINE) ---
-    # --------------------------------------------------------------------------
-    def build_master_workspace(self):
-        layout = QVBoxLayout(self.tab_workspace)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.workspace_mw = QMainWindow()
-        self.workspace_mw.setDockNestingEnabled(True)
-        self.workspace_mw.setStyleSheet("QMainWindow { background-color: #0B0E11; }")
-        layout.addWidget(self.workspace_mw)
-        dock_features = QDockWidget.DockWidgetFeature.DockWidgetFloatable | QDockWidget.DockWidgetFeature.DockWidgetMovable
-
-        # ==========================================
-        # DOCK 1: STRATEGY NAVIGATOR (Portfolio)
-        # ==========================================
-        self.dock_port = QDockWidget("Strategy Hierarchy", self.workspace_mw)
-        self.dock_port.setFeatures(dock_features)
-        
-        port_widget = QWidget(); port_widget.setMinimumWidth(350)
-        port_layout = QVBoxLayout(port_widget)
-        port_layout.setContentsMargins(5, 5, 5, 5)
-        
-        ribbon_layout = QHBoxLayout()
-        lbl_account = QLabel("Account:")
-        lbl_account.setStyleSheet("font-size: 14px; font-weight: bold; color: #8b949e;")
-        
-        self.account_selector = QComboBox()
-        self.account_selector.currentTextChanged.connect(self.refresh_portfolio_grid)
-        btn_refresh_port = QPushButton("REFRESH")
-        btn_refresh_port.setStyleSheet("background-color: #00C853; color: #0B0E11; border: none;")
-        btn_refresh_port.clicked.connect(self.refresh_portfolio_grid)
-        
-        ribbon_layout.addWidget(lbl_account)
-        ribbon_layout.addWidget(self.account_selector)
-        ribbon_layout.addWidget(btn_refresh_port)
-        ribbon_layout.addStretch()
-        port_layout.addLayout(ribbon_layout)
-        
-        filter_layout = QHBoxLayout()
-        self.filter_ticker = QLineEdit(); self.filter_ticker.setPlaceholderText("Filter Ticker..."); self.filter_ticker.textChanged.connect(self.filter_portfolio_tree)
-        self.filter_expiry = QLineEdit(); self.filter_expiry.setPlaceholderText("Expiry..."); self.filter_expiry.textChanged.connect(self.filter_portfolio_tree)
-        self.filter_strike = QLineEdit(); self.filter_strike.setPlaceholderText("Strike..."); self.filter_strike.textChanged.connect(self.filter_portfolio_tree)
-        filter_layout.addWidget(self.filter_ticker); filter_layout.addWidget(self.filter_expiry); filter_layout.addWidget(self.filter_strike)
-        port_layout.addLayout(filter_layout)
-        
-        # --- SGPV Dashboard ---
-        self.sgpv_dashboard = QWidget()
-        self.sgpv_dashboard.setStyleSheet("QWidget { background-color: #151921; border-radius: 4px; border: 1px solid #30363d; margin-top: 5px; margin-bottom: 5px; } QLabel { border: none; font-size: 11px; font-weight: bold; color: #90A4AE; }")
-        sgpv_layout = QHBoxLayout(self.sgpv_dashboard)
-        sgpv_layout.setContentsMargins(10, 5, 10, 5)
-        
-        self.lbl_net_liq = QLabel("NET LIQ: ---")
-        self.lbl_sgpv_opt = QLabel("OPT SGPV: ---")
-        self.lbl_sgpv_stk = QLabel("STK SGPV: ---")
-        self.lbl_sgpv_ratio = QLabel("RATIO: ---")
-        
-        for lbl in [self.lbl_net_liq, self.lbl_sgpv_opt, self.lbl_sgpv_stk, self.lbl_sgpv_ratio]:
-            sgpv_layout.addWidget(lbl)
-            
-        port_layout.addWidget(self.sgpv_dashboard)
-        
-        strat_btns = QHBoxLayout()
-        btn_group = QPushButton("📂 GROUP"); btn_group.setStyleSheet("background-color: #1f6feb; color: white;"); btn_group.clicked.connect(self.group_selected_legs)
-        btn_ungroup = QPushButton("✖ UNG"); btn_ungroup.setStyleSheet("background-color: #30363d; color: #c9d1d9;"); btn_ungroup.clicked.connect(self.ungroup_selected_legs)
-        btn_expand = QPushButton("⮟ EXP"); btn_expand.setStyleSheet("background-color: #30363d; color: #c9d1d9;"); btn_expand.clicked.connect(lambda: self.portfolio_tree.expandAll())
-        btn_collapse = QPushButton("⮝ COL"); btn_collapse.setStyleSheet("background-color: #30363d; color: #c9d1d9;"); btn_collapse.clicked.connect(lambda: self.portfolio_tree.collapseAll())
-        strat_btns.addWidget(btn_group); strat_btns.addWidget(btn_ungroup); strat_btns.addWidget(btn_expand); strat_btns.addWidget(btn_collapse); strat_btns.addStretch()
-        port_layout.addLayout(strat_btns)
-        
-        self.portfolio_tree = QTreeWidget()
-        self.portfolio_tree.setHeaderLabels(["Position", "Qty", "Cost/Price", "Delta", "Theta", "Vega", "Realized", "Velocity", "AI Rec"])
-        self.portfolio_tree.setIndentation(15) 
-        self.portfolio_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        
-        header = self.portfolio_tree.header()
-        header.setStretchLastSection(False) 
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive); self.portfolio_tree.setColumnWidth(0, 300)
-        
-        for col in range(1, 8):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive); self.portfolio_tree.setColumnWidth(col, 75)
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive); self.portfolio_tree.setColumnWidth(8, 150)
-            
-        self.portfolio_tree.setAlternatingRowColors(True)
-        self.portfolio_tree.setSortingEnabled(True) 
-        self.portfolio_tree.itemClicked.connect(self.on_portfolio_item_clicked)
-        self.portfolio_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.portfolio_tree.customContextMenuRequested.connect(self.show_portfolio_context_menu)
-        port_layout.addWidget(self.portfolio_tree)
-        
-        btn_analyze = QPushButton("📈 MODEL SELECTED LEGS IN BASKET")
-        btn_analyze.setStyleSheet("background-color: #c084fc; color: #ffffff; font-weight: bold; padding: 10px; border: 1px solid #a855f7;")
-        btn_analyze.clicked.connect(self.analyze_portfolio_selection)
-        port_layout.addWidget(btn_analyze)
-        
-        self.dock_port.setWidget(port_widget)
-        self.workspace_mw.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_port)
-
-        # ==========================================
-        # DOCK 2: OPTION CHAIN
-        # ==========================================
-        self.dock_chain = QDockWidget("Live Option Chain", self.workspace_mw)
-        self.dock_chain.setFeatures(dock_features)
-        chain_widget = QWidget()
-        chain_layout = QVBoxLayout(chain_widget)
-        chain_layout.setContentsMargins(5, 5, 5, 5)
-        
-        chain_ribbon = QHBoxLayout()
-        lbl_chain = QLabel("Underlying:")
-        lbl_chain.setStyleSheet("font-size: 14px; font-weight: bold; color: #8b949e;")
-        self.chain_ticker_in = QLineEdit(); self.chain_ticker_in.setPlaceholderText("SPX"); self.chain_ticker_in.setMinimumWidth(80); self.chain_ticker_in.returnPressed.connect(self.fetch_expirations)
-        btn_get_exp = QPushButton("GET CHAIN"); btn_get_exp.setStyleSheet("background-color: #30363d; color: white;"); btn_get_exp.clicked.connect(self.fetch_expirations)
-        self.exp_combo = QComboBox(); self.exp_combo.setMinimumWidth(120)
-        btn_load_chain = QPushButton("LOAD"); btn_load_chain.setStyleSheet("background-color: #1f6feb; color: white;"); btn_load_chain.clicked.connect(self.load_option_chain)
-        self.lbl_chain_spot = QLabel("SPOT: ---")
-        self.lbl_chain_spot.setStyleSheet("font-size: 16px; font-weight: bold; color: #d2a8ff; padding-left: 20px;")
-        
-        chain_ribbon.addWidget(lbl_chain); chain_ribbon.addWidget(self.chain_ticker_in); chain_ribbon.addWidget(btn_get_exp)
-        chain_ribbon.addWidget(QLabel("DTE:")); chain_ribbon.addWidget(self.exp_combo); chain_ribbon.addWidget(btn_load_chain)
-        self.inp_chain_strikes = QSpinBox(); self.inp_chain_strikes.setRange(2, 200); self.inp_chain_strikes.setValue(20); self.inp_chain_strikes.setMaximumWidth(50)
-        chain_ribbon.addWidget(QLabel("Strikes:")); chain_ribbon.addWidget(self.inp_chain_strikes)
-        chain_ribbon.addWidget(self.lbl_chain_spot); chain_ribbon.addStretch()
-        chain_layout.addLayout(chain_ribbon)
-        
-        self.chain_table = QTableWidget()
-        self.chain_table.setColumnCount(11)
-        self.chain_table.setHorizontalHeaderLabels(["C Delta", "C Vol", "C OI", "CALL BID", "CALL ASK", "STRIKE", "PUT BID", "PUT ASK", "P Vol", "P OI", "P Delta"])
-        self.chain_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.chain_table.horizontalHeader().setMinimumSectionSize(60)
-        self.chain_table.verticalHeader().setVisible(False)
-        self.chain_table.setAlternatingRowColors(True)
-        self.chain_table.cellDoubleClicked.connect(self.on_chain_clicked)
-        chain_layout.addWidget(self.chain_table)
-        self.dock_chain.setWidget(chain_widget)
-        self.workspace_mw.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_chain)
-        self.workspace_mw.tabifyDockWidget(self.dock_port, self.dock_chain)
-        self.dock_chain.raise_()
-
-        # ==========================================
-        # DOCK 3: UNIFIED RISK PROFILE
-        # ==========================================
-        self.dock_risk = QDockWidget("Multi-Timeframe Risk Profile", self.workspace_mw)
-        self.dock_risk.setFeatures(dock_features)
-        risk_widget = QWidget(); risk_widget.setMinimumWidth(500); risk_layout = QVBoxLayout(risk_widget); risk_layout.setContentsMargins(5, 5, 5, 5)
-        
-        self.lbl_combo_name = QLabel("Selected Combo: None")
-        self.lbl_combo_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #e3b341;")
-        risk_layout.addWidget(self.lbl_combo_name)
-
-        greeks_layout = QHBoxLayout()
-        self.lbl_agg_delta = QLabel("Delta: ---"); self.lbl_agg_gamma = QLabel("Gamma: ---"); self.lbl_agg_theta = QLabel("Theta: ---")
-        self.lbl_agg_vega  = QLabel("Vega: ---"); self.lbl_agg_pnl   = QLabel("Net PnL: ---")
-        font = QFont("Helvetica", 12, QFont.Weight.Bold)
-        for lbl in [self.lbl_agg_delta, self.lbl_agg_gamma, self.lbl_agg_theta, self.lbl_agg_vega, self.lbl_agg_pnl]:
-            lbl.setFont(font); lbl.setStyleSheet("color: #8b949e;")
-            greeks_layout.addWidget(lbl)
-        greeks_layout.addStretch()
-        risk_layout.addLayout(greeks_layout)
-        
-        self.port_risk_plot = pg.PlotWidget(); self.port_risk_plot.setBackground('#0B0E11'); self.port_risk_plot.showGrid(x=False, y=False)
-        self.port_risk_plot.getAxis('bottom').setPen('#6b7280'); self.port_risk_plot.getAxis('left').setPen('#6b7280')
-        self.port_risk_plot.setLabel('left', 'PnL ($)'); self.port_risk_plot.setLabel('bottom', 'Underlying Price'); self.port_risk_plot.addLegend()
-        
-        self.risk_vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#26A69A', width=1.5, style=Qt.PenStyle.DashLine))
-        self.port_risk_plot.addItem(self.risk_vLine, ignoreBounds=True)
-        
-        self.risk_inspector = pg.TextItem(color='#FFFFFF', fill=pg.mkBrush(21, 25, 33, 230), border=pg.mkPen('#26A69A', width=1))
-        self.risk_inspector.setZValue(100)
-        self.port_risk_plot.addItem(self.risk_inspector, ignoreBounds=True)
-        self.risk_inspector.hide()
-        
-        self.risk_proxy = pg.SignalProxy(self.port_risk_plot.scene().sigMouseMoved, rateLimit=60, slot=self.risk_mouse_moved)
-        risk_layout.addWidget(self.port_risk_plot, stretch=1)
-        
-        # --- OPTIONSTRAT STYLE: WHAT-IF SLIDERS ---
-        self.slider_layout = QHBoxLayout()
-        
-        self.btn_reset_sliders = QPushButton("♻️ Reset")
-        self.btn_reset_sliders.setStyleSheet("background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 4px; font-size: 11px;")
-        self.btn_reset_sliders.setMaximumWidth(60)
-        self.btn_reset_sliders.clicked.connect(lambda: [self.slider_iv.setValue(0), self.slider_dte.setValue(0), self.inp_t_lines.setValue(4)])
-
-        self.lbl_t_lines = QLabel("T+ Lines:")
-        self.lbl_t_lines.setStyleSheet("font-family: Menlo, monospace; font-size: 13px; font-weight: bold; color: #8b949e;")
-        self.inp_t_lines = QSpinBox()
-        self.inp_t_lines.setRange(0, 10); self.inp_t_lines.setValue(4)
-        self.inp_t_lines.setMaximumWidth(50)
-        self.inp_t_lines.valueChanged.connect(lambda _: asyncio.create_task(self._async_update_risk_graph()))
-
-        self.lbl_iv_adj = QLabel("IV Adj: +0%")
-        self.lbl_iv_adj.setStyleSheet("font-family: Menlo, monospace; font-size: 13px; font-weight: bold; color: #8b949e;")
-        self.slider_iv = QSlider(Qt.Orientation.Horizontal)
-        self.slider_iv.setRange(-50, 50); self.slider_iv.setValue(0)
-        self.slider_iv.valueChanged.connect(self.on_iv_slider_changed)
-        
-        self.lbl_dte_adj = QLabel("Days Fwd: +0")
-        self.lbl_dte_adj.setStyleSheet("font-family: Menlo, monospace; font-size: 13px; font-weight: bold; color: #8b949e;")
-        self.slider_dte = QSlider(Qt.Orientation.Horizontal)
-        self.slider_dte.setRange(0, 100); self.slider_dte.setValue(0)
-        self.slider_dte.valueChanged.connect(self.on_dte_slider_changed)
-        
-        for widget in [self.lbl_t_lines, self.inp_t_lines, self.lbl_iv_adj, self.slider_iv, self.lbl_dte_adj, self.slider_dte, self.btn_reset_sliders]:
-            self.slider_layout.addWidget(widget)
-        
-        risk_layout.addLayout(self.slider_layout)
-        
-        self.dock_risk.setWidget(risk_widget)
-        self.workspace_mw.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_risk)
-
-        # ==========================================
-        # DOCK 4: EXECUTION DESK
-        # ==========================================
-        self.dock_exec = QDockWidget("Working Basket & Execution", self.workspace_mw)
-        self.dock_exec.setFeatures(dock_features)
-        exec_widget = QWidget(); exec_widget.setMinimumWidth(450); exec_layout = QVBoxLayout(exec_widget); exec_layout.setContentsMargins(5, 5, 5, 5)
-
-        strat_builder_layout = QHBoxLayout()
-        strat_builder_layout.addWidget(QLabel("1-Click Build:"))
-        self.btn_build_straddle = QPushButton("Straddle")
-        self.btn_build_strangle = QPushButton("Strangle")
-        self.btn_build_iron_condor = QPushButton("Iron Condor")
-        self.btn_build_vert_call = QPushButton("Call Vert")
-        self.btn_build_vert_put = QPushButton("Put Vert")
-        for btn in [self.btn_build_straddle, self.btn_build_strangle, self.btn_build_iron_condor, self.btn_build_vert_call, self.btn_build_vert_put]:
-            btn.setStyleSheet("background-color: #30363d; color: #c9d1d9; font-weight: bold; padding: 5px;")
-            strat_builder_layout.addWidget(btn)
-        
-        self.btn_build_straddle.clicked.connect(lambda: self.build_template_strategy('straddle'))
-        self.btn_build_strangle.clicked.connect(lambda: self.build_template_strategy('strangle'))
-        self.btn_build_iron_condor.clicked.connect(lambda: self.build_template_strategy('iron_condor'))
-        self.btn_build_vert_call.clicked.connect(lambda: self.build_template_strategy('call_vert'))
-        self.btn_build_vert_put.clicked.connect(lambda: self.build_template_strategy('put_vert'))
-        exec_layout.addLayout(strat_builder_layout)
-        
-        eq_trade_layout = QHBoxLayout()
-        eq_trade_layout.addWidget(QLabel("Underlying Trade:"))
-        self.btn_buy_ul = QPushButton("BUY")
-        self.btn_buy_ul.setStyleSheet("background-color: #3fb950; color: white; font-weight: bold;")
-        self.btn_sell_ul = QPushButton("SELL")
-        self.btn_sell_ul.setStyleSheet("background-color: #f85149; color: white; font-weight: bold;")
-        self.inp_ul_qty = QSpinBox()
-        self.inp_ul_qty.setRange(1, 1000000); self.inp_ul_qty.setValue(100)
-        eq_trade_layout.addWidget(self.btn_buy_ul); eq_trade_layout.addWidget(self.btn_sell_ul); eq_trade_layout.addWidget(QLabel("Qty:")); eq_trade_layout.addWidget(self.inp_ul_qty); eq_trade_layout.addStretch()
-        exec_layout.addLayout(eq_trade_layout)
-
-        self.btn_buy_ul.clicked.connect(lambda: self.add_underlying_to_basket('BUY'))
-        self.btn_sell_ul.clicked.connect(lambda: self.add_underlying_to_basket('SELL'))
-        
-        self.basket_table = QTableWidget()
-        self.basket_table.setColumnCount(6)
-        self.basket_table.setHorizontalHeaderLabels(["Action", "Qty", "Type", "Strike", "Price", "Ext."])
-        self.basket_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.basket_table.verticalHeader().setVisible(False)
-        exec_layout.addWidget(self.basket_table, stretch=2)
-        
-        b_btns = QHBoxLayout()
-        btn_clear = QPushButton("CLEAR BASKET"); btn_clear.setStyleSheet("background-color: #30363d; color: white;"); btn_clear.clicked.connect(self.clear_basket)
-        b_btns.addWidget(btn_clear)
-        exec_layout.addLayout(b_btns)
-        
-        self.lbl_price_quotes = QLabel("Bid: ---  |  Mid: ---  |  Ask: ---")
-        self.lbl_price_quotes.setStyleSheet("font-size: 14px; font-weight: bold; color: #d2a8ff; margin-top: 10px;")
-        exec_layout.addWidget(self.lbl_price_quotes)
-        
-        self.lbl_net_price = QLabel("Net Price: $0.00")
-        self.lbl_net_price.setStyleSheet("font-size: 16px; font-weight: bold;")
-        exec_layout.addWidget(self.lbl_net_price)
-        
-        tabs_exec = QTabWidget()
-        tabs_exec.setStyleSheet("QTabBar::tab { padding: 4px; font-size: 11px; }")
-        
-        # TAB 1: Quick Limit
-        tab_quick = QWidget(); qt_layout = QVBoxLayout(tab_quick)
-        qt_layout.setContentsMargins(0, 5, 0, 0)
-        
-        exec_ctrl_layout = QHBoxLayout()
-        exec_ctrl_layout.addWidget(QLabel("Qty:"))
-        self.inp_exec_qty = QSpinBox(); self.inp_exec_qty.setMinimum(1); self.inp_exec_qty.setValue(1)
-        exec_ctrl_layout.addWidget(self.inp_exec_qty)
-        
-        exec_ctrl_layout.addWidget(QLabel("Limit:"))
-        self.inp_exec_lmt = QDoubleSpinBox(); self.inp_exec_lmt.setRange(-9999.0, 9999.0); self.inp_exec_lmt.setDecimals(2)
-        exec_ctrl_layout.addWidget(self.inp_exec_lmt)
-        
-        self.combo_tif = QComboBox(); self.combo_tif.addItems(["DAY", "GTC"])
-        self.chk_outside_rth = QCheckBox("Fill outside RTH")
-        exec_ctrl_layout.addWidget(QLabel("TIF:")); exec_ctrl_layout.addWidget(self.combo_tif); exec_ctrl_layout.addWidget(self.chk_outside_rth)
-        qt_layout.addLayout(exec_ctrl_layout)
-        
-        btn_transmit = QPushButton("TRANSMIT LIMIT ORDER")
-        btn_transmit.setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
-        btn_transmit.clicked.connect(self.transmit_basket_order)
-        qt_layout.addWidget(btn_transmit)
-        tabs_exec.addTab(tab_quick, "Limit Order")
-        
-        # TAB 2: Walk-Limit Machine
-        tab_walk = QWidget(); w_layout = QVBoxLayout(tab_walk)
-        w_layout.setContentsMargins(0, 5, 0, 0)
-        walk_ctrls = QGridLayout()
-        
-        walk_ctrls.addWidget(QLabel("Start Price:"), 0, 0)
-        self.inp_walk_start = QDoubleSpinBox(); self.inp_walk_start.setRange(-9999.0, 9999.0); self.inp_walk_start.setDecimals(2)
-        walk_ctrls.addWidget(self.inp_walk_start, 0, 1)
-        
-        walk_ctrls.addWidget(QLabel("End Price:"), 0, 2)
-        self.inp_walk_end = QDoubleSpinBox(); self.inp_walk_end.setRange(-9999.0, 9999.0); self.inp_walk_end.setDecimals(2)
-        walk_ctrls.addWidget(self.inp_walk_end, 0, 3)
-        
-        walk_ctrls.addWidget(QLabel("Steps:"), 1, 0)
-        self.inp_walk_steps = QSpinBox(); self.inp_walk_steps.setRange(2, 100); self.inp_walk_steps.setValue(5)
-        walk_ctrls.addWidget(self.inp_walk_steps, 1, 1)
-        
-        walk_ctrls.addWidget(QLabel("Secs/Step:"), 1, 2)
-        self.inp_walk_time = QSpinBox(); self.inp_walk_time.setRange(1, 3600); self.inp_walk_time.setValue(10)
-        walk_ctrls.addWidget(self.inp_walk_time, 1, 3)
-        
-        self.lbl_walk_impact = QLabel("Step Impact: --- (---%)")
-        self.lbl_walk_impact.setStyleSheet("color: #e3b341; font-weight: bold; font-size: 11px;")
-        walk_ctrls.addWidget(self.lbl_walk_impact, 2, 0, 1, 4)
-        
-        def update_walk_impact():
-            steps = self.inp_walk_steps.value()
-            rng = abs(self.inp_walk_end.value() - self.inp_walk_start.value())
-            if steps > 1 and rng > 0:
-                step_sz = rng / (steps - 1)
-                pct = (step_sz / rng) * 100
-                self.lbl_walk_impact.setText(f"Step Size: {step_sz:.2f} ({pct:.1f}%)")
-            else:
-                self.lbl_walk_impact.setText("Step Size: --- (---%)")
-        
-        self.inp_walk_start.valueChanged.connect(lambda _: update_walk_impact())
-        self.inp_walk_end.valueChanged.connect(lambda _: update_walk_impact())
-        self.inp_walk_steps.valueChanged.connect(lambda _: update_walk_impact())
-        
-        w_layout.addLayout(walk_ctrls)
-        
-        self.btn_walk = QPushButton("START WALK-LIMIT")
-        self.btn_walk.setStyleSheet("background-color: #26A69A; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
-        self.btn_walk.clicked.connect(self.start_walk_order)
-        w_layout.addWidget(self.btn_walk)
-        
-        tabs_exec.addTab(tab_walk, "Walk-Limit OS")
-        
-        exec_layout.addWidget(tabs_exec)
-        
-        self.dock_exec.setWidget(exec_widget)
-        self.workspace_mw.splitDockWidget(self.dock_risk, self.dock_exec, Qt.Orientation.Vertical)
-
-        self.workspace_mw.resizeDocks([self.dock_chain, self.dock_risk], [400, 800], Qt.Orientation.Horizontal)
-        self.workspace_mw.resizeDocks([self.dock_risk, self.dock_exec], [600, 300], Qt.Orientation.Vertical)
-
-    # --------------------------------------------------------------------------
-    # --- PHASE 2: TECHNICAL CHARTS ---
-    # --------------------------------------------------------------------------
-    def build_technical_charts(self):
-        layout = QVBoxLayout(self.tab_charts)
-        ribbon_layout = QHBoxLayout()
-        lbl_chart = QLabel("Load Ticker:")
-        lbl_chart.setStyleSheet("font-size: 16px; font-weight: bold; color: #8b949e;")
-        
-        self.ticker_input = QLineEdit(); self.ticker_input.setPlaceholderText("e.g., SPY, AAPL"); self.ticker_input.setMinimumWidth(150); self.ticker_input.returnPressed.connect(self.load_candlestick_chart)
-        btn_load_chart = QPushButton("LOAD CHART"); btn_load_chart.setStyleSheet("background-color: #1f6feb; color: white;"); btn_load_chart.clicked.connect(self.load_candlestick_chart)
-        btn_reset_zoom = QPushButton("RESET ZOOM"); btn_reset_zoom.setStyleSheet("background-color: #30363d; color: #c9d1d9;"); btn_reset_zoom.clicked.connect(self.reset_chart_view)
-        
-        ribbon_layout.addWidget(lbl_chart); ribbon_layout.addWidget(self.ticker_input); ribbon_layout.addWidget(btn_load_chart); ribbon_layout.addWidget(btn_reset_zoom)
-        
-        self.chk_sma = QCheckBox("SMA 20"); self.chk_sma.setChecked(True); self.chk_sma.stateChanged.connect(self.toggle_indicators)
-        self.chk_ema = QCheckBox("EMA 50"); self.chk_ema.setChecked(True); self.chk_ema.stateChanged.connect(self.toggle_indicators)
-        self.chk_bb = QCheckBox("Bollinger Bands"); self.chk_bb.setChecked(True); self.chk_bb.stateChanged.connect(self.toggle_indicators)
-        
-        ribbon_layout.addSpacing(20)
-        ribbon_layout.addWidget(self.chk_sma); ribbon_layout.addWidget(self.chk_ema); ribbon_layout.addWidget(self.chk_bb)
-        ribbon_layout.addStretch()
-        layout.addLayout(ribbon_layout)
-        
-        self.chart_ribbon_widget = QWidget(); self.chart_ribbon_widget.setStyleSheet("background: #161b22; border: 1px solid #30363d;")
-        ribbon_vbox = QVBoxLayout(self.chart_ribbon_widget); ribbon_vbox.setContentsMargins(5, 5, 5, 5); ribbon_vbox.setSpacing(2)
-        
-        self.chart_label_row1 = QLabel("Hover over the chart to see OHLCV data."); self.chart_label_row2 = QLabel("")
-        for lbl in [self.chart_label_row1, self.chart_label_row2]:
-            lbl.setStyleSheet("font-family: Helvetica; font-size: 13px; color: #c9d1d9; border: none; background: transparent;")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); ribbon_vbox.addWidget(lbl)
-        layout.addWidget(self.chart_ribbon_widget)
-        
-        date_axis = pg.DateAxisItem(orientation='bottom')
-        self.chart_plot = pg.PlotWidget(axisItems={'bottom': date_axis}, viewBox=TVViewBox())
-        self.chart_plot.setBackground('#0d1117'); self.chart_plot.showGrid(x=False, y=False); self.chart_plot.addLegend(offset=(10, 10))
-        self.chart_plot.showAxis('right'); self.chart_plot.hideAxis('left'); self.chart_plot.getAxis('right').setLabel('Price ($)'); self.chart_plot.getAxis('right').setWidth(60)
-        self.chart_plot.getAxis('bottom').setPen('#6b7280'); self.chart_plot.getAxis('right').setPen('#6b7280')
-        self.chart_plot.setMouseEnabled(x=True, y=True); self.chart_plot.getViewBox().enableAutoRange(axis=pg.ViewBox.YAxis); self.chart_plot.getViewBox().setAutoVisible(y=True)
-        
-        self.volume_vb = pg.ViewBox()
-        self.chart_plot.scene().addItem(self.volume_vb)
-        self.volume_vb.setXLink(self.chart_plot.getViewBox()); self.volume_vb.setMouseEnabled(x=False, y=False) 
-        self.chart_plot.getViewBox().sigResized.connect(lambda: [self.volume_vb.setGeometry(self.chart_plot.getViewBox().sceneBoundingRect()), self.volume_vb.linkedViewChanged(self.chart_plot.getViewBox(), self.volume_vb.XAxis)])
-        layout.addWidget(self.chart_plot)
-
-        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#8b949e', width=1, style=Qt.PenStyle.DashLine))
-        self.hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#8b949e', width=1, style=Qt.PenStyle.DashLine), label='{value:.2f}', labelOpts={'position': 0.98, 'color': '#c9d1d9', 'fill': '#161b22', 'anchor': (0, 0.5)})
-        self.vLine_lbl = pg.TextItem(color='#c9d1d9', fill='#161b22', anchor=(0.5, 1))
-        self.current_price_line = pg.InfiniteLine(angle=0, movable=False, label='{value:.2f}', labelOpts={'position': 0.98, 'color': '#ffffff', 'anchor': (0, 0.5)})
-        
-        for item in [self.vLine, self.hLine, self.vLine_lbl, self.current_price_line]: self.chart_plot.addItem(item, ignoreBounds=True)
-        self.proxy = pg.SignalProxy(self.chart_plot.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
-
-    def toggle_indicators(self):
-        if hasattr(self, 'plot_sma') and self.plot_sma is not None: self.plot_sma.setVisible(self.chk_sma.isChecked())
-        if hasattr(self, 'plot_ema') and self.plot_ema is not None: self.plot_ema.setVisible(self.chk_ema.isChecked())
-        if hasattr(self, 'plot_bb_up') and self.plot_bb_up is not None: self.plot_bb_up.setVisible(self.chk_bb.isChecked())
-        if hasattr(self, 'plot_bb_dn') and self.plot_bb_dn is not None: self.plot_bb_dn.setVisible(self.chk_bb.isChecked())
-
-    def mouse_moved(self, evt):
-        if self.chart_plot.sceneBoundingRect().contains(evt[0]):
-            mousePoint = self.chart_plot.getViewBox().mapSceneToView(evt[0])
-            self.vLine.setPos(mousePoint.x()); self.hLine.setPos(mousePoint.y())
-            self.vLine_lbl.setText(datetime.fromtimestamp(mousePoint.x()).strftime('%Y-%m-%d'))
-            self.vLine_lbl.setPos(mousePoint.x(), self.chart_plot.getViewBox().viewRect().bottom())
-            
-            if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
-                idx = np.searchsorted(self.current_df['timestamp'].values, mousePoint.x())
-                if 0 < idx < len(self.current_df['timestamp'].values):
-                    if abs(self.current_df['timestamp'].values[idx] - mousePoint.x()) > abs(self.current_df['timestamp'].values[idx-1] - mousePoint.x()): idx -= 1
-                    row = self.current_df.iloc[idx]
-                    self.chart_label_row1.setText(f"<b>Date:</b> <span style='color:#58a6ff'>{datetime.fromtimestamp(row['timestamp']).strftime('%Y-%m-%d')}</span>   |   <b>O:</b> <span style='color:#c9d1d9'>{row['open']:.2f}</span>   |   <b>H:</b> <span style='color:#3fb950'>{row['high']:.2f}</span>")
-                    self.chart_label_row2.setText(f"<b>L:</b> <span style='color:#f85149'>{row['low']:.2f}</span>   |   <b>C:</b> <span style='color:#c9d1d9'>{row['close']:.2f}</span>   |   <b>Vol:</b> <span style='color:#e3b341'>{row['volume']:,.0f}</span>")
-
-    def load_candlestick_chart(self):
-        if self.ticker_input.text().upper().strip() and self.ib.isConnected(): asyncio.create_task(self._async_load_chart(self.ticker_input.text().upper().strip()))
-        
-    async def _async_load_chart(self, ticker):
+    def list_files_debug(self):
+        if not self.is_connected: return []
         try:
-            contract = Stock(ticker, 'SMART', 'USD')
-            if ticker in ['SPX', 'VIX']: contract = Index(ticker, 'CBOE', 'USD')
-            elif ticker in ['NDX']: contract = Index(ticker, 'NASDAQ', 'USD')
-            elif ticker in ['RUT']: contract = Index(ticker, 'RUSSELL', 'USD')
-            await self.ib.qualifyContractsAsync(contract)
-            
-            bars = await self.ib.reqHistoricalDataAsync(contract, endDateTime='', durationStr='1 Y', barSizeSetting='1 day', whatToShow='TRADES', useRTH=True, formatDate=1)
-            if not bars: return
-                
-            self.current_df = pd.DataFrame([{'timestamp': (datetime.combine(b.date, datetime.min.time()) if isinstance(b.date, date) and not isinstance(b.date, datetime) else b.date).timestamp(), 'open': b.open, 'close': b.close, 'low': b.low, 'high': b.high, 'volume': float(b.volume) if b.volume else 0.0} for b in bars])
-            df = self.current_df
-            df['sma20'] = df['close'].rolling(window=20).mean()
-            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-            df['std20'] = df['close'].rolling(window=20).std()
-            df['bb_upper'] = df['sma20'] + (2 * df['std20'])
-            df['bb_lower'] = df['sma20'] - (2 * df['std20'])
-            
-            self.chart_plot.clear()
-            self.chart_plot.setTitle(f"Daily OHLC: {ticker}", color='#d2a8ff', size='14pt')
-            self.chart_plot.addItem(CandlestickItem([(r['timestamp'], r['open'], r['close'], r['low'], r['high']) for _, r in df.iterrows()]))
-            
-            df_clean_sma = df.dropna(subset=['sma20'])
-            df_clean_ema = df.dropna(subset=['ema50'])
-            self.plot_sma = self.chart_plot.plot(df_clean_sma['timestamp'].values, df_clean_sma['sma20'].values, pen=pg.mkPen('#e3b341', width=2), name="SMA 20")
-            self.plot_ema = self.chart_plot.plot(df_clean_ema['timestamp'].values, df_clean_ema['ema50'].values, pen=pg.mkPen('#388bfd', width=2), name="EMA 50")
-            self.plot_bb_up = self.chart_plot.plot(df_clean_sma['timestamp'].values, df_clean_sma['bb_upper'].values, pen=pg.mkPen('#8b949e', width=1, style=Qt.PenStyle.DashLine), name="BB Up")
-            self.plot_bb_dn = self.chart_plot.plot(df_clean_sma['timestamp'].values, df_clean_sma['bb_lower'].values, pen=pg.mkPen('#8b949e', width=1, style=Qt.PenStyle.DashLine), name="BB Dn")
-            
-            self.toggle_indicators() 
-            
-            for item in [self.vLine, self.hLine, self.vLine_lbl, self.current_price_line]: self.chart_plot.addItem(item, ignoreBounds=True)
-            line_color = '#3fb950' if df.iloc[-1]['close'] >= df.iloc[-1]['open'] else '#f85149'
-            self.current_price_line.setPen(pg.mkPen(line_color, width=1.5, style=Qt.PenStyle.DashLine))
-            self.current_price_line.label.fill = pg.mkBrush(line_color)
-            self.current_price_line.setPos(df.iloc[-1]['close'])
-            
-            self.volume_vb.clear()
-            if df['volume'].max() > 0: self.volume_vb.setYRange(0, df['volume'].max() * 4)
-            if (df['close'] >= df['open']).any(): self.volume_vb.addItem(pg.BarGraphItem(x=df['timestamp'][df['close'] >= df['open']].values, height=df['volume'][df['close'] >= df['open']].values, width=86400 * 0.4, brush=pg.mkBrush(63, 185, 80, 100), pen=pg.mkPen(63, 185, 80, 100)))
-            if (df['close'] < df['open']).any(): self.volume_vb.addItem(pg.BarGraphItem(x=df['timestamp'][df['close'] < df['open']].values, height=df['volume'][df['close'] < df['open']].values, width=86400 * 0.4, brush=pg.mkBrush(248, 81, 73, 100), pen=pg.mkPen(248, 81, 73, 100)))
-            self.reset_chart_view()
-        except Exception as e: print(f"[CHART ERROR] Failed to load data for {ticker}: {e}")
-
-    def reset_chart_view(self): self.chart_plot.autoRange()
-
-    # --------------------------------------------------------------------------
-    # --- PHASE 4: QUANT ANALYTICS TAB ---
-    # --------------------------------------------------------------------------
-    def build_quant_analytics(self):
-        layout = QVBoxLayout(self.tab_quant)
-        toolbar = QHBoxLayout()
-        self.quant_ticker = QLineEdit()
-        self.quant_ticker.setPlaceholderText("Enter Ticker (e.g. SPY)")
-        self.quant_ticker.setMaximumWidth(150)
-        self.quant_ticker.returnPressed.connect(self.run_quant_lab)
-        btn_run = QPushButton("RUN QUANT LAB")
-        btn_run.setStyleSheet("background-color: #1f6feb; color: white;")
-        btn_run.clicked.connect(self.run_quant_lab)
-        
-        toolbar.addWidget(QLabel("Analyze Ticker:"))
-        toolbar.addWidget(self.quant_ticker)
-        toolbar.addWidget(btn_run)
-        toolbar.addStretch()
-        layout.addLayout(toolbar)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.vol_plot = pg.PlotWidget(title="Volatility Lab: HV vs IV (1 Year)")
-        self.vol_plot.setBackground('#0d1117'); self.vol_plot.addLegend(); self.vol_plot.setLabel('left', 'Volatility (%)'); self.vol_plot.showGrid(x=False, y=False)
-        splitter.addWidget(self.vol_plot)
-        
-        self.cone_plot = pg.PlotWidget(title="Probability Cone (45-Day Expected Move)")
-        self.cone_plot.setBackground('#0d1117'); self.cone_plot.addLegend(); self.cone_plot.setLabel('left', 'Underlying Price ($)'); self.cone_plot.setLabel('bottom', 'Days Forward'); self.cone_plot.showGrid(x=False, y=False)
-        splitter.addWidget(self.cone_plot)
-        layout.addWidget(splitter)
-        
-    def run_quant_lab(self):
-        ticker = self.quant_ticker.text().upper().strip()
-        if ticker and self.ib.isConnected(): asyncio.create_task(self._async_run_quant_lab(ticker))
-
-    async def _async_run_quant_lab(self, ticker):
-        try:
-            contract = Stock(ticker, 'SMART', 'USD')
-            if ticker in ['SPX', 'VIX']: contract = Index(ticker, 'CBOE', 'USD')
-            elif ticker in ['NDX']: contract = Index(ticker, 'NASDAQ', 'USD')
-            elif ticker in ['RUT']: contract = Index(ticker, 'RUSSELL', 'USD')
-            await self.ib.qualifyContractsAsync(contract)
-            
-            bars = await self.ib.reqHistoricalDataAsync(contract, endDateTime='', durationStr='1 Y', barSizeSetting='1 day', whatToShow='TRADES', useRTH=True, formatDate=1)
-            if not bars: return
-                
-            df = pd.DataFrame([{'date': b.date, 'close': b.close} for b in bars])
-            df['pct_change'] = df['close'].pct_change()
-            df['HV20'] = df['pct_change'].rolling(20).std() * math.sqrt(252) * 100
-            df['HV50'] = df['pct_change'].rolling(50).std() * math.sqrt(252) * 100
-            
-            iv_bars = None
-            try: iv_bars = await self.ib.reqHistoricalDataAsync(contract, endDateTime='', durationStr='1 Y', barSizeSetting='1 day', whatToShow='OPTION_IMPLIED_VOLATILITY', useRTH=True, formatDate=1)
-            except Exception: pass
-                
-            if iv_bars:
-                iv_df = pd.DataFrame([{'date': b.date, 'IV': b.close * 100} for b in iv_bars])
-                df = pd.merge(df, iv_df, on='date', how='left')
-            else: df['IV'] = np.nan
-                
-            df = df.dropna(subset=['HV20', 'HV50'])
-            x_times = [datetime.combine(d, datetime.min.time()).timestamp() if not isinstance(d, datetime) else d.timestamp() for d in df['date']]
-            self.vol_plot.clear()
-            self.vol_plot.setAxisItems({'bottom': pg.DateAxisItem(orientation='bottom')})
-            self.vol_plot.plot(x_times, df['HV20'].values, pen=pg.mkPen('#388bfd', width=2), name="20-Day HV")
-            self.vol_plot.plot(x_times, df['HV50'].values, pen=pg.mkPen('#8b949e', width=2, style=Qt.PenStyle.DashLine), name="50-Day HV")
-            
-            current_iv = df['HV20'].iloc[-1] 
-            if 'IV' in df.columns and not df['IV'].isna().all():
-                iv_clean = df.dropna(subset=['IV'])
-                if not iv_clean.empty:
-                    x_iv = [datetime.combine(d, datetime.min.time()).timestamp() if not isinstance(d, datetime) else d.timestamp() for d in iv_clean['date']]
-                    self.vol_plot.plot(x_iv, iv_clean['IV'].values, pen=pg.mkPen('#e3b341', width=2), name="Implied Vol (IV)")
-                    current_iv = iv_clean['IV'].iloc[-1]
-            
-            spot = df['close'].iloc[-1]
-            days_forward = np.arange(0, 46)
-            upper_1sd = spot * (1 + (current_iv/100) * np.sqrt(days_forward/365))
-            lower_1sd = spot * (1 - (current_iv/100) * np.sqrt(days_forward/365))
-            upper_2sd = spot * (1 + (current_iv/100 * 2) * np.sqrt(days_forward/365))
-            lower_2sd = spot * (1 - (current_iv/100 * 2) * np.sqrt(days_forward/365))
-            
-            self.cone_plot.clear()
-            self.cone_plot.plot(days_forward, upper_1sd, pen=pg.mkPen('#3fb950', width=2, style=Qt.PenStyle.DashLine), name="+1 SD (68%)")
-            self.cone_plot.plot(days_forward, lower_1sd, pen=pg.mkPen('#f85149', width=2, style=Qt.PenStyle.DashLine), name="-1 SD (68%)")
-            self.cone_plot.plot(days_forward, upper_2sd, pen=pg.mkPen('#3fb950', width=1, style=Qt.PenStyle.DotLine), name="+2 SD (95%)")
-            self.cone_plot.plot(days_forward, lower_2sd, pen=pg.mkPen('#f85149', width=1, style=Qt.PenStyle.DotLine), name="-2 SD (95%)")
-            self.cone_plot.plot(days_forward, np.full_like(days_forward, spot), pen=pg.mkPen('#ffffff', width=1), name="Current Spot")
-            
-            fill = pg.FillBetweenItem(pg.PlotCurveItem(days_forward, lower_1sd), pg.PlotCurveItem(days_forward, upper_1sd), brush=pg.mkBrush(56, 139, 253, 30))
-            self.cone_plot.addItem(fill)
-        except Exception as e: print(f"[QUANT ERROR] {e}")
-
-    # --------------------------------------------------------------------------
-    # --- PHASE 5: CLOUD SYNCHRONIZATION ---
-    # --------------------------------------------------------------------------
-    def build_cloud_sync(self):
-        layout = QVBoxLayout(self.tab_cloud)
-        
-        ribbon = QHBoxLayout()
-        self.lbl_cloud_status = QLabel("Status: 🔴 Not Connected")
-        self.lbl_cloud_status.setStyleSheet("font-size: 14px; font-weight: bold;")
-        
-        btn_auth = QPushButton("🔑 Connect to Google Drive")
-        btn_auth.clicked.connect(self.authenticate_drive)
-        
-        ribbon.addWidget(self.lbl_cloud_status)
-        ribbon.addWidget(btn_auth)
-        ribbon.addStretch()
-        layout.addLayout(ribbon)
-        
-        sync_group = QGroupBox("Database Synchronization (trade_guardian_v4.db)")
-        sync_layout = QVBoxLayout(sync_group)
-        
-        btn_layout = QHBoxLayout()
-        self.btn_push = QPushButton("☁️ PUSH (Local -> Cloud)")
-        self.btn_push.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 15px;")
-        self.btn_push.clicked.connect(self.push_to_cloud)
-        self.btn_push.setEnabled(False)
-        
-        self.btn_pull = QPushButton("☁️ PULL (Cloud -> Local)")
-        self.btn_pull.setStyleSheet("background-color: #3fb950; color: white; font-weight: bold; padding: 15px;")
-        self.btn_pull.clicked.connect(self.pull_from_cloud)
-        self.btn_pull.setEnabled(False)
-        
-        btn_layout.addWidget(self.btn_push)
-        btn_layout.addWidget(self.btn_pull)
-        sync_layout.addLayout(btn_layout)
-        
-        self.cloud_console = QTextEdit()
-        self.cloud_console.setReadOnly(True)
-        self.cloud_console.setStyleSheet("background-color: #010409; color: #c9d1d9;")
-        sync_layout.addWidget(self.cloud_console)
-        
-        layout.addWidget(sync_group)
-        
-        if not GOOGLE_DRIVE_AVAILABLE:
-            self.cloud_console.append("[ERROR] Google API libraries not found. Run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib")
-            btn_auth.setEnabled(False)
-            
-    def authenticate_drive(self):
-        if not GOOGLE_DRIVE_AVAILABLE: return
-        cred_path = os.path.join(os.path.dirname(__file__), "credentials.json")
-        if not os.path.exists(cred_path):
-            self.cloud_console.append(f"[ERROR] '{cred_path}' not found. Please place your service account JSON file in the same folder as main.py.")
-            return
-            
-        try:
-            self.cloud_console.append("[*] Authenticating with Google Drive...")
-            creds = service_account.Credentials.from_service_account_file(cred_path, scopes=['https://www.googleapis.com/auth/drive'])
-            self.drive_service = build('drive', 'v3', credentials=creds)
-            self.lbl_cloud_status.setText("Status: 🟢 Connected")
-            self.lbl_cloud_status.setStyleSheet("color: #3fb950; font-size: 14px; font-weight: bold;")
-            self.btn_push.setEnabled(True)
-            self.btn_pull.setEnabled(True)
-            self.cloud_console.append("[SUCCESS] Connected to Google Drive API!")
+            results = self.service.files().list(pageSize=10, fields="files(id, name, modifiedTime)").execute()
+            return results.get('files', [])
         except Exception as e:
-            self.cloud_console.append(f"[ERROR] Authentication failed: {e}")
+            return []
 
-    def push_to_cloud(self):
-        if self.drive_service:
-            self.btn_push.setEnabled(False)
-            self.cloud_console.append(f"[{datetime.now().strftime('%H:%M:%S')}] Starting PUSH to Cloud...")
-            asyncio.create_task(self._async_push_to_cloud())
+    def find_db_file(self):
+        if not self.is_connected: return None, None
+        if self.cached_file_id:
+            try:
+                file = self.service.files().get(fileId=self.cached_file_id, fields='id,name').execute()
+                return file['id'], file['name']
+            except:
+                self.cached_file_id = None
 
-    async def _async_push_to_cloud(self):
         try:
-            result = await asyncio.to_thread(self._blocking_push)
-            self.cloud_console.append(result)
-        except Exception as e:
-            self.cloud_console.append(f"[ERROR] Push failed: {e}")
-        finally:
-            self.btn_push.setEnabled(True)
+            query_exact = f"name='{DB_NAME}' and trashed=false"
+            results = self.service.files().list(q=query_exact, pageSize=1, fields="files(id, name)").execute()
+            items = results.get('files', [])
+            if items: 
+                self.cached_file_id = items[0]['id']
+                return items[0]['id'], items[0]['name']
 
-    def _blocking_push(self):
-        db_name = "trade_guardian_v4.db"
-        local_path = os.path.join(os.path.dirname(__file__), db_name)
-        if not os.path.exists(local_path): return f"[ERROR] Local database {db_name} does not exist."
+            query_fuzzy = "name contains 'trade_guardian' and name contains '.db' and trashed=false"
+            results = self.service.files().list(q=query_fuzzy, pageSize=5, fields="files(id, name)").execute()
+            items = results.get('files', [])
             
-        query = f"name='{db_name}' and trashed=false"
-        results = self.drive_service.files().list(q=query, pageSize=1, fields="files(id, name)").execute()
-        items = results.get('files', [])
+            if items:
+                selected = items[0]
+                for item in items:
+                    if item['name'].startswith("trade_guardian_v4"):
+                        selected = item
+                        break
+                self.cached_file_id = selected['id']
+                return selected['id'], selected['name']
+            return None, None
+        except Exception as e:
+            st.error(f"Drive Search Error: {e}")
+            return None, None
+
+    def get_cloud_modified_time(self, file_id):
+        try:
+            file = self.service.files().get(fileId=file_id, fields='modifiedTime').execute()
+            dt = datetime.strptime(file['modifiedTime'].replace('Z', '+0000'), '%Y-%m-%dT%H:%M:%S.%f%z')
+            return dt
+        except:
+            return None
+
+    def create_backup(self, file_id, file_name):
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_name = f"BACKUP_{timestamp}_{file_name}"
+            orig_file = self.service.files().get(fileId=file_id, fields='parents').execute()
+            parents = orig_file.get('parents', [])
+            metadata = {'name': backup_name}
+            if parents: metadata['parents'] = parents
+            self.service.files().copy(fileId=file_id, body=metadata).execute()
+            self.cleanup_backups(file_name)
+            return True
+        except Exception as e:
+            print(f"Backup failed: {e}")
+            return False
+
+    def cleanup_backups(self, original_name):
+        try:
+            query = f"name contains 'BACKUP_' and name contains '{original_name}' and trashed=false"
+            results = self.service.files().list(q=query, pageSize=20, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
+            items = results.get('files', [])
+            if len(items) > 5:
+                for item in items[5:]:
+                    try:
+                        self.service.files().delete(fileId=item['id']).execute()
+                    except: pass
+        except: pass
+
+    def download_db(self, force=False):
+        file_id, file_name = self.find_db_file()
+        if not file_id:
+            return False, "Database not found in Cloud."
         
-        media = MediaFileUpload(local_path, mimetype='application/x-sqlite3', resumable=True)
-        if items:
-            file_id = items[0]['id']
-            self.drive_service.files().update(fileId=file_id, media_body=media).execute()
-            return f"[SUCCESS] Successfully OVERWRITTEN '{db_name}' in Google Drive."
+        if os.path.exists(DB_NAME) and not force:
+            try:
+                local_ts = os.path.getmtime(DB_NAME)
+                local_mod = datetime.fromtimestamp(local_ts, tz=timezone.utc)
+                cloud_time = self.get_cloud_modified_time(file_id)
+                if cloud_time and (local_mod > cloud_time + timedelta(minutes=2)):
+                    return False, f"CONFLICT: Your local database is NEWER ({local_mod.strftime('%H:%M')}) than the cloud file ({cloud_time.strftime('%H:%M')}).\n\nIf you pull now, you will lose your recent local changes."
+            except Exception as e:
+                print(f"Pull check warning: {e}")
+
+        try:
+            try: sqlite3.connect(DB_NAME).close()
+            except: pass
+
+            request = self.service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            
+            with open(DB_NAME, "wb") as f:
+                f.write(fh.getbuffer())
+            
+            st.session_state['last_cloud_sync'] = datetime.now()
+            return True, f"Downloaded '{file_name}' successfully."
+        except Exception as e:
+            return False, str(e)
+
+    def upload_db(self, force=False, retries=3):
+        if not os.path.exists(DB_NAME):
+            return False, "No local database found to upload."
+            
+        file_id, file_name = self.find_db_file()
+        
+        if file_id and not force:
+            cloud_time = self.get_cloud_modified_time(file_id)
+            local_ts = os.path.getmtime(DB_NAME)
+            local_time = datetime.fromtimestamp(local_ts, tz=timezone.utc) 
+            if cloud_time and (cloud_time > local_time + timedelta(seconds=2)):
+                 return False, f"CONFLICT: Cloud file is newer ({cloud_time.strftime('%H:%M')}) than local ({local_time.strftime('%H:%M')}). Please Pull first."
+
+        try:
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA integrity_check")
+            result = cursor.fetchone()
+            conn.close()
+            if result[0] != "ok":
+                return False, "❌ Local Database Corrupt. Do not upload."
+        except Exception as e:
+            return False, f"❌ DB Check Failed: {e}"
+
+        media = MediaFileUpload(DB_NAME, mimetype='application/x-sqlite3', resumable=True)
+        
+        # --- V150: EXPONENTIAL BACKOFF LOGIC ---
+        delay = 1
+        for attempt in range(retries + 1):
+            try:
+                if file_id:
+                    if attempt == 0: 
+                        self.create_backup(file_id, file_name)
+                    self.service.files().update(fileId=file_id, media_body=media).execute()
+                    action = f"Updated '{file_name}' (Backup created)"
+                else:
+                    file_metadata = {'name': DB_NAME}
+                    self.service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                    action = "Created New File"
+                
+                st.session_state['last_cloud_sync'] = datetime.now()
+                return True, f"Sync Successful: {action}"
+            except Exception as e:
+                if attempt < retries:
+                    time.sleep(delay)
+                    delay *= 2  # Double the delay each time
+                    continue
+                return False, f"Upload failed after {retries} retries: {str(e)}"
+
+# Initialize Drive Manager
+drive_mgr = DriveManager()
+
+def auto_sync_if_connected():
+    if not drive_mgr.is_connected: return
+    with st.spinner("☁️ Auto-syncing to cloud..."):
+        success, msg = drive_mgr.upload_db()
+        if success:
+            st.toast(f"✅ Cloud Saved: {datetime.now().strftime('%H:%M')}")
+        elif "CONFLICT" in msg:
+            st.error(f"⚠️ Auto-sync BLOCKED: Conflict detected. Please resolve in sidebar.")
         else:
-            file_metadata = {'name': db_name}
-            self.drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-            return f"[SUCCESS] Successfully UPLOADED new '{db_name}' to Google Drive."
+            st.warning(f"⚠️ Auto-sync failed: {msg}")
 
-    def pull_from_cloud(self):
-        if self.drive_service:
-            self.btn_pull.setEnabled(False)
-            self.cloud_console.append(f"[{datetime.now().strftime('%H:%M:%S')}] Starting PULL from Cloud...")
-            asyncio.create_task(self._async_pull_from_cloud())
+# --- DATABASE ENGINE ---
+def get_db_connection():
+    return sqlite3.connect(DB_NAME)
 
-    async def _async_pull_from_cloud(self):
+def init_db():
+    if not os.path.exists(DB_NAME) and drive_mgr.is_connected:
+        success, msg = drive_mgr.download_db()
+        if success:
+            st.toast(f"☁️ Cloud Data Loaded: {msg}")
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    strategy TEXT,
+                    status TEXT,
+                    entry_date DATE,
+                    exit_date DATE,
+                    days_held INTEGER,
+                    debit REAL,
+                    lot_size INTEGER,
+                    pnl REAL,
+                    theta REAL,
+                    delta REAL,
+                    gamma REAL,
+                    vega REAL,
+                    notes TEXT,
+                    tags TEXT,
+                    parent_id TEXT,
+                    put_pnl REAL,
+                    call_pnl REAL,
+                    iv REAL,
+                    link TEXT,
+                    original_group TEXT
+                )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id TEXT,
+                    snapshot_date DATE,
+                    pnl REAL,
+                    days_held INTEGER,
+                    theta REAL,
+                    delta REAL,
+                    vega REAL,
+                    gamma REAL, 
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
+                    name TEXT PRIMARY KEY,
+                    identifier TEXT,
+                    target_pnl REAL,
+                    target_days INTEGER,
+                    min_stability REAL,
+                    description TEXT,
+                    typical_debit REAL
+                )''')
+    
+    def add_column_safe(table, col_name, col_type):
         try:
-            if self.db_conn:
-                self.db_conn.close()
-                self.db_conn = None
-            
-            result = await asyncio.to_thread(self._blocking_pull)
-            self.cloud_console.append(result)
-            
-            self.init_database()
-            self.load_journal_data()
-            self.refresh_portfolio_grid()
-            
-        except Exception as e:
-            self.cloud_console.append(f"[ERROR] Pull failed: {e}")
-            if not self.db_conn: self.init_database()
-        finally:
-            self.btn_pull.setEnabled(True)
+            c.execute(f"SELECT {col_name} FROM {table} LIMIT 1")
+        except:
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+            except: pass
 
-    def _blocking_pull(self):
-        db_name = "trade_guardian_v4.db"
-        local_path = os.path.join(os.path.dirname(__file__), db_name)
-        
-        query = f"name='{db_name}' and trashed=false"
-        results = self.drive_service.files().list(q=query, pageSize=1, fields="files(id, name)").execute()
-        items = results.get('files', [])
-        
-        if not items: return f"[ERROR] '{db_name}' not found in Google Drive."
-            
-        file_id = items[0]['id']
-        request = self.drive_service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-            
-        with open(local_path, "wb") as f:
-            f.write(fh.getbuffer())
-            
-        return f"[SUCCESS] Successfully DOWNLOADED '{db_name}' from Google Drive."
+    add_column_safe('snapshots', 'theta', 'REAL')
+    add_column_safe('snapshots', 'delta', 'REAL')
+    add_column_safe('snapshots', 'vega', 'REAL')
+    add_column_safe('snapshots', 'gamma', 'REAL')
+    add_column_safe('strategy_config', 'typical_debit', 'REAL')
+    add_column_safe('trades', 'original_group', 'TEXT')
+    
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
+    conn.commit()
+    conn.close()
+    seed_default_strategies()
 
-    # --------------------------------------------------------------------------
-    # --- CORE WORKFLOW LOGIC & V150 DATABASE ALIGNMENT ---
-    # --------------------------------------------------------------------------
-    def init_database(self):
-        db_path = os.path.join(os.path.dirname(__file__), "trade_guardian_v4.db")
-        self.db_conn = sqlite3.connect(db_path)
-        c = self.db_conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS trades (
-                        id TEXT PRIMARY KEY, name TEXT, strategy TEXT, status TEXT, entry_date DATE,
-                        exit_date DATE, days_held INTEGER, debit REAL, lot_size INTEGER, pnl REAL,
-                        theta REAL, delta REAL, gamma REAL, vega REAL, notes TEXT, tags TEXT,
-                        parent_id TEXT, put_pnl REAL, call_pnl REAL, iv REAL, link TEXT, original_group TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT, snapshot_date DATE,
-                        pnl REAL, days_held INTEGER, theta REAL, delta REAL, vega REAL, gamma REAL,
-                        FOREIGN KEY(trade_id) REFERENCES trades(id))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS strategy_config (
-                        name TEXT PRIMARY KEY, identifier TEXT, target_pnl REAL, target_days INTEGER,
-                        min_stability REAL, description TEXT, typical_debit REAL)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS campaign_adjustments (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT, date TEXT, 
-                        action TEXT, details TEXT, realized_pnl REAL)''')
-        self.db_conn.commit()
+def seed_default_strategies(force_reset=False):
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if force_reset:
+            c.execute("DELETE FROM strategy_config")
         
         c.execute("SELECT count(*) FROM strategy_config")
-        if c.fetchone()[0] == 0:
-            defaults = [('130/160', '130/160', 500, 36, 0.8, 'Income Discipline', 4000), ('160/190', '160/190', 700, 44, 0.8, 'Patience Training', 5200), ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery', 8000), ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder', 5000)]
+        count = c.fetchone()[0]
+        
+        if count == 0:
+            defaults = [
+                ('130/160', '130/160', 500, 36, 0.8, 'Income Discipline', 4000),
+                ('160/190', '160/190', 700, 44, 0.8, 'Patience Training', 5200),
+                ('M200', 'M200', 900, 41, 0.8, 'Emotional Mastery', 8000),
+                ('SMSF', 'SMSF', 600, 40, 0.8, 'Wealth Builder', 5000)
+            ]
             c.executemany("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", defaults)
-            self.db_conn.commit()
+            conn.commit()
+            if force_reset:
+                st.toast("Strategies Reset to Factory Defaults.")
+    except Exception as e:
+        print(f"Seeding error: {e}")
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=60)
+def load_strategy_config():
+    if not os.path.exists(DB_NAME): return {}
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_config'")
+        if not c.fetchone(): return {}
+
+        df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        config = {}
+        for _, row in df.iterrows():
+            typ_debit = row['typical_debit'] if 'typical_debit' in row and pd.notnull(row['typical_debit']) else 5000
             
-    def load_strategy_groups(self):
-        if os.path.exists(self.active_strategies_file):
-            try:
-                with open(self.active_strategies_file, 'r') as f: return json.load(f)
-            except: pass
+            config[row['name']] = {
+                'id': row['identifier'],
+                'pnl': row['target_pnl'],
+                'dit': row['target_days'],
+                'stability': row['min_stability'],
+                'debit_per_lot': typ_debit
+            }
+        return config
+    except: return {}
+    finally: conn.close()
+
+# --- V150 QUANT LOGIC & INTELLIGENCE FUNCTIONS ---
+
+def calculate_kelly_fraction(win_rate, avg_win, avg_loss, correlation_penalty=0.5):
+    """
+    V150: Modified Kelly Criterion for Options Portfolios.
+    Applies a correlation penalty (Half-Kelly equivalent) to prevent massive over-leveraging.
+    """
+    if avg_loss == 0 or avg_win <= 0:
+        return 0.0
+    b = abs(avg_win / avg_loss)
+    kelly = (win_rate * b - (1 - win_rate)) / b
+    # Cap at 25% generally, scale by correlation_penalty to reflect options dependence
+    return max(0, min(kelly * correlation_penalty, 0.25))
+
+def vectorized_theta_efficiency(df):
+    """
+    V150: Vectorized efficiency logic, safely avoiding division by zero.
+    """
+    if df.empty: return df
+    theta_safe = np.where(df['Theta'] == 0, 1, df['Theta'])
+    days_safe = np.where(df['Days Held'] == 0, 1, df['Days Held'])
+    df['Theta_Efficiency_Score'] = df['P&L'] / (theta_safe * days_safe)
+    return df
+
+def calculate_portfolio_var(df, confidence=0.95):
+    """
+    V150: Value at Risk (VaR) Calculation.
+    Estimates the potential loss in the portfolio over a 1-day period based on history.
+    """
+    if df.empty or len(df) < 5: return 0.0
+    daily_returns = df['P&L'].dropna()
+    if len(daily_returns) < 2: return 0.0
+    mu = np.mean(daily_returns)
+    sigma = np.std(daily_returns)
+    var = stats.norm.ppf(1 - confidence, mu, sigma)
+    return min(0, var) # VaR is represented as a negative number
+
+def generate_trade_predictions(active_df, history_df, prob_low, prob_high, total_capital=100000):
+    if active_df.empty or history_df.empty: return pd.DataFrame()
+    features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
+    train_df = history_df.dropna(subset=features).copy()
+    if len(train_df) < 5: return pd.DataFrame()
+    predictions = []
+    for _, row in active_df.iterrows():
+        curr_vec = np.nan_to_num(row[features].values.astype(float)).reshape(1, -1)
+        hist_vecs = np.nan_to_num(train_df[features].values.astype(float))
+        distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
+        top_k_idx = np.argsort(distances)[:7]
+        nearest_neighbors = train_df.iloc[top_k_idx]
+        win_prob = (nearest_neighbors['P&L'] > 0).mean()
+        avg_pnl = nearest_neighbors['P&L'].mean()
+        avg_win = nearest_neighbors[nearest_neighbors['P&L'] > 0]['P&L'].mean()
+        avg_loss = nearest_neighbors[nearest_neighbors['P&L'] < 0]['P&L'].mean()
+        if pd.isna(avg_win): avg_win = 0
+        if pd.isna(avg_loss): avg_loss = -avg_pnl * 0.5
+        
+        kelly_size = calculate_kelly_fraction(win_prob, avg_win, avg_loss)
+        rec_dollars = kelly_size * total_capital
+        avg_dist = distances[top_k_idx].mean()
+        confidence = max(0, 100 - (avg_dist * 10)) 
+        rec = "HOLD"
+        if win_prob * 100 < prob_low: rec = "REDUCE/CLOSE"
+        elif win_prob * 100 > prob_high: rec = "PRESS WINNER"
+        predictions.append({
+            'Trade Name': row['Name'], 'Strategy': row['Strategy'], 'Win Prob %': win_prob * 100,
+            'Expected PnL': avg_pnl, 'Kelly Size %': kelly_size * 100, 'Rec. Size ($)': rec_dollars,
+            'AI Rec': rec, 'Confidence': confidence
+        })
+    return pd.DataFrame(predictions)
+
+def get_mae_stats(conn):
+    query = """
+    SELECT t.strategy, MIN(s.pnl) as worst_drawdown
+    FROM snapshots s
+    JOIN trades t ON s.trade_id = t.id
+    WHERE t.status = 'Expired' AND t.pnl > 0
+    GROUP BY t.id, t.strategy
+    """
+    try:
+        df = pd.read_sql(query, conn)
+        mae_stats = {}
+        if not df.empty:
+            for strategy in df['strategy'].unique():
+                strat_df = df[df['strategy'] == strategy]
+                if not strat_df.empty:
+                    limit = strat_df['worst_drawdown'].quantile(0.05) 
+                    mae_stats[strategy] = limit
+        return mae_stats
+    except Exception as e:
         return {}
 
-    def save_strategy_groups(self, data):
-        with open(self.active_strategies_file, 'w') as f: json.dump(data, f, indent=4)
+def get_velocity_stats(expired_df):
+    velocity_stats = {}
+    if expired_df.empty: return velocity_stats
+    winners = expired_df[expired_df['P&L'] > 0].copy()
+    if winners.empty: return velocity_stats
+    winners['days_held'] = winners['days_held'].replace(0, 1)
+    winners['velocity'] = winners['P&L'] / winners['days_held']
+    for strategy in winners['Strategy'].unique():
+        s_df = winners[winners['Strategy'] == strategy]
+        if len(s_df) > 2:
+            mean_v = s_df['velocity'].mean()
+            std_v = s_df['velocity'].std()
+            velocity_stats[strategy] = {
+                'threshold': mean_v + (2 * std_v),
+                'mean': mean_v
+            }
+    return velocity_stats
 
-    def refresh_portfolio_grid(self):
-        if not self.ib.isConnected() or not self.account_selector.currentText(): return
-        selected_account = self.account_selector.currentText()
+def check_rot_and_efficiency(row, hist_avg_days):
+    try:
+        current_pnl = row['P&L']
+        days = row.get('Days', 1)
+        if days == 0: days = 1
+        theta = row.get('Net Theta', 0)
+        current_speed = current_pnl / days
+        
+        if theta != 0: theta_efficiency = (current_speed / theta) 
+        else: theta_efficiency = 0
             
-        try:
-            positions = self.ib.positions(account=selected_account)
-            self.portfolio_tree.clear()
+        status = "Healthy"
+        if days > hist_avg_days * 1.2 and current_pnl < 0:
+            status = "Rotting (Time > Avg & Red)"
+        elif theta_efficiency < 0.2 and days > 10 and current_pnl > 0:
+             status = "Inefficient (Theta Stuck)"
+        elif theta_efficiency < 0 and days > 5:
+             status = "Bleeding (Negative Efficiency)"
+             
+        return current_speed, theta_efficiency, status
+    except:
+        return 0, 0, "Error"
+
+# --- HELPER FUNCTIONS ---
+def get_strategy_dynamic(trade_name, group_name, config_dict):
+    t_name = str(trade_name).upper().strip()
+    g_name = str(group_name).upper().strip()
+    sorted_strats = sorted(config_dict.items(), key=lambda x: len(str(x[1]['id'])), reverse=True)
+    for strat_name, details in sorted_strats:
+        key = str(details['id']).upper()
+        if key in t_name: return strat_name
+    for strat_name, details in sorted_strats:
+        key = str(details['id']).upper()
+        if key in g_name: return strat_name
+    return "Other"
+
+def clean_num(x):
+    try:
+        if pd.isna(x) or str(x).strip() == "": return 0.0
+        val_str = str(x).replace('$', '').replace(',', '').replace('%', '').strip()
+        val = float(val_str)
+        if np.isnan(val): return 0.0
+        return val
+    except: return 0.0
+
+def safe_fmt(val, fmt_str):
+    try:
+        if isinstance(val, (int, float)): return fmt_str.format(val)
+        return str(val)
+    except: return str(val)
+
+def generate_id(name, strategy, entry_date):
+    d_str = pd.to_datetime(entry_date).strftime('%Y%m%d')
+    safe_name = re.sub(r'\W+', '', str(name))
+    return f"{safe_name}_{strategy}_{d_str}"
+
+def extract_ticker(name):
+    try:
+        parts = str(name).split(' ')
+        if parts:
+            ticker = parts[0].replace('.', '').upper()
+            if ticker in ['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF']:
+                return "UNKNOWN"
+            return ticker
+        return "UNKNOWN"
+    except: return "UNKNOWN"
+
+def theta_decay_model(initial_theta, days_held, strategy, dte_at_entry=45):
+    t_frac = min(1.0, days_held / dte_at_entry) if dte_at_entry > 0 else 1.0
+    if strategy in ['M200', '130/160', '160/190', 'SMSF']:
+        if t_frac < 0.5: decay_factor = 1 - (2 * t_frac) ** 2
+        else: decay_factor = 2 * (1 - t_frac)
+        return initial_theta * max(0, decay_factor)
+    elif 'VERTICAL' in str(strategy).upper() or 'DIRECTIONAL' in str(strategy).upper():
+        if t_frac < 0.7: decay_factor = 1 - t_frac
+        else: decay_factor = 0.3 * np.exp(-5 * (t_frac - 0.7))
+        return initial_theta * decay_factor
+    else:
+        decay_factor = np.exp(-2 * t_frac)
+        return initial_theta * (1 - decay_factor)
+
+def get_trade_lifecycle_data(row, snapshots_df):
+    days = int(row['Days Held'])
+    if days < 1: days = 1
+    total_pnl = row['P&L']
+    
+    if snapshots_df is not None and not snapshots_df.empty:
+        trade_snaps = snapshots_df[snapshots_df['trade_id'] == row['id']].sort_values('days_held').copy()
+        if len(trade_snaps) >= 2:
+            trade_snaps['Cumulative_PnL'] = trade_snaps['pnl']
+            trade_snaps['Day'] = trade_snaps['days_held']
+            if trade_snaps['Day'].min() > 0:
+                start_row = pd.DataFrame({'Day': [0], 'Cumulative_PnL': [0]})
+                trade_snaps = pd.concat([start_row, trade_snaps], ignore_index=True)
+            if row['Status'] == 'Expired':
+                last_snap_day = trade_snaps['Day'].max()
+                if last_snap_day < days:
+                    end_row = pd.DataFrame({'Day': [days], 'Cumulative_PnL': [total_pnl]})
+                    trade_snaps = pd.concat([trade_snaps, end_row], ignore_index=True)
+            trade_snaps['Pct_Duration'] = (trade_snaps['Day'] / days) * 100
+            denom = abs(total_pnl) if abs(total_pnl) > 0 else 1
+            trade_snaps['Pct_PnL'] = (trade_snaps['Cumulative_PnL'] / denom) * 100
+            return trade_snaps[['Day', 'Cumulative_PnL', 'Pct_Duration', 'Pct_PnL']]
+
+    daily_data = []
+    initial_theta = row['Theta'] if row['Theta'] != 0 else 1.0
+    weights = []
+    for d in range(1, days + 1):
+        w = theta_decay_model(initial_theta, d, row['Strategy'], max(45, days))
+        weights.append(abs(w))
+    
+    total_w = sum(weights)
+    if total_w == 0: weights = [1/days] * days
+    else: weights = [w/total_w for w in weights]
+    
+    cum_pnl = 0
+    daily_data.append({'Day': 0, 'Cumulative_PnL': 0, 'Pct_Duration': 0, 'Pct_PnL': 0})
+    for i, w in enumerate(weights):
+        day_num = i + 1
+        day_gain = total_pnl * w
+        cum_pnl += day_gain
+        pct_dur = (day_num / days) * 100
+        denom = abs(total_pnl) if abs(total_pnl) > 0 else 1
+        pct_pnl = (cum_pnl / denom) * 100
+        daily_data.append({'Day': day_num, 'Cumulative_PnL': cum_pnl, 'Pct_Duration': pct_dur, 'Pct_PnL': pct_pnl})
+    return pd.DataFrame(daily_data)
+
+def reconstruct_daily_pnl(trades_df):
+    trades = trades_df.copy()
+    trades['Entry Date'] = pd.to_datetime(trades['Entry Date'])
+    trades['Exit Date'] = pd.to_datetime(trades['Exit Date'])
+    start_date = trades['Entry Date'].min()
+    end_date = max(trades['Exit Date'].max(), pd.Timestamp.now())
+    date_range = pd.date_range(start=start_date, end=end_date)
+    daily_pnl_dict = {d.date(): 0.0 for d in date_range}
+
+    for _, trade in trades.iterrows():
+        if pd.isnull(trade['Exit Date']): continue
+        days = trade['Days Held']
+        if days <= 0: days = 1
+        total_pnl = trade['P&L']
+        strategy = trade['Strategy']
+        initial_theta = trade['Theta'] if trade['Theta'] != 0 else 1.0
+        
+        daily_theta_weights = []
+        for day in range(days):
+            expected_theta = theta_decay_model(initial_theta, day, strategy, max(45, days))
+            daily_theta_weights.append(abs(expected_theta))
+
+        total_theta_sum = sum(daily_theta_weights)
+        if total_theta_sum == 0: daily_theta_weights = [1/days] * days
+        else: daily_theta_weights = [w/total_theta_sum for w in daily_theta_weights]
             
-            all_groups = self.load_strategy_groups()
-            acc_groups = all_groups.get(selected_account, {})
-            grouped_conids = {cid: {"g_id": g_id, "data": g_data} for g_id, g_data in acc_groups.items() for cid in g_data.get('legs', [])}
-                    
-            ticker_nodes, strategy_nodes, combo_nodes = {}, {}, {}
+        curr = trade['Entry Date']
+        for day_weight in daily_theta_weights:
+            if curr.date() in daily_pnl_dict:
+                daily_pnl_dict[curr.date()] += total_pnl * day_weight
+            else:
+                daily_pnl_dict[curr.date()] = total_pnl * day_weight
+            curr += pd.Timedelta(days=1)
+    return daily_pnl_dict
+
+# --- SMART FILE PARSER ---
+def parse_optionstrat_file(file, file_type, config_dict):
+    try:
+        df_raw = None
+        if file.name.endswith(('.xlsx', '.xls')):
+            try:
+                df_temp = pd.read_excel(file, header=None)
+                header_row = 0
+                for i, row in df_temp.head(30).iterrows():
+                    row_vals = [str(v).strip() for v in row.values]
+                    if "Name" in row_vals and "Total Return $" in row_vals:
+                        header_row = i
+                        break
+                file.seek(0)
+                df_raw = pd.read_excel(file, header=header_row)
+                
+                if 'Link' in df_raw.columns:
+                    try:
+                        file.seek(0)
+                        wb = load_workbook(file, data_only=False)
+                        sheet = wb.active
+                        excel_header_row = header_row + 1
+                        link_col_idx = None
+                        for cell in sheet[excel_header_row]:
+                            if str(cell.value).strip() == "Link":
+                                link_col_idx = cell.col_idx
+                                break
+                        if link_col_idx:
+                            links = []
+                            for i in range(len(df_raw)):
+                                excel_row_idx = excel_header_row + 1 + i
+                                cell = sheet.cell(row=excel_row_idx, column=link_col_idx)
+                                url = ""
+                                if cell.hyperlink: url = cell.hyperlink.target
+                                elif cell.value and str(cell.value).startswith('=HYPERLINK'):
+                                    try:
+                                        parts = str(cell.value).split('"')
+                                        if len(parts) > 1: url = parts[1]
+                                    except: pass
+                                links.append(url if url else "")
+                            df_raw['Link'] = links
+                    except: pass
+            except: pass
+
+        if df_raw is None:
+            file.seek(0)
+            content = file.getvalue().decode("utf-8", errors='ignore')
+            lines = content.split('\n')
+            header_row = 0
+            for i, line in enumerate(lines[:30]):
+                if "Name" in line and "Total Return" in line:
+                    header_row = i
+                    break
+            file.seek(0)
+            df_raw = pd.read_csv(file, skiprows=header_row)
+
+        parsed_trades = []
+        current_trade = None
+        current_legs = []
+
+        def finalize_trade(trade_data, legs, f_type):
+            if not trade_data.any(): return None
             
-            # --- SGPV Variables ---
-            sgpv_opt = 0.0
-            sgpv_stk = 0.0
-            net_liq = 0.0
+            name = str(trade_data.get('Name', ''))
+            group = str(trade_data.get('Group', '')) 
+            created = trade_data.get('Created At', '')
+            try: start_dt = pd.to_datetime(created)
+            except: return None 
+
+            strat = get_strategy_dynamic(name, group, config_dict)
+            link = str(trade_data.get('Link', ''))
+            if link == 'nan' or link == 'Open': link = "" 
             
-            for val in self.ib.accountValues(account=selected_account):
-                if val.tag == 'NetLiquidationByCurrency' and val.currency == 'BASE':
-                    try: net_liq = float(val.value)
+            pnl = clean_num(trade_data.get('Total Return $', 0))
+            debit = abs(clean_num(trade_data.get('Net Debit/Credit', 0)))
+            theta = clean_num(trade_data.get('Theta', 0))
+            delta = clean_num(trade_data.get('Delta', 0))
+            gamma = clean_num(trade_data.get('Gamma', 0))
+            vega = clean_num(trade_data.get('Vega', 0))
+            iv = clean_num(trade_data.get('IV', 0))
+
+            exit_dt = None
+            try:
+                raw_exp = trade_data.get('Expiration')
+                if pd.notnull(raw_exp) and str(raw_exp).strip() != '':
+                    exit_dt = pd.to_datetime(raw_exp)
+            except: pass
+
+            days_held = 1
+            if exit_dt and f_type == "History": days_held = (exit_dt - start_dt).days
+            else: days_held = (datetime.now() - start_dt).days
+            if days_held < 1: days_held = 1
+
+            strat_config = config_dict.get(strat, {})
+            typical_debit = strat_config.get('debit_per_lot', 5000)
+            
+            lot_match = re.search(r'(\d+)\s*(?:LOT|L\b)', name, re.IGNORECASE)
+            if lot_match: lot_size = int(lot_match.group(1))
+            else: lot_size = int(round(debit / typical_debit))
+            if lot_size < 1: lot_size = 1
+
+            put_pnl = 0.0
+            call_pnl = 0.0
+            
+            if f_type == "History":
+                for leg in legs:
+                    if len(leg) < 5: continue
+                    sym = str(leg.iloc[0]) 
+                    if not sym.startswith('.'): continue
+                    try:
+                        qty = clean_num(leg.iloc[1])
+                        entry = clean_num(leg.iloc[2])
+                        close_price = clean_num(leg.iloc[4])
+                        leg_pnl = (close_price - entry) * qty * 100
+                        if 'P' in sym and 'C' not in sym: put_pnl += leg_pnl
+                        elif 'C' in sym and 'P' not in sym: call_pnl += leg_pnl
+                        elif re.search(r'[0-9]P[0-9]', sym): put_pnl += leg_pnl
+                        elif re.search(r'[0-9]C[0-9]', sym): call_pnl += leg_pnl
                     except: pass
             
-            for pos in positions:
-                conid, ticker = pos.contract.conId, pos.contract.symbol
-                
-                if ticker not in ticker_nodes:
-                    t_node = SortableTreeWidgetItem(self.portfolio_tree); t_node.setText(0, f"📊 {ticker}"); t_node.setFont(0, QFont("Menlo", 14, QFont.Weight.Bold)); t_node.setForeground(0, QColor('#58a6ff'))
-                    ticker_nodes[ticker] = t_node
-                    u_node = SortableTreeWidgetItem(t_node); u_node.setText(0, f"📁 Ungrouped {ticker}"); u_node.setFont(0, QFont("Menlo", 12, QFont.Weight.Bold)); u_node.setForeground(0, QColor('#8b949e'))
-                    strategy_nodes[(ticker, "UNGROUPED")] = u_node
+            t_id = generate_id(name, strat, start_dt)
+            return {
+                'id': t_id, 'name': name, 'strategy': strat, 'start_dt': start_dt,
+                'exit_dt': exit_dt, 'days_held': days_held, 'debit': debit,
+                'lot_size': lot_size, 'pnl': pnl, 
+                'theta': theta, 'delta': delta, 'gamma': gamma, 'vega': vega,
+                'iv': iv, 'put_pnl': put_pnl, 'call_pnl': call_pnl, 'link': link,
+                'group': group
+            }
 
-                group_info = grouped_conids.get(conid)
-                if group_info:
-                    g_id, g_data = group_info["g_id"], group_info["data"]
-                    strat_name, combo_name, realized_pnl = g_data.get("strategy", "General Strategy"), g_data.get("name", "Custom Combo"), g_data.get("realized_pnl", 0.0)
-                    strat_key = (ticker, strat_name)
-                    
-                    if strat_key not in strategy_nodes:
-                        s_node = SortableTreeWidgetItem(ticker_nodes[ticker]); s_node.setText(0, f"📑 {strat_name}"); s_node.setFont(0, QFont("Menlo", 13, QFont.Weight.Bold)); s_node.setForeground(0, QColor('#d2a8ff'))
-                        strategy_nodes[strat_key] = s_node
-                        
-                    if g_id not in combo_nodes:
-                        c_node = SortableTreeWidgetItem(strategy_nodes[strat_key]); c_node.setText(0, f"📦 {combo_name}"); c_node.setFont(0, QFont("Menlo", 12, QFont.Weight.Bold)); c_node.setForeground(0, QColor('#e3b341')); c_node.setData(0, Qt.ItemDataRole.UserRole, g_id)
-                        c_node.setText(6, f"${realized_pnl:.2f}")
-                        c_node.setForeground(6, QColor('#3fb950' if realized_pnl >= 0 else '#f85149'))
-                        combo_nodes[g_id] = c_node
-                    parent_node = combo_nodes[g_id]
-                else: parent_node = strategy_nodes[(ticker, "UNGROUPED")]
-                    
-                child = SortableTreeWidgetItem(parent_node)
-                sym = pos.contract.localSymbol if pos.contract.localSymbol else pos.contract.symbol
+        cols = df_raw.columns
+        col_names = [str(c) for c in cols]
+        if 'Name' not in col_names or 'Total Return $' not in col_names:
+            return []
+
+        for index, row in df_raw.iterrows():
+            name_val = str(row['Name'])
+            if name_val and not name_val.startswith('.') and name_val != 'Symbol' and name_val != 'nan':
+                if current_trade is not None:
+                    res = finalize_trade(current_trade, current_legs, file_type)
+                    if res: parsed_trades.append(res)
+                current_trade = row
+                current_legs = []
+            elif name_val.startswith('.'):
+                current_legs.append(row)
+        
+        if current_trade is not None:
+             res = finalize_trade(current_trade, current_legs, file_type)
+             if res: parsed_trades.append(res)
+        return parsed_trades
+    except Exception as e:
+        print(f"Parser Error: {e}")
+        return []
+
+# --- SYNC ENGINE ---
+def sync_data(file_list, file_type):
+    log = []
+    if not isinstance(file_list, list): file_list = [file_list]
+    conn = get_db_connection()
+    c = conn.cursor()
+    db_active_ids = set()
+    if file_type == "Active":
+        try:
+            current_active = pd.read_sql("SELECT id FROM trades WHERE status = 'Active'", conn)
+            db_active_ids = set(current_active['id'].tolist())
+        except: pass
+    file_found_ids = set()
+    
+    config_dict = load_strategy_config()
+
+    for file in file_list:
+        count_new = 0
+        count_update = 0
+        try:
+            trades_data = parse_optionstrat_file(file, file_type, config_dict)
+            if not trades_data:
+                log.append(f" {file.name}: Skipped (No valid trades found)")
+                continue
+
+            for t in trades_data:
+                trade_id = t['id']
+                if file_type == "Active":
+                    file_found_ids.add(trade_id)
                 
-                # --- OPTIONNET EXPLORER VISUAL LEG COLORING ---
-                qty_val = float(pos.position)
-                color_hex = '#c9d1d9' # Default
-                if pos.contract.secType == 'OPT':
-                    is_call = pos.contract.right == 'C'
-                    is_put = pos.contract.right == 'P'
-                    if qty_val > 0 and is_call: color_hex = '#3fb950' # Long Call: Green
-                    elif qty_val < 0 and is_call: color_hex = '#f85149' # Short Call: Red
-                    elif qty_val > 0 and is_put: color_hex = '#58a6ff' # Long Put: Blue
-                    elif qty_val < 0 and is_put: color_hex = '#d2a8ff' # Short Put: Purple
+                c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
+                existing = c.fetchone()
                 
-                child.setText(0, sym); child.setFont(0, QFont("Menlo", 12, QFont.Weight.Bold)); child.setToolTip(0, f"Full Leg Details: {sym}")
-                child.setForeground(0, QColor(color_hex))
-                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable); child.setCheckState(0, Qt.CheckState.Unchecked)
-                multiplier = float(pos.contract.multiplier) if pos.contract.multiplier else 100.0
+                if existing is None and t['link'] and len(t['link']) > 15:
+                    c.execute("SELECT id, name FROM trades WHERE link = ?", (t['link'],))
+                    link_match = c.fetchone()
+                    if link_match:
+                        old_id, old_name = link_match
+                        try:
+                            c.execute("UPDATE snapshots SET trade_id = ? WHERE trade_id = ?", (trade_id, old_id))
+                            c.execute("UPDATE trades SET id=?, name=? WHERE id=?", (trade_id, t['name'], old_id))
+                            log.append(f" Renamed: '{old_name}' -> '{t['name']}'")
+                            c.execute("SELECT id, status, theta, delta, gamma, vega, put_pnl, call_pnl, iv, link, lot_size, strategy FROM trades WHERE id = ?", (trade_id,))
+                            existing = c.fetchone()
+                            if file_type == "Active":
+                                file_found_ids.add(trade_id)
+                                if old_id in db_active_ids: db_active_ids.remove(old_id)
+                                db_active_ids.add(trade_id)
+                        except Exception as rename_err:
+                            print(f"Rename failed: {rename_err}")
+
+                status = "Active" if file_type == "Active" else "Expired"
                 
-                child.setData(0, Qt.ItemDataRole.UserRole + 1, {
-                    "symbol": pos.contract.symbol, "secType": pos.contract.secType, "expiry": pos.contract.lastTradeDateOrContractMonth,
-                    "strike": pos.contract.strike, "right": pos.contract.right, "multiplier": multiplier, "qty": pos.position, "avgCost": pos.avgCost / multiplier 
-                })
-                child.setData(0, Qt.ItemDataRole.UserRole, conid)
-                child.setText(1, str(pos.position)); child.setForeground(1, QColor('#3fb950' if pos.position > 0 else '#f85149' if pos.position < 0 else '#c9d1d9'))
-                child.setText(2, f"${pos.avgCost / multiplier:.2f}")
-                
-                # SGPV Accumulation
-                if pos.contract.secType == 'OPT':
-                    sgpv_opt += abs(pos.position) * multiplier * getattr(pos.contract, 'strike', 0.0) # Proxy for notional exposure
-                elif pos.contract.secType == 'STK':
-                    sgpv_stk += abs(pos.position) * (pos.avgCost / multiplier if pos.avgCost else 0.0)
-                
-            self.portfolio_tree.expandAll()
-            
-            # Update SGPV UI
-            self.lbl_net_liq.setText(f"NET LIQ: ${net_liq:,.0f}")
-            self.lbl_sgpv_opt.setText(f"OPT SGPV: ${sgpv_opt:,.0f}")
-            self.lbl_sgpv_stk.setText(f"STK SGPV: ${sgpv_stk:,.0f}")
-            
-            if net_liq > 0:
-                ratio = (sgpv_opt + sgpv_stk) / net_liq
-                self.lbl_sgpv_ratio.setText(f"RATIO: {ratio:.1f}")
-                if ratio > 50:
-                    self.lbl_sgpv_ratio.setStyleSheet("color: #FF5252;")
-                elif ratio > 30:
-                    self.lbl_sgpv_ratio.setStyleSheet("color: #FFD600;")
+                if existing is None:
+                    c.execute('''INSERT INTO trades 
+                        (id, name, strategy, status, entry_date, exit_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega, notes, tags, parent_id, put_pnl, call_pnl, iv, link, original_group)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (trade_id, t['name'], t['strategy'], status, t['start_dt'].date(), 
+                         t['exit_dt'].date() if t['exit_dt'] else None, 
+                         t['days_held'], t['debit'], t['lot_size'], t['pnl'], 
+                         t['theta'], t['delta'], t['gamma'], t['vega'], "", "", "", t['put_pnl'], t['call_pnl'], t['iv'], t['link'], t['group']))
+                    count_new += 1
                 else:
-                    self.lbl_sgpv_ratio.setStyleSheet("color: #00C853;")
-            
-            if hasattr(self, 'filter_ticker'): self.filter_portfolio_tree() 
-            asyncio.create_task(self._async_populate_tree_greeks(positions))
-        except Exception as e: print(f"[ERROR] Failed to fetch portfolio tree: {e}")
+                    db_lot_size = existing[10]
+                    final_lot_size = t['lot_size']
+                    if db_lot_size and db_lot_size > 0:
+                        final_lot_size = db_lot_size
 
-    def on_portfolio_item_clicked(self, item, column):
-        curr = item
-        combo_name = "None"
-        while curr is not None:
-            if curr.text(0).startswith("📦 "):
-                combo_name = curr.text(0).replace("📦 ", "")
-                break
-            curr = curr.parent()
-        self.lbl_combo_name.setText(f"Selected Combo: {combo_name}")
+                    db_strategy = existing[11]
+                    final_strategy = db_strategy
+                    if db_strategy == 'Other' and t['strategy'] != 'Other':
+                         final_strategy = t['strategy']
 
-        leaves = self._get_all_leaves(item)
-        if not leaves: return
-        self.stage_order(leaves, model_only=True)
-        expiries = []
-        symbol = None
-        for l in leaves:
-            data = l.data(0, Qt.ItemDataRole.UserRole + 1)
-            if data:
-                if not symbol: symbol = data.get('symbol')
-                if data.get('secType') == 'OPT' and data.get('expiry'):
-                    expiries.append(data.get('expiry'))
+                    old_put = existing[6] if existing[6] else 0.0
+                    old_call = existing[7] if existing[7] else 0.0
+                    old_iv = existing[8] if existing[8] else 0.0
+                    old_link = existing[9] if existing[9] else ""
                     
-        if symbol: asyncio.create_task(self._async_sync_workspace(symbol, expiries))
+                    old_status = existing[1]
+                    old_theta = existing[2]
 
-    async def _async_sync_workspace(self, symbol, expiries):
-        try:
-            if self.ticker_input.text().upper() != symbol.upper():
-                self.ticker_input.setText(symbol)
-                await self._async_load_chart(symbol)
-                
-            if self.chain_ticker_in.text().upper() != symbol.upper():
-                self.chain_ticker_in.setText(symbol)
-            
-            await self._async_fetch_expirations(symbol)
-            
-            valid_exps = [e for e in expiries if e]
-            if valid_exps:
-                earliest = sorted(valid_exps)[0] 
-                formatted = f"{earliest[:4]}-{earliest[4:6]}-{earliest[6:]}"
-                idx = -1
-                for i in range(self.exp_combo.count()):
-                    if self.exp_combo.itemText(i).startswith(formatted):
-                        idx = i
-                        break
-                if idx >= 0:
-                    self.exp_combo.setCurrentIndex(idx)
-                    await self._async_load_chain(symbol, earliest)
-        except Exception as e: pass
+                    final_theta = t['theta'] if t['theta'] != 0 else old_theta
+                    final_delta = t['delta'] if t['delta'] != 0 else 0
+                    final_gamma = t['gamma'] if t['gamma'] != 0 else 0
+                    final_vega = t['vega'] if t['vega'] != 0 else 0
+                    final_iv = t['iv'] if t['iv'] != 0 else old_iv
+                    final_put = t['put_pnl'] if t['put_pnl'] != 0 else old_put
+                    final_call = t['call_pnl'] if t['call_pnl'] != 0 else old_call
+                    final_link = t['link'] if t['link'] != "" else old_link
 
-    def analyze_portfolio_selection(self):
-        selected_leaves = []
-        def find_checked(node):
-            for i in range(node.childCount()):
-                child = node.child(i)
-                if child.checkState(0) == Qt.CheckState.Checked and child.data(0, Qt.ItemDataRole.UserRole + 1): selected_leaves.append(child)
-                find_checked(child)
-        for i in range(self.portfolio_tree.topLevelItemCount()): find_checked(self.portfolio_tree.topLevelItem(i))
-        if selected_leaves: self.stage_order(selected_leaves, model_only=True)
-
-    def stage_order(self, leg_items, model_only=False):
-        self.working_basket = []
-        raw_legs = []
-        for item in leg_items:
-            data = item.data(0, Qt.ItemDataRole.UserRole + 1)
-            if data and data['qty'] != 0: raw_legs.append(data)
-            
-        if not raw_legs:
-            self.refresh_basket_ui()
-            return
-            
-        ratios = [int(abs(d['qty'])) for d in raw_legs]
-        combo_gcd = ratios[0]
-        for r in ratios[1:]: combo_gcd = math.gcd(combo_gcd, r)
-            
-        inferred_ticker = raw_legs[0]['symbol']
-        
-        for data in raw_legs:
-            raw_qty = data['qty']
-            action = "BUY" if raw_qty > 0 else "SELL"
-            if not model_only: action = "SELL" if raw_qty > 0 else "BUY" 
-            normalized_qty = int(abs(raw_qty) // combo_gcd)
-            
-            self.working_basket.append({
-                'action': action, 'qty': normalized_qty, 'type': data.get('right', 'STK') if data.get('secType') == 'OPT' else 'STK',
-                'strike': data.get('strike', 0.0), 'price': data.get('avgCost', 0.0), 'dte_str': str(data.get('expiry', 'N/A')),
-                'is_existing': model_only, 'secType': data.get('secType', 'STK'), 'multiplier': data.get('multiplier', 100.0),
-                'bid': data.get('avgCost', 0.0), 'ask': data.get('avgCost', 0.0) 
-            })
-            
-        if not model_only: self.inp_exec_qty.setValue(combo_gcd)
-            
-        self.chain_ticker_in.setText(inferred_ticker)
-        self.fetch_expirations() 
-        self.refresh_basket_ui()
-
-    def calculate_bs_price(self, S, K, T, r, sigma, opt_type):
-        if T <= 0: return max(0, S - K) if opt_type == 'C' else max(0, K - S)
-        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-        if opt_type == 'C': return S * si.norm.cdf(d1) - K * np.exp(-r * T) * si.norm.cdf(d2)
-        else: return K * np.exp(-r * T) * si.norm.cdf(-d2) - S * si.norm.cdf(-d1)
-
-    def calculate_bs_greeks(self, S, K, T, r, sigma, opt_type):
-        if T <= 0 or S <= 0 or K <= 0: return 0.0, 0.0, 0.0, 0.0
-        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-        nd1 = si.norm.cdf(d1); nd2 = si.norm.cdf(d2); n_d1 = np.exp(-d1**2 / 2) / np.sqrt(2 * np.pi)
-        gamma = n_d1 / (S * sigma * np.sqrt(T)); vega = S * n_d1 * np.sqrt(T) / 100
-        if opt_type == 'C': delta = nd1; theta = (-S * n_d1 * sigma / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * nd2) / 365
-        else: delta = nd1 - 1; theta = (-S * n_d1 * sigma / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * si.norm.cdf(-d2)) / 365
-        return delta, gamma, theta, vega
-
-    def get_ai_recommendation(self, pnl, days, theta, delta, strat):
-        if not hasattr(self, 'strat_configs'):
-            self.strat_configs = {}
-            try:
-                c = self.db_conn.cursor()
-                c.execute("SELECT name, target_pnl, target_days FROM strategy_config")
-                for r in c.fetchall(): self.strat_configs[r[0]] = {'pnl': r[1], 'dit': r[2]}
-            except: pass
-            
-        bench = self.strat_configs.get(strat, {'pnl': 500, 'dit': 45})
-        target = bench['pnl']
-        avg_days = bench['dit']
-        
-        if pnl >= target: return "🟢 TAKE PROFIT", '#3fb950'
-        if pnl >= target * 0.8: return "🟡 PREPARE EXIT", '#e3b341'
-        if pnl < 0:
-            if theta > 0:
-                recov = abs(pnl) / theta
-                if recov > max(1, avg_days - days): return "🔴 KILL: ZOMBIE", '#f85149'
-            elif days > 15:
-                return "🔴 KILL: NEG THETA", '#f85149'
-                
-        stability = theta / (abs(delta) + 1)
-        if stability < 0.3 and days > 5: return "🟠 RISK REVIEW", '#e3b341'
-        if days < (avg_days * 0.7): return "🔵 COOKING", '#58a6ff'
-        if days > (avg_days * 1.25): return "🔴 STALE", '#f85149'
-        return "⚪ HOLD", '#8b949e'
-
-    async def _async_populate_tree_greeks(self, positions):
-        try:
-            symbols = list(set([p.contract.symbol for p in positions]))
-            spots = {}
-            for sym in symbols:
-                contract = Stock(sym, 'SMART', 'USD')
-                if sym in ['SPX', 'VIX']: contract = Index(sym, 'CBOE', 'USD')
-                elif sym in ['NDX']: contract = Index(sym, 'NASDAQ', 'USD')
-                elif sym in ['RUT']: contract = Index(sym, 'RUSSELL', 'USD')
-                await self.ib.qualifyContractsAsync(contract)
-                tickers = await self.ib.reqTickersAsync(contract)
-                spots[sym] = tickers[0].marketPrice() if tickers and not math.isnan(tickers[0].marketPrice()) else 100.0
-
-            def calc_node(node):
-                n_delta, n_theta, n_vega, n_pnl, n_debit = 0.0, 0.0, 0.0, 0.0, 0.0
-                data = node.data(0, Qt.ItemDataRole.UserRole + 1)
-                if data: 
-                    spot = spots.get(data['symbol'], 100.0)
-                    qty = data['qty']
-                    mult = data['multiplier']
-                    avgCost = data['avgCost']
-                    if data['secType'] == 'OPT':
-                        T = max(1, (datetime.strptime(data['expiry'], "%Y%m%d") - datetime.now()).days) / 365.0
-                        d, g, th, v = self.calculate_bs_greeks(spot, data['strike'], T, 0.05, 0.20, data['right'])
-                        curr_px = self.calculate_bs_price(spot, data['strike'], T, 0.05, 0.20, data['right'])
-                        n_delta, n_theta, n_vega = d * qty * mult, th * qty * mult, v * qty * mult
-                        n_pnl = (curr_px - avgCost) * qty * mult
-                    else: 
-                        n_delta = qty
-                        n_pnl = (spot - avgCost) * qty * mult
-                else: 
-                    for i in range(node.childCount()):
-                        cd, cth, cv, cpnl, cdeb = calc_node(node.child(i))
-                        n_delta += cd; n_theta += cth; n_vega += cv; n_pnl += cpnl
-                
-                node.setText(3, f"{n_delta:.2f}"); node.setText(4, f"{n_theta:.2f}"); node.setText(5, f"{n_vega:.2f}")
-                for col in [3, 4, 5]:
-                    val = float(node.text(col))
-                    node.setForeground(col, QColor('#3fb950' if val > 0.01 else '#f85149' if val < -0.01 else '#8b949e'))
+                    if file_type == "History":
+                        c.execute('''UPDATE trades SET 
+                            pnl=?, status=?, exit_date=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, put_pnl=?, call_pnl=?, iv=?, link=?, lot_size=?, strategy=?, original_group=?
+                            WHERE id=?''', 
+                            (t['pnl'], status, t['exit_dt'].date() if t['exit_dt'] else None, t['days_held'], 
+                             final_theta, final_delta, final_gamma, final_vega, final_put, final_call, final_iv, final_link, final_lot_size, final_strategy, t['group'], trade_id))
+                        count_update += 1
+                    elif old_status in ["Active", "Missing"]: 
+                        c.execute('''UPDATE trades SET 
+                            pnl=?, days_held=?, theta=?, delta=?, gamma=?, vega=?, iv=?, link=?, status='Active', exit_date=?, lot_size=?, strategy=?, original_group=?
+                            WHERE id=?''', 
+                            (t['pnl'], t['days_held'], final_theta, final_delta, final_gamma, final_vega, final_iv, final_link, 
+                             t['exit_dt'].date() if t['exit_dt'] else None, final_lot_size, final_strategy, t['group'], trade_id))
+                        count_update += 1
+                if file_type == "Active":
+                    today = datetime.now().date()
+                    c.execute("SELECT id FROM snapshots WHERE trade_id=? AND snapshot_date=?", (trade_id, today))
                     
-                g_id = node.data(0, Qt.ItemDataRole.UserRole)
-                if g_id and isinstance(g_id, str) and g_id.startswith('grp_'):
-                    realized = float(node.text(6).replace('$', '')) if node.text(6) else 0.0
-                    total_live = n_pnl + realized
-                    try: days_held = max(1, (datetime.now() - datetime.fromtimestamp(int(g_id.split('_')[1]))).days)
-                    except: days_held = 1
-                    velocity = total_live / days_held
-                    node.setText(7, f"${velocity:.2f}/d")
-                    node.setForeground(7, QColor('#3fb950' if velocity > 0 else '#f85149'))
-                    strat_name = node.parent().text(0).replace('📑 ', '').strip()
-                    rec_txt, rec_clr = self.get_ai_recommendation(total_live, days_held, n_theta, n_delta, strat_name)
-                    node.setText(8, rec_txt)
-                    node.setForeground(8, QColor(rec_clr))
-                    node.setFont(8, QFont("Menlo", 11, QFont.Weight.Bold))
+                    theta_val = t['theta'] if t['theta'] else 0.0
+                    delta_val = t['delta'] if t['delta'] else 0.0
+                    vega_val = t['vega'] if t['vega'] else 0.0
+                    gamma_val = t['gamma'] if t['gamma'] else 0.0
                     
-                return n_delta, n_theta, n_vega, n_pnl, n_debit
-            for i in range(self.portfolio_tree.topLevelItemCount()): calc_node(self.portfolio_tree.topLevelItem(i))
-        except Exception as e: print(f"[GREEK ERROR] Failed to populate tree math: {e}")
-
-    def refresh_basket_ui(self):
-        self.basket_table.setRowCount(0)
-        b_bid, b_ask = 0.0, 0.0
-        active_new_legs = False
-        
-        for i, leg in enumerate(self.working_basket):
-            self.basket_table.insertRow(i)
-            action_text = f"HOLD {leg['action']}" if leg.get('is_existing') else leg['action']
-            action = QTableWidgetItem(action_text)
-            action.setForeground(QColor('#58a6ff' if leg.get('is_existing') else '#3fb950' if leg['action'] == 'BUY' else '#f85149'))
-            action.setFont(QFont("Menlo", 11, QFont.Weight.Bold))
-            ext_val = leg['price'] * leg['qty'] * (1 if leg.get('secType') == 'STK' else 100)
-            
-            if not leg.get('is_existing'):
-                active_new_legs = True
-                qty = leg['qty']
-                l_bid, l_ask = leg.get('bid', leg['price']), leg.get('ask', leg['price'])
-                if leg['action'] == 'BUY': b_bid -= l_ask * qty; b_ask -= l_bid * qty
-                else: b_bid += l_bid * qty; b_ask += l_ask * qty
-            
-            for j, item in enumerate([action, QTableWidgetItem(str(leg['qty'])), QTableWidgetItem(leg['type']), QTableWidgetItem(str(leg['strike']) if leg['type'] != 'STK' else '---'), QTableWidgetItem(f"${leg['price']:.2f}"), QTableWidgetItem(f"${ext_val:.2f}")]):
-                if j > 0: item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter); self.basket_table.setItem(i, j, item)
-                
-        if active_new_legs:
-            mid = (b_bid + b_ask) / 2
-            self.lbl_price_quotes.setText(f"Bid: ${b_bid:.2f}   |   Mid: ${mid:.2f}   |   Ask: ${b_ask:.2f}")
-            self.inp_exec_lmt.setValue(mid)
-            if mid > 0: self.lbl_net_price.setText("Net Credit"); self.lbl_net_price.setStyleSheet("font-size: 16px; font-weight: bold; color: #3fb950;")
-            else: self.lbl_net_price.setText("Net Debit"); self.lbl_net_price.setStyleSheet("font-size: 16px; font-weight: bold; color: #f85149;")
-        else:
-            self.lbl_price_quotes.setText("Bid: ---   |   Mid: ---   |   Ask: ---")
-            self.lbl_net_price.setText("Net Price: $0.00"); self.lbl_net_price.setStyleSheet("font-size: 16px; font-weight: bold;")
-            self.inp_exec_lmt.setValue(0.0)
-            
-        asyncio.create_task(self._async_update_risk_graph())
-
-    def add_underlying_to_basket(self, action):
-        ticker = self.chain_ticker_in.text().upper().strip()
-        if not ticker: return
-        qty = self.inp_ul_qty.value()
-        spot = self.current_chain_spot if self.current_chain_spot > 0 else 100.0
-        leg = {
-            'action': action, 'qty': qty, 'secType': 'STK', 'strike': 0.0,
-            'type': '', 'price': spot, 'dte_str': 'N/A', 'symbol': ticker, 'multiplier': 1, 'is_existing': False
-        }
-        self.working_basket.append(leg)
-        self.refresh_basket_ui()
-
-    def clear_basket(self): self.working_basket = []; self.refresh_basket_ui()
-
-    def build_template_strategy(self, strat_type):
-        if not hasattr(self, 'chain_strikes') or not self.chain_strikes:
-            print("[WARN] Please load an option chain first.")
-            return
-
-        spot = self.current_chain_spot
-        strikes = self.chain_strikes
-        exp = self.exp_combo.currentText()
-        if not exp: return
-        
-        closest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
-        self.clear_basket()
-        
-        def add_leg(action, qty, opt_type, strike_offset):
-            idx = closest_idx + strike_offset
-            if 0 <= idx < len(strikes):
-                price = 0.0
-                for c in getattr(self, 'active_chain_contracts', []):
-                    if c.strike == strikes[idx] and c.right == opt_type:
-                        tick = self.ib.ticker(c)
-                        if tick and not math.isnan(tick.bid) and not math.isnan(tick.ask):
-                            price = (tick.bid + tick.ask) / 2
-                        elif tick and not math.isnan(tick.close):
-                            price = tick.close
-                        break
-
-                self.working_basket.append({
-                    'action': action, 'qty': qty, 'type': opt_type, 'strike': strikes[idx], 
-                    'price': price, 'dte_str': exp.replace('-', ''), 'is_existing': False, 
-                    'secType': 'OPT', 'multiplier': 100.0, 'bid': price, 'ask': price
-                })
-
-        if strat_type == 'straddle':
-            add_leg("SELL", 1, "C", 0); add_leg("SELL", 1, "P", 0)
-        elif strat_type == 'strangle':
-            add_leg("SELL", 1, "C", 2); add_leg("SELL", 1, "P", -2)
-        elif strat_type == 'iron_condor':
-            add_leg("SELL", 1, "C", 2); add_leg("BUY", 1, "C", 4)
-            add_leg("SELL", 1, "P", -2); add_leg("BUY", 1, "P", -4)
-        elif strat_type == 'call_vert':
-            add_leg("SELL", 1, "C", 1); add_leg("BUY", 1, "C", 2)
-        elif strat_type == 'put_vert':
-            add_leg("SELL", 1, "P", -1); add_leg("BUY", 1, "P", -2)
-            
-        self.refresh_basket_ui()
-
-    async def _async_update_risk_graph(self):
-        self.port_risk_plot.clear(); self.port_risk_plot.addItem(self.risk_vLine, ignoreBounds=True)
-        if not self.working_basket:
-            for lbl in [self.lbl_agg_delta, self.lbl_agg_gamma, self.lbl_agg_theta, self.lbl_agg_vega, self.lbl_agg_pnl]: lbl.setText(lbl.text().split(":")[0] + ": ---")
-            self.lbl_combo_name.setText("Selected Combo: None")
-            return
-        try:
-            target_symbol = self.chain_ticker_in.text().upper().strip() or "SPX"
-            contract = Stock(target_symbol, 'SMART', 'USD')
-            if target_symbol in ['SPX', 'VIX']: contract = Index(target_symbol, 'CBOE', 'USD')
-            elif target_symbol in ['NDX']: contract = Index(target_symbol, 'NASDAQ', 'USD')
-            elif target_symbol in ['RUT']: contract = Index(target_symbol, 'RUSSELL', 'USD')
-                
-            await self.ib.qualifyContractsAsync(contract)
-            if contract.conId > 0: self.ib.reqMktData(contract, '', False, False)
-            await asyncio.sleep(0.2)
-            tick = self.ib.ticker(contract)
-            spot = tick.marketPrice() if tick and not math.isnan(tick.marketPrice()) else (tick.close if tick else self.current_chain_spot)
-            if math.isnan(spot) or spot == 0: spot = 100.0
-            
-            total_delta, total_gamma, total_theta, total_vega, total_pnl = 0.0, 0.0, 0.0, 0.0, 0.0
-            max_dte = max([max(1, (datetime.strptime(l['dte_str'], "%Y%m%d") - datetime.now()).days) for l in self.working_basket if l['secType'] == 'OPT' and l['dte_str'] != 'N/A'] + [1])
-
-            iv_adj = self.slider_iv.value() / 100.0 if hasattr(self, 'slider_iv') else 0.0
-            dte_fwd = self.slider_dte.value() if hasattr(self, 'slider_dte') else 0
-            
-            if hasattr(self, 'slider_dte') and self.slider_dte.maximum() != int(max_dte):
-                self.slider_dte.blockSignals(True)
-                self.slider_dte.setRange(0, max(0, int(max_dte) - 1))
-                self.slider_dte.blockSignals(False)
-
-            for leg in self.working_basket:
-                qty = leg['qty']; mult = leg['multiplier']; mult_sign = 1 if leg['action'] == 'BUY' else -1
-                if leg['secType'] == 'OPT' and leg['dte_str'] != 'N/A':
-                    actual_days = max(1, (datetime.strptime(leg['dte_str'], "%Y%m%d") - datetime.now()).days)
-                    T = max(0.001, actual_days - dte_fwd) / 365.0
-                    act_iv = max(0.01, 0.20 + iv_adj) # Fallback if IV tracking isn't live
-                    d, g, th, v = self.calculate_bs_greeks(spot, leg['strike'], T, 0.05, act_iv, leg['type'])
-                    current_price = self.calculate_bs_price(spot, leg['strike'], T, 0.05, act_iv, leg['type'])
-                    total_delta += (d * qty * mult * mult_sign); total_gamma += (g * qty * mult * mult_sign)
-                    total_theta += (th * qty * mult * mult_sign); total_vega  += (v * qty * mult * mult_sign)
-                    if leg.get('is_existing'): total_pnl += (current_price - leg['price']) * qty * mult * mult_sign
-                elif leg['secType'] == 'STK':
-                    total_delta += (qty * mult_sign)
-                    if leg.get('is_existing'): total_pnl += (spot - leg['price']) * qty * mult_sign
-                    
-            def fmt_greek(lbl, name, val, fmt):
-                lbl.setText(f"{name}: {val:{fmt}}")
-                lbl.setStyleSheet(f"color: {'#3fb950' if val > 0 else ('#f85149' if val < 0 else '#8b949e')}; font-weight: bold; font-family: Helvetica;")
-                
-            fmt_greek(self.lbl_agg_delta, "Delta", total_delta, ".2f")
-            fmt_greek(self.lbl_agg_gamma, "Gamma", total_gamma, ".4f")
-            fmt_greek(self.lbl_agg_theta, "Theta", total_theta, ".2f")
-            fmt_greek(self.lbl_agg_vega, "Vega",  total_vega,  ".2f")
-            fmt_greek(self.lbl_agg_pnl,   "Net PnL", total_pnl, ".2f")
-
-            strikes = [leg['strike'] for leg in self.working_basket if leg['secType'] == 'OPT']
-            if strikes:
-                spread = max(max(strikes) - min(strikes), spot * 0.05)
-                x_min, x_max = min(spot * 0.8, min(strikes) - spread * 0.8), max(spot * 1.2, max(strikes) + spread * 0.8)
-            else: x_min, x_max = spot * 0.85, spot * 1.15
-                
-            x = np.linspace(x_min, x_max, 400); today = datetime.now() + timedelta(days=dte_fwd)
-            eff_max_dte = max(0.001, max_dte - dte_fwd)
-            
-            # --- OPTIONSTRAT T-LINES / TIMEFRAMES ---
-            time_slices = []
-            num_t_lines = self.inp_t_lines.value()
-            palette = ['#388bfd', '#d2a8ff', '#ff7b72', '#7ee787', '#f0883e', '#ffa657', '#79c0ff']
-            if num_t_lines > 0:
-                steps = np.linspace(eff_max_dte, 0.001, num_t_lines + 1)[:-1]
-                for i, days_left in enumerate(steps):
-                    c = palette[i % len(palette)]
-                    if i == 0:
-                        time_slices.append((days_left, 'T+0', c, Qt.PenStyle.SolidLine, 2.5))
+                    if not c.fetchone():
+                        c.execute("INSERT INTO snapshots (trade_id, snapshot_date, pnl, days_held, theta, delta, vega, gamma) VALUES (?,?,?,?,?,?,?,?)",
+                                  (trade_id, today, t['pnl'], t['days_held'], theta_val, delta_val, vega_val, gamma_val))
                     else:
-                        days_passed = eff_max_dte - days_left
-                        time_slices.append((days_left, f'T+{int(days_passed)}', c, Qt.PenStyle.DashLine, 1.5))
-            time_slices.append((0.001, 'T+Expiry', '#e3b341', Qt.PenStyle.SolidLine, 3))
+                        c.execute("UPDATE snapshots SET theta=?, delta=?, vega=?, gamma=? WHERE trade_id=? AND snapshot_date=?",
+                                  (theta_val, delta_val, vega_val, gamma_val, trade_id, today))
+            log.append(f" {file.name}: {count_new} New, {count_update} Updated")
+        except Exception as e:
+            log.append(f" {file.name}: Error - {str(e)}")
             
-            self.current_risk_data = {'x': x, 'lines': []}
-            all_y_min, all_y_max = 0, 0
-            t0_spot_pnl = 0.0
+    if file_type == "Active" and file_found_ids:
+        missing_ids = db_active_ids - file_found_ids
+        if missing_ids:
+            placeholders = ','.join('?' for _ in missing_ids)
+            c.execute(f"UPDATE trades SET status = 'Missing' WHERE id IN ({placeholders})", list(missing_ids))
+            log.append(f" Integrity: Marked {len(missing_ids)} trades as 'Missing'.")
+    conn.commit()
+    conn.close()
+    return log
+
+def update_journal(edited_df):
+    conn = get_db_connection()
+    c = conn.cursor()
+    count = 0
+    try:
+        for index, row in edited_df.iterrows():
+            t_id = row['id'] 
+            notes = str(row['Notes'])
+            tags = str(row['Tags'])
+            pid = str(row['Parent ID'])
+            new_lot = int(row['lot_size']) if 'lot_size' in row and row['lot_size'] > 0 else 1
+            new_strat = str(row['Strategy']) 
             
-            for days_left, lbl_prefix, color, style, width in time_slices:
-                y_pnl = np.zeros_like(x); name = f"{lbl_prefix} ({(today + timedelta(days=max(0, eff_max_dte - days_left))).strftime('%b %d')})"
-                for leg in self.working_basket:
-                    mult_sign = 1 if leg['action'] == 'BUY' else -1
-                    if leg['secType'] == 'OPT' and leg['dte_str'] != 'N/A':
-                        leg_total_dte = max(1, (datetime.strptime(leg['dte_str'], "%Y%m%d") - today).days)
-                        T = max(0.001, leg_total_dte - (eff_max_dte - days_left)) / 365.0
-                        prices = np.array([self.calculate_bs_price(s, leg['strike'], T, 0.05, max(0.01, 0.20 + iv_adj), leg['type']) for s in x])
-                        y_pnl += (prices - leg['price']) * leg['qty'] * leg['multiplier'] * mult_sign 
-                    elif leg['secType'] == 'STK':
-                        y_pnl += (x - leg['price']) * leg['qty'] * mult_sign
-                
-                if lbl_prefix == 'T+Expiry':
-                    base_line = self.port_risk_plot.plot(x, np.zeros_like(x), pen=pg.mkPen('#8b949e', style=Qt.PenStyle.DashLine))
-                    self.port_risk_plot.addItem(pg.FillBetweenItem(base_line, self.port_risk_plot.plot(x, np.maximum(y_pnl, 0), pen=None), brush=pg.mkBrush(63, 185, 80, 50)))
-                    self.port_risk_plot.addItem(pg.FillBetweenItem(base_line, self.port_risk_plot.plot(x, np.minimum(y_pnl, 0), pen=None), brush=pg.mkBrush(248, 81, 73, 50)))
-                elif lbl_prefix == 'T+0':
-                    t0_spot_pnl = 0.0
-                    for leg in self.working_basket:
-                        m_sign = 1 if leg['action'] == 'BUY' else -1
-                        if leg['secType'] == 'OPT' and leg['dte_str'] != 'N/A':
-                            leg_total_dte = max(1, (datetime.strptime(leg['dte_str'], "%Y%m%d") - today).days)
-                            T = max(0.001, leg_total_dte - (eff_max_dte - days_left)) / 365.0
-                            calc_p = self.calculate_bs_price(spot, leg['strike'], T, 0.05, max(0.01, 0.20 + iv_adj), leg['type'])
-                            t0_spot_pnl += (calc_p - leg['price']) * leg['qty'] * leg['multiplier'] * m_sign
-                        elif leg['secType'] == 'STK':
-                            t0_spot_pnl += (spot - leg['price']) * leg['qty'] * m_sign
+            c.execute("UPDATE trades SET notes=?, tags=?, parent_id=?, lot_size=?, strategy=? WHERE id=?", (notes, tags, pid, new_lot, new_strat, t_id))
+            count += 1
+        conn.commit()
+        return count
+    except Exception as e: return 0
+    finally: conn.close()
 
-                self.port_risk_plot.plot(x, y_pnl, pen=pg.mkPen(color, width=width, style=style), name=name)
-                all_y_min, all_y_max = min(all_y_min, np.min(y_pnl)), max(all_y_max, np.max(y_pnl))
-                self.current_risk_data['lines'].append({'name': name, 'y': y_pnl, 'color': color})
+def update_strategy_config(edited_df):
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM strategy_config")
+        for i, row in edited_df.iterrows():
+            c.execute("INSERT INTO strategy_config VALUES (?,?,?,?,?,?,?)", 
+                      (row['Name'], row['Identifier'], row['Target PnL'], row['Target Days'], row['Min Stability'], row['Description'], row['Typical Debit']))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(e)
+        return False
+    finally: conn.close()
 
-            y_padding = max(abs(all_y_max - all_y_min) * 0.1, 10)
-            self.port_risk_plot.setYRange(all_y_min - y_padding, all_y_max + y_padding)
-            self.port_risk_plot.setXRange(min(strikes) - spread*0.8 if strikes else spot*0.9, max(strikes) + spread*0.8 if strikes else spot*1.1)
-            self.port_risk_plot.addItem(pg.InfiniteLine(pos=spot, angle=90, pen=pg.mkPen('#ffffff', width=1, style=Qt.PenStyle.DashLine), label=f'${spot:.2f}', labelOpts={'position':0.05, 'color':'#ffffff'}))
+def reprocess_other_trades():
+    conn = get_db_connection()
+    c = conn.cursor()
+    config_dict = load_strategy_config()
+    try:
+        c.execute("SELECT id, name, original_group, strategy FROM trades")
+    except:
+        c.execute("SELECT id, name, '', strategy FROM trades")
+    all_trades = c.fetchall()
+    updated_count = 0
+    for t_id, t_name, t_group, current_strat in all_trades:
+        if current_strat == "Other":
+            group_val = t_group if t_group else ""
+            new_strat = get_strategy_dynamic(t_name, group_val, config_dict) 
+            if new_strat != "Other":
+                c.execute("UPDATE trades SET strategy = ? WHERE id = ?", (new_strat, t_id))
+                updated_count += 1
+    conn.commit()
+    conn.close()
+    return updated_count
 
-            if num_t_lines > 0:
-                dot = pg.ScatterPlotItem(x=[spot], y=[t0_spot_pnl], size=8, pen=pg.mkPen('#ffffff'), brush=pg.mkBrush('#ffffff'))
-                self.port_risk_plot.addItem(dot)
-
-            # --- GENERATE HEATMAP & KPIs ---
-            t_expiry_pnl = np.zeros_like(x)
-            for leg in self.working_basket:
-                mult_sign = 1 if leg['action'] == 'BUY' else -1
-                if leg['secType'] == 'OPT' and leg['dte_str'] != 'N/A':
-                    T = 0.001 / 365.0
-                    prices = np.array([self.calculate_bs_price(s, leg['strike'], T, 0.05, 0.20, leg['type']) for s in x])
-                    t_expiry_pnl += (prices - leg['price']) * leg['qty'] * leg['multiplier'] * mult_sign
-                elif leg['secType'] == 'STK':
-                    t_expiry_pnl += (x - leg['price']) * leg['qty'] * mult_sign
-
-        except Exception as e: print(f"[RISK ERROR] Failed to simulate profile: {e}")
-
-    def risk_mouse_moved(self, evt):
-        if getattr(self, 'current_risk_data', None) is None: return
-        pos = evt[0]
-        if self.port_risk_plot.sceneBoundingRect().contains(pos):
-            x_val = self.port_risk_plot.getViewBox().mapSceneToView(pos).x()
-            self.risk_vLine.setPos(x_val)
-            
-            x_array = self.current_risk_data['x']
-            idx = np.searchsorted(x_array, x_val)
-            if 0 < idx < len(x_array):
-                if abs(x_array[idx] - x_val) > abs(x_array[idx-1] - x_val): idx -= 1
-                price_str = f"<div style='margin-bottom: 5px; font-size: 13px;'><b>SPOT:</b> <span style='color:#26A69A'>${x_array[idx]:.2f}</span></div>"
-                lines_html = []
-                for line in self.current_risk_data['lines']:
-                    pnl = line['y'][idx]
-                    lines_html.append(f"<div style='margin-bottom: 3px;'><span style='color:{line['color']}'>{line['name']}:</span> <span style='color:{'#00C853' if pnl >= 0 else '#FF5252'}; font-weight:bold;'>${pnl:.2f}</span></div>")
-                
-                inspector_html = f"<div style='font-family: Inter, sans-serif; font-size: 11px; padding: 6px;'>" + price_str + "".join(lines_html) + "</div>"
-                self.risk_inspector.setHtml(inspector_html)
-                
-                vb = self.port_risk_plot.getViewBox()
-                y_pos = vb.viewRange()[1][1] - (vb.viewRange()[1][1] - vb.viewRange()[1][0]) * 0.1
-                self.risk_inspector.setPos(x_val, y_pos)
-                self.risk_inspector.setAnchor((0, 0) if pos.x() < vb.sceneBoundingRect().center().x() else (1, 0))
-                self.risk_inspector.show()
-        else:
-            self.risk_inspector.hide()
-
-    def on_iv_slider_changed(self, value):
-        if hasattr(self, 'lbl_iv_adj'): self.lbl_iv_adj.setText(f"IV Adj: {value:+d}%")
-        asyncio.create_task(self._async_update_risk_graph())
+# --- DATA LOADER ---
+@st.cache_data(ttl=60)
+def load_data():
+    empty_schema = pd.DataFrame(columns=[
+        'id', 'Name', 'Strategy', 'Status', 'P&L', 'Debit', 
+        'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 
+        'Entry Date', 'Exit Date', 'Notes', 'Tags', 
+        'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link',
+        'lot_size', 'Debit/Lot', 'ROI', 'Daily Yield %', 
+        'Ann. ROI', 'Theta Pot.', 'Theta Eff.', 
+        'Theta/Cap %', 'Ticker', 'Stability', 'Grade', 'Reason', 'P&L Vol'
+    ])
+    
+    if not os.path.exists(DB_NAME): return empty_schema
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql("SELECT * FROM trades", conn)
+        if df.empty: return empty_schema
         
-    def on_dte_slider_changed(self, value):
-        if hasattr(self, 'lbl_dte_adj'): self.lbl_dte_adj.setText(f"Days Fwd: +{value}")
-        asyncio.create_task(self._async_update_risk_graph())
-
-    def transmit_basket_order(self):
-        if not self.ib.isConnected(): return print("[WARN] Cannot transmit: IBKR not connected.")
-        new_legs = [l for l in self.working_basket if not l.get('is_existing')]
-        if not new_legs: return print("[WARN] No NEW legs to transmit.")
-            
-        ticker = self.chain_ticker_in.text().upper().strip()
-        account = self.account_selector.currentText()
-        tif = self.combo_tif.currentText()
-        outside_rth = self.chk_outside_rth.isChecked()
-        lmt_price = self.inp_exec_lmt.value()
-        qty = self.inp_exec_qty.value()
-        
-        asyncio.create_task(self._async_transmit_order(new_legs, ticker, account, tif, outside_rth, lmt_price, qty))
-
-    async def _async_transmit_order(self, new_legs, ticker, account, tif, outside_rth, lmt_price, qty):
-        try:
-            print(f"[*] Qualifying {len(new_legs)} legs for {ticker} with IBKR...")
-            contracts = [Option(ticker, l['dte_str'], l['strike'], l['type'], 'SMART') if l['secType'] == 'OPT' else Stock(ticker, 'SMART', 'USD') for l in new_legs]
-            
-            qualified = await self.ib.qualifyContractsAsync(*contracts)
-            if len(qualified) != len(contracts): return print("[EXEC ERROR] Could not qualify all legs with IBKR. Aborting order.")
-
-            if len(new_legs) == 1:
-                exec_contract = qualified[0]
-                action = new_legs[0]['action']
-                exec_lmt = abs(lmt_price)
-            else:
-                exec_contract = Contract(symbol=ticker, secType='BAG', currency='USD', exchange='SMART')
-                exec_contract.comboLegs = [ComboLeg(conId=q_c.conId, ratio=int(leg['qty']), action=leg['action'], exchange='SMART') for q_c, leg in zip(qualified, new_legs)]
-                action = "BUY"
-                exec_lmt = -lmt_price 
-
-            order = LimitOrder(action=action, totalQuantity=qty, lmtPrice=round(exec_lmt, 2), tif=tif, outsideRth=outside_rth, account=account)
-            trade = self.ib.placeOrder(exec_contract, order)
-            
-            cursor = self.db_conn.cursor()
-            trade_id = f"{ticker}_ADJ_{int(datetime.now().timestamp())}"
-            cursor.execute('''INSERT INTO trades (id, name, strategy, status, entry_date, days_held, debit, lot_size, pnl, theta, delta, gamma, vega) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
-                           (trade_id, f"{ticker} Adjs ({tif})", "Other", "Active", datetime.now().strftime("%Y-%m-%d"), 0, abs(lmt_price*100*qty), qty, 0.0, 0.0, 0.0, 0.0, 0.0))
-            self.db_conn.commit(); self.load_journal_data() 
-            print(f"[SUCCESS] 🚀 Live Order transmitted! (Ref: {trade.order.orderId})")
-            self.clear_basket()
-        except Exception as e: print(f"[EXEC ERROR] Failed to execute order: {e}")
-
-    def start_walk_order(self):
-        if not self.ib.isConnected(): return print("[WARN] Cannot start walk: IBKR not connected.")
-        new_legs = [l for l in self.working_basket if not l.get('is_existing')]
-        if not new_legs: return print("[WARN] No NEW legs to transmit for Walk.")
-        
-        ticker = self.chain_ticker_in.text().upper().strip()
-        account = self.account_selector.currentText()
-        qty = self.inp_exec_qty.value()
-        
-        start_px = self.inp_walk_start.value()
-        end_px = self.inp_walk_end.value()
-        steps = self.inp_walk_steps.value()
-        time_per_step = self.inp_walk_time.value()
-        
-        self.console_output.append(f"[*] Starting Walk-Limit: {steps} steps from {start_px} to {end_px} ({time_per_step}s interval)")
-        asyncio.create_task(self._async_walk_machine(new_legs, ticker, account, qty, start_px, end_px, steps, time_per_step))
-
-    async def _async_walk_machine(self, new_legs, ticker, account, qty, start_px, end_px, steps, time_per_step):
-        try:
-            contracts = [Option(ticker, l['dte_str'], l['strike'], l['type'], 'SMART') if l['secType'] == 'OPT' else Stock(ticker, 'SMART', 'USD') for l in new_legs]
-            qualified = await self.ib.qualifyContractsAsync(*contracts)
-            if len(qualified) != len(contracts): return print("[EXEC ERROR] Could not qualify all legs. Walk aborted.")
-
-            if len(new_legs) == 1:
-                exec_contract = qualified[0]
-                action = new_legs[0]['action']
-                mult = 1 if action == "BUY" else -1
-            else:
-                exec_contract = Contract(symbol=ticker, secType='BAG', currency='USD', exchange='SMART')
-                exec_contract.comboLegs = [ComboLeg(conId=q_c.conId, ratio=int(leg['qty']), action=leg['action'], exchange='SMART') for q_c, leg in zip(qualified, new_legs)]
-                action = "BUY"
-                mult = -1
-
-            step_prices = np.linspace(start_px, end_px, steps)
-            
-            # Place initial order
-            current_lmt = step_prices[0] * mult
-            order = LimitOrder(action=action, totalQuantity=qty, lmtPrice=round(abs(current_lmt), 2), tif="DAY", outsideRth=True, account=account)
-            trade = self.ib.placeOrder(exec_contract, order)
-            self.console_output.append(f"[WALK] Step 1/{steps}: Order {trade.order.orderId} placed at limit {step_prices[0]:.2f}")
-            
-            for i in range(1, steps):
-                for _ in range(time_per_step * 10): 
-                    if trade.orderStatus.status in ['Filled', 'Cancelled']: 
-                        self.console_output.append(f"[WALK] Walk finished! Status: {trade.orderStatus.status}")
-                        return
-                    await asyncio.sleep(0.1)
-                
-                # Next step
-                current_lmt = step_prices[i] * mult
-                order.lmtPrice = round(abs(current_lmt), 2)
-                trade = self.ib.placeOrder(exec_contract, order)
-                self.console_output.append(f"[WALK] Step {i+1}/{steps}: Modifying order {trade.order.orderId} to limit {step_prices[i]:.2f}")
-            
-            self.console_output.append(f"[WALK] Walk limit reached final price ({step_prices[-1]:.2f}). Waiting for fill.")
-            
-        except Exception as e: print(f"[WALK ERROR] Stopped: {e}")
-
-    def fetch_expirations(self):
-        if self.chain_ticker_in.text().upper().strip(): asyncio.create_task(self._async_fetch_expirations(self.chain_ticker_in.text().upper().strip()))
-
-    async def _async_fetch_expirations(self, ticker):
-        try:
-            contract = Stock(ticker, 'SMART', 'USD')
-            if ticker in ['SPX', 'VIX']: contract = Index(ticker, 'CBOE', 'USD')
-            elif ticker in ['NDX']: contract = Index(ticker, 'NASDAQ', 'USD')
-            elif ticker in ['RUT']: contract = Index(ticker, 'RUSSELL', 'USD')
-                
-            await self.ib.qualifyContractsAsync(contract)
-            chains = await self.ib.reqSecDefOptParamsAsync(contract.symbol, '', contract.secType, contract.conId)
-            exps = set()
-            for chain in chains:
-                if chain.exchange == 'SMART' or contract.secType == 'IND': exps.update(chain.expirations)
-                    
-            if not exps: return
-            today = datetime.now()
-            items = []
-            for d in sorted(list(exps)):
-                dt = datetime.strptime(d, "%Y%m%d")
-                dte = max(0, (dt - today).days)
-                items.append(f"{d[:4]}-{d[4:6]}-{d[6:]} [{dte} DTE]")
-            self.exp_combo.clear(); self.exp_combo.addItems(items)
-            tickers = await self.ib.reqTickersAsync(contract)
-            if tickers and not math.isnan(tickers[0].marketPrice()):
-                self.current_chain_spot = tickers[0].marketPrice()
-                self.lbl_chain_spot.setText(f"SPOT: ${self.current_chain_spot:.2f}")
-        except Exception as e: print(f"[CHAIN ERROR] Failed to fetch expirations: {e}")
-
-    def load_option_chain(self):
-        if self.chain_ticker_in.text().upper().strip() and self.exp_combo.currentText(): 
-            exp_date = self.exp_combo.currentText().split(" ")[0].replace("-", "")
-            asyncio.create_task(self._async_load_chain(self.chain_ticker_in.text().upper().strip(), exp_date))
-
-    async def _async_load_chain(self, ticker, exp_ibkr):
-        try:
-            if hasattr(self, 'active_chain_contracts') and self.active_chain_contracts:
-                for c in self.active_chain_contracts:
-                    if c.conId > 0: self.ib.cancelMktData(c)
-                self.active_chain_contracts = []
-                
-            contract = Stock(ticker, 'SMART', 'USD')
-            if ticker in ['SPX', 'VIX']: contract = Index(ticker, 'CBOE', 'USD')
-            elif ticker in ['NDX']: contract = Index(ticker, 'NASDAQ', 'USD')
-            elif ticker in ['RUT']: contract = Index(ticker, 'RUSSELL', 'USD')
-                
-            await self.ib.qualifyContractsAsync(contract)
-            self.ib.reqMktData(contract, '', False, False)
-            await asyncio.sleep(0.5); tick = self.ib.ticker(contract)
-            spot = tick.marketPrice() if tick and not math.isnan(tick.marketPrice()) else (tick.close if tick else 100.0)
-            if math.isnan(spot): spot = 100.0
-            
-            self.current_chain_spot = spot; self.lbl_chain_spot.setText(f"SPOT: ${spot:.2f}")
-            chains = await self.ib.reqSecDefOptParamsAsync(contract.symbol, '', contract.secType, contract.conId)
-            strikes = set()
-            for c in chains:
-                if c.exchange == 'SMART' or contract.secType == 'IND': strikes.update(c.strikes)
-            
-            sorted_strikes = sorted(list(strikes))
-            if not sorted_strikes: return
-            closest_idx = min(range(len(sorted_strikes)), key=lambda i: abs(sorted_strikes[i] - spot))
-            
-            num_strikes_half = self.inp_chain_strikes.value() // 2
-            start_idx = max(0, closest_idx - num_strikes_half)
-            end_idx = min(len(sorted_strikes), closest_idx + num_strikes_half + 1)
-            target_strikes = sorted_strikes[start_idx:end_idx]
-            self.chain_strikes = target_strikes
-            
-            exchange = 'SMART' if contract.secType != 'IND' else contract.exchange
-            call_contracts = [Option(ticker, exp_ibkr, s, 'C', exchange, currency='USD') for s in target_strikes]
-            put_contracts = [Option(ticker, exp_ibkr, s, 'P', exchange, currency='USD') for s in target_strikes]
-            
-            self.active_chain_contracts = call_contracts + put_contracts
-            await self.ib.qualifyContractsAsync(*self.active_chain_contracts)
-            for c in self.active_chain_contracts: 
-                if c.conId > 0: self.ib.reqMktData(c, '100,101,104,106', False, False)
-            await asyncio.sleep(2.0) 
-            
-            dte_text = self.exp_combo.currentText()
-            dte = 1
-            if "[" in dte_text:
-                try: dte = max(1, int(dte_text.split("[")[1].split(" ")[0]))
-                except: pass
-
-            atm_idx = closest_idx - start_idx
-            atm_c = call_contracts[atm_idx] if 0 <= atm_idx < len(call_contracts) else None
-            atm_tick = self.ib.ticker(atm_c) if atm_c else None
-            iv = atm_tick.modelGreeks.impliedVol if atm_tick and atm_tick.modelGreeks and getattr(atm_tick.modelGreeks, 'impliedVol', None) else 0.20
-            if not iv or math.isnan(iv): iv = 0.20
-            
-            one_sd_move = spot * iv * math.sqrt(dte / 365.0)
-            two_sd_move = 2 * one_sd_move
-            
-            self.chain_table.setRowCount(0)
-            for i, strike in enumerate(target_strikes):
-                self.chain_table.insertRow(i)
-                c_tick, p_tick = self.ib.ticker(call_contracts[i]), self.ib.ticker(put_contracts[i])
-                def get_oi(t): return next((tk.size for t in (t.ticks if t else []) for tk in [t] if tk.tickType == 86), 0)
-                
-                items = [
-                    QTableWidgetItem(f"{c_tick.modelGreeks.delta:.2f}" if c_tick and c_tick.modelGreeks and c_tick.modelGreeks.delta else "---"),
-                    QTableWidgetItem(f"{c_tick.volume or 0:.0f}" if c_tick else "0"),
-                    QTableWidgetItem(f"{get_oi(c_tick):.0f}"),
-                    QTableWidgetItem(f"{c_tick.bid:.2f}" if c_tick and not math.isnan(c_tick.bid) else "---"),
-                    QTableWidgetItem(f"{c_tick.ask:.2f}" if c_tick and not math.isnan(c_tick.ask) else "---"),
-                    QTableWidgetItem(f"{strike:.1f}"),
-                    QTableWidgetItem(f"{p_tick.bid:.2f}" if p_tick and not math.isnan(p_tick.bid) else "---"),
-                    QTableWidgetItem(f"{p_tick.ask:.2f}" if p_tick and not math.isnan(p_tick.ask) else "---"),
-                    QTableWidgetItem(f"{p_tick.volume or 0:.0f}" if p_tick else "0"),
-                    QTableWidgetItem(f"{get_oi(p_tick):.0f}"),
-                    QTableWidgetItem(f"{p_tick.modelGreeks.delta:.2f}" if p_tick and p_tick.modelGreeks and p_tick.modelGreeks.delta else "---")
-                ]
-                
-                for j, item in enumerate(items):
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    if j == 5: 
-                        item.setFont(QFont("Menlo", 12, QFont.Weight.Bold))
-                        dist = abs(strike - spot)
-                        if strike == target_strikes[atm_idx]:
-                            item.setBackground(QColor('#1f6feb')); item.setForeground(QColor('#ffffff'))
-                        elif dist <= one_sd_move:
-                            item.setBackground(QColor('#238636')); item.setForeground(QColor('#ffffff'))
-                        elif dist <= two_sd_move:
-                            item.setBackground(QColor('#b08800')); item.setForeground(QColor('#ffffff'))
-                        else:
-                            item.setBackground(QColor('#161b22')); item.setForeground(QColor('#58a6ff'))
-                    self.chain_table.setItem(i, j, item)
-        except Exception as e: print(f"[CHAIN ERROR] Failed to load chain: {e}")
-
-    def on_chain_clicked(self, row, col):
-        if col not in [3, 4, 6, 7]: return
-        strike = self.chain_strikes[row]
-        price_str = self.chain_table.item(row, col).text()
-        if price_str == "---": return
-        price = float(price_str)
-        
-        action, opt_type = ("SELL", "C") if col == 3 else ("BUY", "C") if col == 4 else ("SELL", "P") if col == 6 else ("BUY", "P")
-        
-        c_bid_s, c_ask_s = self.chain_table.item(row, 3).text(), self.chain_table.item(row, 4).text()
-        p_bid_s, p_ask_s = self.chain_table.item(row, 6).text(), self.chain_table.item(row, 7).text()
-        if opt_type == 'C': bid_val, ask_val = float(c_bid_s) if c_bid_s != "---" else price, float(c_ask_s) if c_ask_s != "---" else price
-        else: bid_val, ask_val = float(p_bid_s) if p_bid_s != "---" else price, float(p_ask_s) if p_ask_s != "---" else price
-            
-        self.working_basket.append({
-            'action': action, 'qty': 1, 'type': opt_type, 'strike': strike, 
-            'price': price, 'dte_str': self.exp_combo.currentText(), 
-            'is_existing': False, 'secType': 'OPT', 'multiplier': 100.0,
-            'bid': bid_val, 'ask': ask_val
+        snaps = pd.read_sql("SELECT trade_id, pnl FROM snapshots", conn)
+        if not snaps.empty:
+            vol_df = snaps.groupby('trade_id')['pnl'].std().reset_index()
+            vol_df.rename(columns={'pnl': 'P&L Vol'}, inplace=True)
+            df = df.merge(vol_df, left_on='id', right_on='trade_id', how='left')
+            df['P&L Vol'] = df['P&L Vol'].fillna(0)
+        else: df['P&L Vol'] = 0.0
+    except Exception as e: return empty_schema
+    finally: conn.close()
+    
+    if not df.empty:
+        df = df.rename(columns={
+            'name': 'Name', 'strategy': 'Strategy', 'status': 'Status',
+            'pnl': 'P&L', 'debit': 'Debit', 'days_held': 'Days Held',
+            'theta': 'Theta', 'delta': 'Delta', 'gamma': 'Gamma', 'vega': 'Vega',
+            'entry_date': 'Entry Date', 'exit_date': 'Exit Date', 'notes': 'Notes',
+            'tags': 'Tags', 'parent_id': 'Parent ID', 
+            'put_pnl': 'Put P&L', 'call_pnl': 'Call P&L', 'iv': 'IV', 'link': 'Link'
         })
-        self.refresh_basket_ui()
-
-    def show_portfolio_context_menu(self, position):
-        item = self.portfolio_tree.itemAt(position)
-        if not item: return
-        menu = QMenu()
-        data = item.data(0, Qt.ItemDataRole.UserRole + 1)
-        g_id = item.data(0, Qt.ItemDataRole.UserRole)
         
-        if data: 
-            action_close = menu.addAction("Stage Closing Order")
-            action_close.triggered.connect(lambda: self.stage_order([item], model_only=False))
-        elif g_id: 
-            action_close = menu.addAction("Close Entire Strategy")
-            action_close.triggered.connect(lambda: self.stage_order(self._get_all_leaves(item), model_only=False))
-            menu.addSeparator()
-            action_realize = menu.addAction("Log Realized PnL (Roll/Close)")
-            action_realize.triggered.connect(lambda: self.add_realized_pnl(g_id))
-        menu.exec(self.portfolio_tree.viewport().mapToGlobal(position))
-
-    def _get_all_leaves(self, node):
-        leaves = []
-        def traverse(n):
-            if n.data(0, Qt.ItemDataRole.UserRole + 1): leaves.append(n)
-            for i in range(n.childCount()): traverse(n.child(i))
-        traverse(node)
-        return leaves
-
-    def group_selected_legs(self):
-        selected_account = self.account_selector.currentText()
-        if not selected_account: return
-        selected_conids = []
-        inferred_ticker = "SPX"
-        def find_checked(node):
-            nonlocal inferred_ticker
-            for i in range(node.childCount()):
-                if node.child(i).checkState(0) == Qt.CheckState.Checked:
-                    if node.child(i).data(0, Qt.ItemDataRole.UserRole):
-                        selected_conids.append(node.child(i).data(0, Qt.ItemDataRole.UserRole))
-                        data = node.child(i).data(0, Qt.ItemDataRole.UserRole + 1)
-                        if data and "symbol" in data: inferred_ticker = data["symbol"]
-                find_checked(node.child(i))
-        for i in range(self.portfolio_tree.topLevelItemCount()): find_checked(self.portfolio_tree.topLevelItem(i))
-            
-        if not selected_conids: return
-        all_groups = self.load_strategy_groups()
-        acc_groups = all_groups.setdefault(selected_account, {})
-        dialog = GroupStrategyDialog(inferred_ticker, list(set([g.get('strategy', 'General') for g in acc_groups.values()])), self)
-        if dialog.exec():
-            ticker, strat_name, combo_name = dialog.get_data()
-            if not strat_name or not combo_name: return
-            acc_groups[f"grp_{int(datetime.now().timestamp())}"] = {"ticker": ticker, "strategy": strat_name, "name": combo_name, "legs": selected_conids, "realized_pnl": 0.0}
-            self.save_strategy_groups(all_groups); self.refresh_portfolio_grid()
-
-    def ungroup_selected_legs(self):
-        selected_account = self.account_selector.currentText()
-        if not selected_account: return
-        selected_conids = []
-        def find_checked(node):
-            for i in range(node.childCount()):
-                if node.child(i).checkState(0) == Qt.CheckState.Checked and node.child(i).data(0, Qt.ItemDataRole.UserRole):
-                    selected_conids.append(node.child(i).data(0, Qt.ItemDataRole.UserRole))
-                find_checked(node.child(i))
-        for i in range(self.portfolio_tree.topLevelItemCount()): find_checked(self.portfolio_tree.topLevelItem(i))
-        if not selected_conids: return
+        required_cols = ['Gamma', 'Vega', 'Theta', 'Delta', 'P&L', 'Debit', 'lot_size', 'Notes', 'Tags', 'Parent ID', 'Put P&L', 'Call P&L', 'IV', 'Link']
+        for col in required_cols:
+            if col not in df.columns: df[col] = "" if col in ['Notes', 'Tags', 'Parent ID', 'Link'] else 0.0
         
-        all_groups = self.load_strategy_groups()
-        modified = False
-        for g_id, g_data in list(all_groups.get(selected_account, {}).items()):
-            new_legs = [l for l in g_data.get('legs', []) if l not in selected_conids]
-            if len(new_legs) != len(g_data.get('legs', [])):
-                modified = True
-                if not new_legs: del all_groups[selected_account][g_id] 
-                else: g_data['legs'] = new_legs
-        if modified: self.save_strategy_groups(all_groups); self.refresh_portfolio_grid()
+        numeric_cols = ['Debit', 'P&L', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Put P&L', 'Call P&L']
+        for c in numeric_cols:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
 
-    def filter_portfolio_tree(self):
-        t_f, e_f, s_f = self.filter_ticker.text().upper().strip(), self.filter_expiry.text().strip(), self.filter_strike.text().strip()
-        for i in range(self.portfolio_tree.topLevelItemCount()): self._recursive_filter(self.portfolio_tree.topLevelItem(i), t_f, e_f, s_f)
+        df['Entry Date'] = pd.to_datetime(df['Entry Date'])
+        df['Exit Date'] = pd.to_datetime(df['Exit Date'])
+        
+        df['lot_size'] = pd.to_numeric(df['lot_size'], errors='coerce').fillna(1).astype(int)
+        df['lot_size'] = df['lot_size'].apply(lambda x: 1 if x < 1 else x)
+        
+        df['Debit/Lot'] = np.where(df['lot_size'] > 0, df['Debit'] / df['lot_size'], df['Debit'])
 
-    def _recursive_filter(self, node, t_filter, e_filter, s_filter):
-        any_child_visible = False
-        for i in range(node.childCount()):
-            if self._recursive_filter(node.child(i), t_filter, e_filter, s_filter): any_child_visible = True
-        data = node.data(0, Qt.ItemDataRole.UserRole + 1)
-        if data: is_match = (not t_filter or t_filter in str(data.get('symbol', '')).upper()) and (not e_filter or e_filter in str(data.get('expiry', ''))) and (not s_filter or s_filter in str(data.get('strike', '')))
-        else: is_match = not t_filter or t_filter in node.text(0).upper()
-        visible = any_child_visible or is_match
-        node.setHidden(not visible)
-        return visible
+        df['ROI'] = (df['P&L'] / df['Debit'].replace(0, 1) * 100)
+        df['Daily Yield %'] = np.where(df['Days Held'] > 0, df['ROI'] / df['Days Held'], 0)
+        df['Ann. ROI'] = df['Daily Yield %'] * 365
+        df['Theta Pot.'] = df['Theta'] * df['Days Held']
+        
+        # V150: Vectorized Theta Efficiency logic applied
+        df = vectorized_theta_efficiency(df)
+        df['Theta Eff.'] = df.get('Theta_Efficiency_Score', np.where(df['Theta Pot.'] > 0, df['P&L'] / df['Theta Pot.'], 0.0))
+        
+        df['Theta/Cap %'] = np.where(df['Debit'] > 0, (df['Theta'] / df['Debit']) * 100, 0)
+        df['Ticker'] = df['Name'].apply(extract_ticker)
+        
+        df['Parent ID'] = df['Parent ID'].astype(str).str.strip().replace('nan', '').replace('None', '')
+        
+        # V150: Improved stability formula
+        df['Stability'] = df.get('Stability_Score', np.where(df['Theta'] > 0, df['Theta'] / (df['Delta'].abs() + 1), 0.0))
+        
+        def get_grade(row):
+            s, d = row['Strategy'], row['Debit/Lot']
+            reason = "Standard"
+            grade = "C"
+            if s == '130/160':
+                if d > 4800: grade="F"; reason="Overpriced (> $4.8k)"
+                elif 3500 <= d <= 4500: grade="A+"; reason="Sweet Spot"
+                else: grade="B"; reason="Acceptable"
+            elif s == '160/190':
+                if 4800 <= d <= 5500: grade="A"; reason="Ideal Pricing"
+                else: grade="C"; reason="Check Pricing"
+            elif s == 'M200':
+                if 7500 <= d <= 8500: grade, reason = "A", "Perfect Entry"
+                else: grade, reason = "B", "Variance"
+            elif s == 'SMSF':
+                if d > 15000: grade="B"; reason="High Debit" 
+                else: grade="A"; reason="Standard"
+            return pd.Series([grade, reason])
 
-    def normal_output_written(self, text):
-        cursor = self.console_output.textCursor(); cursor.movePosition(cursor.MoveOperation.End); cursor.insertText(text)
-        self.console_output.setTextCursor(cursor); self.console_output.ensureCursorVisible()
+        df[['Grade', 'Reason']] = df.apply(get_grade, axis=1)
+    return df
 
-    def connect_to_ibkr(self): asyncio.create_task(self.connect_async())
-    async def connect_async(self):
+@st.cache_data(ttl=300)
+def load_snapshots():
+    if not os.path.exists(DB_NAME): return pd.DataFrame()
+    conn = get_db_connection()
+    try:
+        q = """
+        SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, s.gamma,
+               t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
+        FROM snapshots s
+        JOIN trades t ON s.trade_id = t.id
+        """
         try:
-            self.ib.connectedEvent += self.on_ib_connected; self.ib.disconnectedEvent += self.on_ib_disconnected; self.ib.errorEvent += self.on_ib_error
-            util.useQt('PyQt6') 
-            await self.ib.connectAsync('127.0.0.1', 7496, clientId=1) 
-        except Exception as e: print(f"[IBKR ERROR] Connection failed. Is TWS Open? ({e})")
+            df = pd.read_sql(q, conn)
+        except:
+            q_fallback = """
+            SELECT s.snapshot_date, s.pnl, s.days_held, s.theta, s.delta, s.vega, 
+                   t.strategy, t.name, t.id as trade_id, t.theta as initial_theta
+            FROM snapshots s
+            JOIN trades t ON s.trade_id = t.id
+            """
+            df = pd.read_sql(q_fallback, conn)
+            df['gamma'] = 0.0
 
-    def on_ib_connected(self):
-        self.account_selector.clear(); self.account_selector.addItems(self.ib.managedAccounts()); self.refresh_portfolio_grid()
-        
-    def on_ib_disconnected(self): pass
+        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0)
+        df['days_held'] = pd.to_numeric(df['days_held'], errors='coerce').fillna(0)
+        df['theta'] = pd.to_numeric(df['theta'], errors='coerce').fillna(0)
+        df['delta'] = pd.to_numeric(df['delta'], errors='coerce').fillna(0)
+        df['vega'] = pd.to_numeric(df['vega'], errors='coerce').fillna(0)
+        df['gamma'] = pd.to_numeric(df['gamma'], errors='coerce').fillna(0)
+        df['initial_theta'] = pd.to_numeric(df['initial_theta'], errors='coerce').fillna(0)
+        return df
+    except: return pd.DataFrame()
+    finally: conn.close()
 
-    def on_ib_error(self, reqId, errorCode, errorString, contract):
-        if errorCode in [2104, 2106, 2158]: return
-        if errorCode == 200 and "security definition" in errorString.lower(): return
-        print(f"[IBKR ERR {errorCode}] {errorString}")
+# --- INTELLIGENCE FUNCTIONS ---
+def get_dynamic_targets(history_df, percentile):
+    if history_df.empty: return {}
+    winners = history_df[history_df['P&L'] > 0]
+    if winners.empty: return {}
+    targets = {}
+    for strat, grp in winners.groupby('Strategy'):
+        targets[strat] = {
+            'Median Win': grp['P&L'].median(),
+            'Optimal Exit': grp['P&L'].quantile(percentile)
+        }
+    return targets
 
-    def build_campaign_tracker(self):
-        layout = QVBoxLayout(self.tab_journal)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0,0,0,0)
-        lbl_left = QLabel("📂 Active ONE Campaigns")
-        lbl_left.setStyleSheet("font-size: 16px; font-weight: bold; color: #818cf8; padding: 5px;")
-        left_layout.addWidget(lbl_left)
-        
-        self.campaign_list = QTreeWidget()
-        self.campaign_list.setHeaderLabels(["Campaign / Strategy", "Net PnL"])
-        self.campaign_list.setColumnWidth(0, 220)
-        self.campaign_list.itemClicked.connect(self.on_campaign_selected)
-        left_layout.addWidget(self.campaign_list)
-        splitter.addWidget(left_widget)
-        
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0,0,0,0)
-        
-        ribbon = QHBoxLayout()
-        self.lbl_camp_title = QLabel("Select a campaign to view ledger")
-        self.lbl_camp_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #38bdf8; padding: 5px;")
-        self.btn_log_adj = QPushButton("➕ Log Manual Adjustment")
-        self.btn_log_adj.clicked.connect(self.prompt_manual_adjustment)
-        self.btn_log_adj.setEnabled(False)
-        ribbon.addWidget(self.lbl_camp_title)
-        ribbon.addStretch()
-        ribbon.addWidget(self.btn_log_adj)
-        right_layout.addLayout(ribbon)
-        
-        self.ledger_table = QTableWidget()
-        self.ledger_table.setColumnCount(4)
-        self.ledger_table.setHorizontalHeaderLabels(["Date/Time", "Action", "Details", "Realized PnL"])
-        self.ledger_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        right_layout.addWidget(self.ledger_table)
-        
-        splitter.addWidget(right_widget)
-        splitter.setSizes([350, 850])
-        layout.addWidget(splitter)
-        self.load_campaign_data()
+def find_similar_trades(current_trade, historical_df, top_n=3):
+    if historical_df.empty: return pd.DataFrame()
+    features = ['Theta/Cap %', 'Delta', 'Debit/Lot']
+    for f in features:
+        if f not in current_trade or f not in historical_df.columns:
+            return pd.DataFrame()
+    curr_vec = np.nan_to_num(current_trade[features].values.astype(float)).reshape(1, -1)
+    hist_vecs = np.nan_to_num(historical_df[features].values.astype(float))
+    distances = cdist(curr_vec, hist_vecs, metric='euclidean')[0]
+    similar_idx = np.argsort(distances)[:top_n]
+    similar = historical_df.iloc[similar_idx].copy()
+    max_dist = distances.max() if distances.max() > 0 else 1
+    similar['Similarity %'] = 100 * (1 - distances[similar_idx] / max_dist)
+    return similar[['Name', 'P&L', 'Days Held', 'ROI', 'Similarity %']]
 
-    def load_campaign_data(self):
-        self.campaign_list.clear()
-        all_groups = self.load_strategy_groups()
-        for acc, groups in all_groups.items():
-            acc_node = QTreeWidgetItem(self.campaign_list, [f"🏦 {acc}", ""])
-            for g_id, g_data in groups.items():
-                name = g_data.get('name', 'Unknown')
-                strat = g_data.get('strategy', '')
-                pnl = g_data.get('realized_pnl', 0.0)
-                item = QTreeWidgetItem(acc_node, [f"{name} ({strat})", f"${pnl:.2f}"])
-                item.setForeground(1, QColor('#3fb950' if pnl >= 0 else '#f85149'))
-                item.setData(0, Qt.ItemDataRole.UserRole, g_id)
-        self.campaign_list.expandAll()
+def calculate_portfolio_metrics(trades_df, capital):
+    if trades_df.empty or capital <= 0: return 0.0, 0.0
+    daily_pnl_dict = reconstruct_daily_pnl(trades_df)
+    trades_df['Entry Date'] = pd.to_datetime(trades_df['Entry Date'])
+    trades_df['Exit Date'] = pd.to_datetime(trades_df['Exit Date'])
+    start_date = trades_df['Entry Date'].min()
+    end_date = max(trades_df['Exit Date'].max(), pd.Timestamp.now())
+    date_range = pd.date_range(start=start_date, end=end_date)
+    equity = capital
+    daily_equity_values = []
+    for d in date_range:
+        day_pnl = daily_pnl_dict.get(d.date(), 0)
+        equity += day_pnl
+        daily_equity_values.append(equity)
+    equity_series = pd.Series(daily_equity_values)
+    daily_returns = equity_series.pct_change().dropna()
+    if daily_returns.std() == 0:
+        sharpe = 0.0
+    else:
+        sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+    total_days = (end_date - start_date).days
+    if total_days < 1: total_days = 1
+    total_pnl = trades_df['P&L'].sum()
+    end_val = capital + total_pnl
+    try:
+        cagr = ( (end_val / capital) ** (365 / total_days) ) - 1
+    except:
+        cagr = 0.0
+    return sharpe, cagr * 100
 
-    def on_campaign_selected(self, item, col):
-        g_id = item.data(0, Qt.ItemDataRole.UserRole)
-        if not g_id: 
-            self.lbl_camp_title.setText("Select a campaign to view ledger")
-            self.btn_log_adj.setEnabled(False)
-            self.ledger_table.setRowCount(0)
-            return
+def check_concentration_risk(active_df, total_equity, threshold=0.15):
+    if active_df.empty or total_equity <= 0: return pd.DataFrame()
+    warnings = []
+    for _, row in active_df.iterrows():
+        concentration = row['Debit'] / total_equity
+        if concentration > threshold:
+            warnings.append({
+                'Trade': row['Name'], 'Strategy': row['Strategy'], 'Size %': f"{concentration:.1%}",
+                'Risk': f"${row['Debit']:,.0f}", 'Limit': f"{threshold:.0%}"
+            })
+    return pd.DataFrame(warnings)
+
+def calculate_max_drawdown(trades_df, initial_capital):
+    if trades_df.empty or initial_capital <= 0: 
+        return {'Max Drawdown %': 0.0, 'Current DD %': 0.0}
+    daily_pnl_dict = reconstruct_daily_pnl(trades_df)
+    trades_df['Entry Date'] = pd.to_datetime(trades_df['Entry Date'])
+    trades_df['Exit Date'] = pd.to_datetime(trades_df['Exit Date'])
+    start_date = trades_df['Entry Date'].min()
+    end_date = max(trades_df['Exit Date'].max(), pd.Timestamp.now())
+    date_range = pd.date_range(start=start_date, end=end_date)
+    equity = initial_capital
+    equity_curve = []
+    dates = []
+    for d in date_range:
+        day_pnl = daily_pnl_dict.get(d.date(), 0)
+        equity += day_pnl
+        equity_curve.append(equity)
+        dates.append(d.date())
+    equity_series = pd.Series(equity_curve, index=pd.to_datetime(dates))
+    running_max = equity_series.cummax()
+    drawdown = (equity_series - running_max) / running_max
+    max_dd = drawdown.min()
+    current_dd = drawdown.iloc[-1]
+    return {'Max Drawdown %': max_dd * 100, 'Current DD %': current_dd * 100}
+
+def rolling_correlation_matrix(snaps, window_days=30):
+    if snaps.empty: return None
+    strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
+    if len(strat_daily) < window_days: return None
+    last_30 = strat_daily.tail(30)
+    corr_30 = last_30.corr()
+    fig = px.imshow(corr_30, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu", 
+                    title="Strategy Correlation (Last 30 Days)", labels=dict(color="Correlation"))
+    fig = apply_chart_theme(fig)
+    return fig
+
+def generate_adaptive_rulebook_text(history_df, strategies):
+    text = "#  The Adaptive Trader's Constitution\n*Rules evolve. This book rewrites itself based on your actual data.*\n\n"
+    if history_df.empty:
+        text += " *Not enough data yet. Complete more trades to unlock adaptive rules.*"
+        return text
+    for strat in strategies:
+        strat_df = history_df[history_df['Strategy'] == strat]
+        if strat_df.empty: continue
+        winners = strat_df[strat_df['P&L'] > 0]
+        text += f"### {strat}\n"
+        if not winners.empty:
+            winners = winners.copy()
+            winners['Day'] = winners['Entry Date'].dt.day_name()
+            best_day = winners.groupby('Day')['P&L'].mean().idxmax()
+            text += f"* ** Best Entry Day:** {best_day} (Highest Avg Win)\n"
+            avg_hold = winners['Days Held'].mean()
+            text += f"* ** Optimal Hold:** {avg_hold:.0f} Days (Avg Winner Duration)\n"
+            avg_cost = winners['Debit/Lot'].mean()
+            text += f"* ** Target Cost:** ${avg_cost:,.0f} (Avg Winner Debit per Lot)\n"
+        losers = strat_df[strat_df['P&L'] < 0]
+        if not losers.empty:
+             avg_loss_hold = losers['Days Held'].mean()
+             text += f"* ** Loss Pattern:** Losers held for avg {avg_loss_hold:.0f} days.\n"
+        text += "\n"
+    text += "---\n###  Universal AI Gates\n"
+    text += "1. **Efficiency Check:** If 'Rot Detector' flags a trade, cut it. Your capital is stuck.\n"
+    text += "2. **Probability Gate:** Check 'Win Prob %' before entering. If < 40%, skip even if the chart looks good.\n"
+    return text
+
+# --- INITIALIZE DB ---
+init_db()
+
+# --- SIDEBAR ---
+st.sidebar.markdown("###  Daily Workflow")
+
+if GOOGLE_DEPS_INSTALLED:
+    with st.sidebar.expander("☁️ Cloud Sync (Google Drive)", expanded=True):
+        if not drive_mgr.is_connected:
+            st.error("No secrets found. Add 'gcp_service_account' to .streamlit/secrets.toml")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("⬆️ Sync to Cloud"):
+                    success, msg = drive_mgr.upload_db()
+                    if not success and "CONFLICT" in msg:
+                        st.error(msg)
+                        st.session_state['show_conflict'] = True
+                    elif success: 
+                        st.success(msg)
+                        st.session_state['show_conflict'] = False
+                    else: st.error(msg)
             
-        self.current_campaign_id = g_id
-        self.lbl_camp_title.setText(f"Ledger: {item.text(0)}")
-        self.btn_log_adj.setEnabled(True)
-        self.refresh_ledger(g_id)
+            with c2:
+                if st.button("⬇️ Pull from Cloud"):
+                    success, msg = drive_mgr.download_db()
+                    if not success and "CONFLICT" in msg:
+                        st.error(msg)
+                        st.session_state['show_pull_conflict'] = True
+                    elif success: 
+                        st.cache_data.clear()
+                        st.success(msg)
+                        st.rerun()
+                    else: st.error(msg)
+            
+            # Conflict Resolution UI (Upload)
+            if st.session_state.get('show_conflict'):
+                st.warning("Upload Conflict:")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("⬇️ Pull (Safe)", key="res_pull"):
+                        success, msg = drive_mgr.download_db()
+                        if success:
+                            st.success("Resolved: Cloud version pulled.")
+                            st.session_state['show_conflict'] = False
+                            st.cache_data.clear()
+                            st.rerun()
+                with cc2:
+                    if st.button("⚠️ Force Push", key="res_force"):
+                        success, msg = drive_mgr.upload_db(force=True)
+                        if success:
+                            st.success("Resolved: Cloud overwritten.")
+                            st.session_state['show_conflict'] = False
 
-    def refresh_ledger(self, g_id):
-        if not self.db_conn: return
-        self.ledger_table.setRowCount(0)
-        c = self.db_conn.cursor()
-        c.execute("SELECT date, action, details, realized_pnl FROM campaign_adjustments WHERE group_id=? ORDER BY date DESC", (g_id,))
-        for idx, row in enumerate(c.fetchall()):
-            self.ledger_table.insertRow(idx)
-            for j, val in enumerate(row):
-                itm = QTableWidgetItem(str(val))
-                itm.setFlags(itm.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if j == 3 and val is not None:
-                    itm.setText(f"${float(val):.2f}")
-                    itm.setForeground(QColor('#3fb950' if float(val) >= 0 else '#f85149'))
-                self.ledger_table.setItem(idx, j, itm)
+            # Conflict Resolution UI (Pull)
+            if st.session_state.get('show_pull_conflict'):
+                st.warning("Pull Warning: Local file is newer!")
+                cp1, cp2 = st.columns(2)
+                with cp1:
+                    if st.button("⬇️ Force Pull (Lose Local)", key="force_pull"):
+                        success, msg = drive_mgr.download_db(force=True)
+                        if success:
+                            st.session_state['show_pull_conflict'] = False
+                            st.cache_data.clear()
+                            st.rerun()
+                with cp2:
+                    if st.button("❌ Cancel", key="cancel_pull"):
+                        st.session_state['show_pull_conflict'] = False
+                        st.rerun()
+            
+            # Persistent Status Indicator
+            st.sidebar.divider()
+            last_sync_time = st.session_state.get('last_cloud_sync')
+            cloud_file_id, cloud_file_name = drive_mgr.find_db_file()
+            if cloud_file_id:
+                cloud_ts = drive_mgr.get_cloud_modified_time(cloud_file_id)
+                if cloud_ts:
+                    st.sidebar.caption(f"☁️ Cloud File: {cloud_ts.strftime('%b %d, %H:%M')} (UTC)")
+            
+            if last_sync_time:
+                mins_ago = (datetime.now() - last_sync_time).total_seconds() / 60
+                if mins_ago < 1:
+                    st.sidebar.success(f"✅ Synced just now")
+                elif mins_ago < 60:
+                    st.sidebar.info(f"Last Sync: {int(mins_ago)}m ago")
+                else:
+                    st.sidebar.warning(f"Last Sync: {last_sync_time.strftime('%H:%M')}")
+            else:
+                st.sidebar.warning("⚠️ Session Status: Unsaved")
 
-    def add_realized_pnl(self, g_id):
-        pnl, ok = QInputDialog.getDouble(self, "Log PnL", "Enter Realized PnL from roll/close:", 0.0, -99999, 99999, 2)
-        if ok:
-            all_groups = self.load_strategy_groups()
-            for acc, groups in all_groups.items():
-                if g_id in groups:
-                    groups[g_id]['realized_pnl'] = groups[g_id].get('realized_pnl', 0.0) + pnl
-                    self.save_strategy_groups(all_groups)
-                    if self.db_conn:
-                        c = self.db_conn.cursor()
-                        c.execute("INSERT INTO campaign_adjustments (group_id, date, action, details, realized_pnl) VALUES (?, datetime('now', 'localtime'), ?, ?, ?)", 
-                                  (g_id, "Strategy Roll/Close", f"Realized {pnl:.2f} PnL via UI.", pnl))
-                        self.db_conn.commit()
-                    self.refresh_portfolio_grid()
-                    self.load_campaign_data()
-                    if getattr(self, 'current_campaign_id', None) == g_id: self.refresh_ledger(g_id)
-                    break
+            with st.expander("🕵️ Debug: What can I see?"):
+                st.write("Files visible to Bot:")
+                files = drive_mgr.list_files_debug()
+                if files:
+                    for f in files:
+                        mod_time = f['modifiedTime'] if 'modifiedTime' in f else 'Unknown'
+                        st.code(f"{f['name']}\nID: {f['id']}\nMod: {mod_time}")
+                else:
+                    st.warning("No files found. Ensure you shared the DB with the service account email.")
+
+with st.sidebar.expander("1.  STARTUP (Restore Local)", expanded=False):
+    restore = st.file_uploader("Upload .db file", type=['db'], key='restore')
+    if restore:
+        with open(DB_NAME, "wb") as f: f.write(restore.getbuffer())
+        st.cache_data.clear()
+        st.success("Restored.")
+        if 'restored' not in st.session_state:
+            st.session_state['restored'] = True
+            st.rerun()
+
+st.sidebar.markdown(" *then...*")
+with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
+    active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
+    history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
+    if st.button(" Process & Reconcile"):
+        logs = []
+        if active_up: logs.extend(sync_data(active_up, "Active"))
+        if history_up: logs.extend(sync_data(history_up, "History"))
+        if logs:
+            for l in logs: st.write(l)
+            st.cache_data.clear()
+            st.success("Sync Complete!")
+            auto_sync_if_connected()
+
+st.sidebar.markdown(" *finally...*")
+with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
+    with open(DB_NAME, "rb") as f:
+        st.download_button(" Save Database File", f, "trade_guardian_v4.db", "application/x-sqlite3")
+
+with st.sidebar.expander(" Maintenance", expanded=False):
+    st.caption("Fix Duplicates / Rename Issues")
+    if st.button(" Vacuum DB"):
+        conn = get_db_connection()
+        conn.execute("VACUUM")
+        conn.close()
+        st.success("Optimized.")
+    st.markdown("---")
+    conn = get_db_connection()
+    try:
+        all_trades = pd.read_sql("SELECT id, name, status, pnl, days_held FROM trades ORDER BY status, entry_date DESC", conn)
+        if not all_trades.empty:
+            st.write(" **Delete Specific Trades**")
+            all_trades['Label'] = all_trades['name'] + " (" + all_trades['status'] + ", $" + all_trades['pnl'].astype(str) + ")"
+            trades_to_del = st.multiselect("Select trades to delete:", all_trades['Label'].tolist())
+            if st.button(" Delete Selected Trades"):
+                if trades_to_del:
+                    ids_to_del = all_trades[all_trades['Label'].isin(trades_to_del)]['id'].tolist()
+                    placeholders = ','.join('?' for _ in ids_to_del)
+                    conn.execute(f"DELETE FROM snapshots WHERE trade_id IN ({placeholders})", ids_to_del)
+                    conn.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids_to_del)
+                    conn.commit()
+                    st.success(f"Deleted {len(ids_to_del)} trades!")
+                    st.cache_data.clear()
+                    st.rerun()
+    except: pass
+    conn.close()
+    st.markdown("---")
+    if st.button(" Hard Reset (Delete All Data)"):
+        conn = get_db_connection()
+        conn.execute("DROP TABLE IF EXISTS trades")
+        conn.execute("DROP TABLE IF EXISTS snapshots")
+        conn.execute("DROP TABLE IF EXISTS strategy_config")
+        conn.commit()
+        conn.close()
+        init_db()
+        st.cache_data.clear()
+        st.success("Wiped & Reset.")
+        st.rerun()
+
+st.sidebar.divider()
+st.sidebar.header(" Portfolio Settings")
+
+prime_cap = st.sidebar.number_input("Prime Account (130/160, M200)", min_value=1000, value=115000, step=1000)
+smsf_cap = st.sidebar.number_input("SMSF Account", min_value=1000, value=150000, step=1000)
+total_cap = prime_cap + smsf_cap
+
+market_regime = st.sidebar.selectbox("Current Market Regime", ["Neutral (Standard)", "Bullish (Aggr. Targets)", "Bearish (Safe Targets)"], index=0)
+regime_mult = 1.10 if "Bullish" in market_regime else 0.90 if "Bearish" in market_regime else 1.0
+
+# --- SMART ADAPTIVE EXIT ENGINE ---
+def calculate_decision_ladder(row, benchmarks_dict):
+    strat = row['Strategy']
+    days = row['Days Held']
+    pnl = row['P&L']
+    status = row['Status']
+    theta = row['Theta']
+    stability = row['Stability']
+    debit = row['Debit']
+    lot_size = row.get('lot_size', 1)
+    if lot_size < 1: lot_size = 1
+    juice_val = 0.0
+    juice_type = "Neutral"
+    if status == 'Missing': return "REVIEW", 100, "Missing from data", 0, "Error"
+    bench = benchmarks_dict.get(strat, {})
+    hist_avg_pnl = bench.get('pnl', 1000)
+    target_profit = (hist_avg_pnl * regime_mult) * lot_size
+    hist_avg_days = bench.get('dit', 40)
+    score = 50 
+    action = "HOLD"
+    reason = "Normal"
+    if pnl < 0:
+        juice_type = "Recovery Days"
+        if theta > 0:
+            recov_days = abs(pnl) / theta
+            juice_val = recov_days
+            is_cooking = (strat == '160/190' and days < 30)
+            is_young = days < 15
+            if not is_cooking and not is_young:
+                remaining_time_est = max(1, hist_avg_days - days)
+                if recov_days > remaining_time_est:
+                    score += 40
+                    action = "STRUCTURAL FAILURE"
+                    reason = f"Zombie (Recov {recov_days:.0f}d > Left {remaining_time_est:.0f}d)"
+        else:
+            juice_val = 999
+            if days > 15:
+                score += 30
+                reason = "Negative Theta"
+    else:
+        juice_type = "Left in Tank"
+        left_in_tank = max(0, target_profit - pnl)
+        juice_val = left_in_tank
+        if debit > 0 and (left_in_tank / debit) < 0.05:
+            score += 40
+            reason = "Squeezed Dry (Risk > Reward)"
+        elif left_in_tank < (100 * lot_size):
+            score += 35
+            reason = f"Empty Tank (<${100*lot_size})"
+
+    if pnl >= target_profit:
+        return "TAKE PROFIT", 100, f"Hit Target ${target_profit:.0f}", juice_val, juice_type
+    elif pnl >= target_profit * 0.8:
+        score += 30
+        action = "PREPARE EXIT"
+        reason = "Near Target"
+        
+    stale_threshold = hist_avg_days * 1.25 
+    if strat == '130/160':
+        limit_130 = min(stale_threshold, 30) 
+        if days > limit_130 and pnl < (100 * lot_size):
+            return "KILL", 95, f"Stale (> {limit_130:.0f}d)", juice_val, juice_type
+        elif days > (limit_130 * 0.8):
+            score += 20
+            reason = "Aging"
+    elif strat == '160/190':
+        cooking_limit = max(30, hist_avg_days * 0.7)
+        if days < cooking_limit:
+            score = 10 
+            action = "COOKING" 
+            reason = f"Too Early (<{cooking_limit:.0f}d)"
+        elif days > stale_threshold:
+            score += 25
+            action = "WATCH"
+            reason = f"Mature (>{stale_threshold:.0f}d)"
+    elif strat == 'M200':
+        if 13 <= days <= 15:
+            score += 10
+            action = "DAY 14 CHECK"
+            reason = "Scheduled Review"
+    if stability < 0.3 and days > 5:
+        score += 25
+        reason += " + Coin Flip (Unstable)"
+        action = "RISK REVIEW"
+    if row['Theta Eff.'] < 0.2 and days > 10:
+        score += 15
+        reason += " + Bad Decay"
+    
+    if pnl > 0 and days > 5:
+        hist_vel = hist_avg_pnl / max(1, hist_avg_days)
+        curr_vel = pnl / days
+        if curr_vel < (hist_vel * 0.6):
+             if pnl > (target_profit * 0.2):
+                 score += 15
+                 if action == "HOLD": 
+                     action = "REDEPLOY?"
+                     reason = f"Slow Capital (Vel ${curr_vel:.0f}/d vs Avg ${hist_vel:.0f}/d)"
+
+    score = min(100, max(0, score))
+    if score >= 90: action = "CRITICAL"
+    elif score >= 70: action = "WATCH"
+    elif score <= 30: action = "COOKING"
+    return action, score, reason, juice_val, juice_type
+
+# --- MAIN APP ---
+df = load_data()
+BASE_CONFIG = {
+    '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
+    '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
+    'M200':    {'pnl': 900, 'dit': 41, 'stability': 0.8}, 
+    'SMSF':    {'pnl': 600, 'dit': 40, 'stability': 0.8} 
+}
+dynamic_benchmarks = load_strategy_config() 
+if not dynamic_benchmarks: dynamic_benchmarks = BASE_CONFIG.copy()
+
+expired_df = pd.DataFrame() 
+if not df.empty and 'Status' in df.columns:
+    expired_df = df[df['Status'] == 'Expired']
+    
+    # --- V150 STATS UPDATE via SESSION_STATE ---
+    try:
+        if not expired_df.empty:
+            st.session_state['velocity_stats'] = get_velocity_stats(expired_df)
+        
+        # Temp Connection for stats extraction
+        temp_conn = get_db_connection()
+        st.session_state['mae_stats'] = get_mae_stats(temp_conn)
+        temp_conn.close()
+    except Exception as e: print(f"Stats Error: {e}")
+    # -------------------------
+
+    if not expired_df.empty:
+        hist_grp = expired_df.groupby('Strategy')
+        for strat, grp in hist_grp:
+            winners = grp[grp['P&L'] > 0]
+            current_bench = dynamic_benchmarks.get(strat, {})
+            if not winners.empty:
+                current_bench['pnl'] = winners['P&L'].mean()
+                current_bench['dit'] = winners['Days Held'].mean()
+                current_bench['yield'] = grp['Daily Yield %'].mean()
+                current_bench['roi'] = winners['ROI'].mean()
+            dynamic_benchmarks[strat] = current_bench
+
+# --- TABS ---
+tab_dash, tab_active, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " ⚡ Active Management", " Analytics", " AI & Insights", " Strategies", " Rules"])
+
+with tab_dash:
+    with st.expander(" Universal Pre-Flight Calculator", expanded=False):
+        pf_c1, pf_c2, pf_c3 = st.columns(3)
+        with pf_c1:
+            pf_goal = st.selectbox("Strategy Profile", [
+                " Hedged Income (Butterflies, Calendars, M200)", 
+                " Standard Income (Credit Spreads, Iron Condors)", 
+                " Directional (Long Calls/Puts, Verticals)", 
+                " Speculative Vol (Straddles, Earnings)"
+            ])
+            pf_dte = st.number_input("DTE (Days)", min_value=1, value=45, step=1)
+        with pf_c2:
+            pf_price = st.number_input("Net Price ($)", value=5000.0, step=100.0, help="Total Debit or Credit (Risk Amount)")
+            pf_theta = st.number_input("Theta ($)", value=15.0, step=1.0)
+        with pf_c3:
+            pf_delta = st.number_input("Net Delta", value=-10.0, step=1.0, format="%.2f")
+            pf_vega = st.number_input("Vega", value=100.0, step=1.0, format="%.2f")
+            
+        if st.button("Run Pre-Flight Check"):
+            st.markdown("---")
+            res_c1, res_c2, res_c3 = st.columns(3)
+            if "Hedged Income" in pf_goal:
+                stability = pf_theta / (abs(pf_delta) + 1)
+                yield_pct = (pf_theta / abs(pf_price)) * 100
+                annualized_roi = (yield_pct * 365)
+                vega_cushion = pf_vega / pf_theta if pf_theta != 0 else 0
+                with res_c1:
+                    if stability > 1.0: st.success(f" Stability: {stability:.2f} (Fortress)")
+                    elif stability > 0.5: st.info(f" Stability: {stability:.2f} (Good)")
+                    else: st.error(f" Stability: {stability:.2f} (Coin Flip)")
+                with res_c2:
+                    if annualized_roi > 50: st.success(f" Ann. ROI: {annualized_roi:.0f}%")
+                    elif annualized_roi > 25: st.info(f" Ann. ROI: {annualized_roi:.0f}%")
+                    else: st.error(f" Ann. ROI: {annualized_roi:.0f}%")
+                with res_c3:
+                    if pf_dte < 21: st.warning(" High Gamma Risk (Low DTE)")
+                    elif pf_vega > 0: st.success(f" Hedge: {vega_cushion:.1f}x (Good)")
+                    else: st.error(f" Hedge: {pf_vega:.0f} (Negative Vega)")
+            elif "Standard Income" in pf_goal:
+                stability = pf_theta / (abs(pf_delta) + 1)
+                yield_pct = (pf_theta / abs(pf_price)) * 100
+                annualized_roi = (yield_pct * 365)
+                fragility = abs(pf_vega) / pf_theta if pf_theta != 0 else 999
+                with res_c1:
+                    if stability > 0.5: st.success(f" Stability: {stability:.2f} (Good)")
+                    else: st.error(f" Stability: {stability:.2f} (Unstable)")
+                with res_c2:
+                    if annualized_roi > 40: st.success(f" Ann. ROI: {annualized_roi:.0f}%")
+                    else: st.warning(f" Ann. ROI: {annualized_roi:.0f}%")
+                with res_c3:
+                    if pf_dte < 21: st.warning(" High Gamma Risk (Low DTE)")
+                    elif pf_vega < 0 and fragility < 5: st.success(f" Fragility: {fragility:.1f} (Robust)")
+                    else: st.warning(f" Fragility: {fragility:.1f} (High)")
+            elif "Directional" in pf_goal:
+                leverage = abs(pf_delta) / abs(pf_price) * 100
+                theta_drag = (pf_theta / abs(pf_price)) * 100
+                with res_c1: st.metric("Leverage", f"{leverage:.2f} /$100")
+                with res_c2:
+                    if theta_drag > -0.1: st.success(f" Burn: {theta_drag:.2f}% (Low)")
+                    else: st.warning(f" Burn: {theta_drag:.2f}% (High)")
+                with res_c3:
+                    proj_roi = (abs(pf_delta) * 5) / abs(pf_price) * 100 
+                    st.metric("ROI on $5 Move", f"{proj_roi:.1f}%")
+            elif "Speculative Vol" in pf_goal:
+                vega_efficiency = abs(pf_vega) / abs(pf_price) * 100
+                move_needed = abs(pf_theta / pf_vega) if pf_vega != 0 else 0
+                with res_c1: st.metric("Vega Exposure", f"{vega_efficiency:.1f}%")
+                with res_c2: st.metric("Daily Cost", f"${pf_theta:.0f}")
+                with res_c3: st.info(f"Need {move_needed:.1f}% IV move to break even")
+
+    if not df.empty and 'Status' in df.columns:
+        active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
+        if active_df.empty:
+            st.info(" No active trades.")
+        else:
+            tot_debit = active_df['Debit'].sum()
+            if tot_debit == 0: tot_debit = 1
+            target_allocation = {'130/160': 0.30, '160/190': 0.40, 'M200': 0.20, 'SMSF': 0.10}
+            actual_alloc = active_df.groupby('Strategy')['Debit'].sum() / tot_debit
+            allocation_score = 100 - sum(abs(actual_alloc.get(s, 0) - target_allocation.get(s, 0)) * 100 for s in target_allocation)
+            total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
+            avg_age = active_df['Days Held'].mean()
+            tot_theta = active_df['Theta'].sum()
+            curr_pnl = active_df['P&L'].sum()
+            
+            # --- V150: PORTFOLIO VaR METRIC ---
+            portfolio_var = calculate_portfolio_var(df[df['Status'] == 'Expired'])
+            est_risk_dollars = (portfolio_var/100) * total_cap if portfolio_var < 0 else 0.0
+
+            if total_delta_pct > 6 or avg_age > 45: health_status = " CRITICAL" 
+            elif allocation_score < 40: health_status = " CRITICAL" 
+            elif allocation_score < 80 or total_delta_pct > 2 or avg_age > 25: health_status = " REVIEW"    
+            else: health_status = " HEALTHY"   
+            
+            score_stability = min(100, (active_df['Stability'].mean() / 1.5) * 100) 
+            score_yield = min(100, (tot_theta / tot_debit * 100) * 500)
+            score_hedge = min(100, abs(active_df['Vega'].sum() / (tot_theta if tot_theta !=0 else 1)) * 20) 
+            score_freshness = max(0, 100 - (avg_age / 45 * 100))
+            score_neutral = max(0, 100 - (total_delta_pct * 20))
+            score_div = allocation_score
+
+            dash_c1, dash_c2 = st.columns([1.8, 1.2])
+            
+            with dash_c1:
+                st.subheader("Command Center")
+                m1, m2 = st.columns(2)
+                h_icon = "🟢" if "HEALTHY" in health_status else ("🔴" if "CRITICAL" in health_status else "🟡")
+                m1.metric("Health", f"{h_icon} {health_status}")
+                m2.metric("Floating P&L", f"${curr_pnl:,.0f}", delta_color="normal" if curr_pnl > 0 else "inverse")
+                
+                m3, m4 = st.columns(2)
+                m3.metric("Daily Income", f"${tot_theta:,.0f}")
+                
+                ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
+                active_df['Action'] = [x[0] for x in ladder_results]
+                active_df['Urgency Score'] = [x[1] for x in ladder_results]
+                active_df['Reason'] = [x[2] for x in ladder_results]
+                active_df['Juice Val'] = [x[3] for x in ladder_results]
+                active_df['Juice Type'] = [x[4] for x in ladder_results]
+                active_df = active_df.sort_values('Urgency Score', ascending=False)
+                todo_df = active_df[active_df['Urgency Score'] >= 70]
+                m4.metric("Action Items", len(todo_df), delta="Urgent" if len(todo_df) > 0 else None)
+
+                # --- V150: THE GREEK WALL ---
+                st.markdown("##### The Greek Wall & Risk Limits")
+                gw1, gw2, gw3 = st.columns(3)
+                gw1.metric("Portfolio VaR (Est.)", f"${est_risk_dollars:,.0f}", help="95% Confidence Value at Risk based on historical returns")
+                gw2.metric("Net Delta Exposure", f"{total_delta_pct:.2f}%", help="Total Delta / Total Capital. Keep under 5% for market neutrality.")
+                gw3.metric("Net Vega", f"{active_df['Vega'].sum():,.0f}", help="Positive vega cushions down-moves. Negative vega increases crash risk.")
+
+            with dash_c2:
+                categories = ['Stability', 'Yield', 'Hedge', 'Freshness', 'Neutrality', 'Diversification']
+                r_values = [score_stability, score_yield, score_hedge, score_freshness, score_neutral, score_div]
+                
+                fig_radar = go.Figure(data=go.Scatterpolar(
+                    r=r_values, theta=categories, fill='toself', name='Current Portfolio',
+                    line_color='#38bdf8', fillcolor='rgba(56, 189, 248, 0.2)'
+                ))
+
+                fig_radar.update_layout(
+                    polar=dict(
+                        radialaxis=dict(visible=True, range=[0, 100], showticklabels=False, gridcolor='rgba(148, 163, 184, 0.2)'),
+                        angularaxis=dict(gridcolor='rgba(148, 163, 184, 0.2)', linecolor='rgba(148, 163, 184, 0.2)'),
+                        bgcolor='rgba(0,0,0,0)'
+                    ),
+                    margin=dict(l=40, r=40, t=30, b=30), height=250,
+                    title=dict(text="Portfolio Composition", x=0.5, font=dict(size=14, color="#94a3b8")),
+                    paper_bgcolor='rgba(0,0,0,0)', font=dict(color="#94a3b8", family="Inter")
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+            
+            st.divider()
+            st.subheader("🗺️ Position Heat Map")
+            fig_heat = px.scatter(
+                active_df, x='Days Held', y='P&L', size='Debit',
+                color='Urgency Score', color_continuous_scale='RdYlGn_r',
+                hover_data=['Name', 'Strategy', 'Action'],
+                title="Position Clustering (Size = Capital)"
+            )
+            avg_days_current = active_df['Days Held'].mean()
+            fig_heat.add_vline(x=avg_days_current, line_dash="dash", opacity=0.5, annotation_text="Avg Age")
+            fig_heat.add_hline(y=0, line_dash="dash", opacity=0.5)
+            fig_heat = apply_chart_theme(fig_heat)
+            st.plotly_chart(fig_heat, use_container_width=True)
+            st.caption("🎯 Top-Right = Winners aging well | 🚨 Bottom-Right = Losers rotting | 🌱 Left = New positions cooking")
+
+    else: st.info(" Database is empty. Sync your first file.")
+
+with tab_active:
+    if not df.empty and 'Status' in df.columns:
+        active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
+        if not active_df.empty:
+            ladder_results = active_df.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
+            active_df['Action'] = [x[0] for x in ladder_results]
+            active_df['Urgency Score'] = [x[1] for x in ladder_results]
+            active_df['Reason'] = [x[2] for x in ladder_results]
+            active_df['Juice Val'] = [x[3] for x in ladder_results]
+            active_df['Juice Type'] = [x[4] for x in ladder_results]
+            active_df = active_df.sort_values('Urgency Score', ascending=False)
+            todo_df = active_df[active_df['Urgency Score'] >= 70]
+
+            is_expanded = len(todo_df) > 0
+            with st.expander(f" Priority Action Queue ({len(todo_df)})", expanded=is_expanded):
+                if not todo_df.empty:
+                    for _, row in todo_df.iterrows():
+                        u_score = row['Urgency Score']
+                        color = "red" if u_score >= 90 else "orange"
+                        is_valid_link = str(row['Link']).startswith('http')
+                        name_display = f"[{row['Name']}]({row['Link']})" if is_valid_link else row['Name']
+                        c_a, c_b, c_c = st.columns([2, 1, 1])
+                        c_a.markdown(f"**{name_display}** ({row['Strategy']})")
+                        c_b.markdown(f":{color}[**{row['Action']}**] ({row['Reason']})")
+                        if row['Juice Type'] == 'Recovery Days': c_c.metric("Days to Break Even", f"{row['Juice Val']:.0f}d", delta_color="inverse")
+                        else: c_c.metric("Left in Tank", f"${row['Juice Val']:.0f}")
+                else: st.success(" No critical actions required. Portfolio is healthy.")
+            st.divider()
+
+            sub_matrix, sub_strat, sub_journal, sub_dna = st.tabs([" 🧭 Decision Matrix", " 📊 Strategy Detail", " 📓 Journal", " 🧬 DNA Tool"])
+            
+            with sub_matrix:
+                st.subheader(" 🧭 Active Trade Decision Matrix")
+                st.caption("Trades categorized by time efficiency. Focus on eliminating 'Zombies' and harvesting 'Mature' trades.")
+                
+                matrix_data = []
+                for idx, row in active_df.iterrows():
+                    strat = row['Strategy']
+                    bench = dynamic_benchmarks.get(strat, {})
+                    target_days = bench.get('dit', 45)
+                    target_profit = bench.get('pnl', 500) * row.get('lot_size', 1) * regime_mult
                     
-    def prompt_manual_adjustment(self):
-        g_id = getattr(self, 'current_campaign_id', None)
-        if not g_id: return
-        action, ok = QInputDialog.getText(self, "Log Adjustment", "Action (e.g., Rolled Call, Defended Put):")
-        if not ok or not action: return
-        details, ok = QInputDialog.getText(self, "Log Details", "Details (e.g., Opened 4050 / Closed 4000):")
-        if not ok: return
-        if self.db_conn:
-            c = self.db_conn.cursor()
-            c.execute("INSERT INTO campaign_adjustments (group_id, date, action, details, realized_pnl) VALUES (?, datetime('now', 'localtime'), ?, ?, ?)",
-                      (g_id, action, details, 0.0))
-            self.db_conn.commit()
-            self.refresh_ledger(g_id)
+                    pct_time = (row['Days Held'] / target_days) * 100 if target_days > 0 else 0
+                    pct_profit = (row['P&L'] / target_profit) * 100 if target_profit > 0 else 0
+                    
+                    quadrant = "⏳ Developing (On Track)"
+                    if pct_profit >= 80 and pct_time <= 100: quadrant = "🌟 Star (Fast Winner)"
+                    elif pct_profit >= 80 and pct_time > 100: quadrant = "💰 Mature (Harvest Now)"
+                    elif pct_profit < 80 and pct_time > 100: quadrant = "🧟 Zombie (Capital Rot)"
+                    
+                    matrix_data.append({
+                        'Trade': row['Name'], 'Strategy': strat, 'Quadrant': quadrant,
+                        'Time Passed': f"{pct_time:.0f}%", 'Profit Reached': f"{pct_profit:.0f}%",
+                        'P&L': row['P&L'], 'Days Held': row['Days Held'], 'Action': row['Action']
+                    })
+                    
+                if matrix_data:
+                    matrix_df = pd.DataFrame(matrix_data)
+                    
+                    # Top line summary metrics
+                    cq1, cq2, cq3, cq4 = st.columns(4)
+                    cq1.metric("🌟 Stars (Fast Money)", len(matrix_df[matrix_df['Quadrant'].str.contains("Star")]))
+                    cq2.metric("💰 Mature (Take Profit)", len(matrix_df[matrix_df['Quadrant'].str.contains("Mature")]))
+                    cq3.metric("⏳ Developing (Wait)", len(matrix_df[matrix_df['Quadrant'].str.contains("Developing")]))
+                    cq4.metric("🧟 Zombies (Cut)", len(matrix_df[matrix_df['Quadrant'].str.contains("Zombie")]))
+                    
+                    def color_quadrants(val):
+                        if 'Star' in str(val): return 'background-color: rgba(15, 81, 50, 0.4); font-weight: bold; color: #a3e635;'
+                        if 'Mature' in str(val): return 'background-color: rgba(0, 204, 150, 0.2); font-weight: bold; color: #6ee7b7;'
+                        if 'Developing' in str(val): return 'color: #94a3b8;'
+                        if 'Zombie' in str(val): return 'background-color: rgba(132, 32, 41, 0.4); font-weight: bold; color: #fca5a5;'
+                        return ''
+                    
+                    st.dataframe(
+                        matrix_df.style
+                        .map(color_quadrants, subset=['Quadrant'])
+                        .format({'P&L': '${:,.0f}'}), 
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("No active trades for the matrix.")
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    loop = qasync.QEventLoop(app)
-    asyncio.set_event_loop(loop)
-    window = BVSLaunchpad()
-    window.show()
-    with loop: loop.run_forever()
+            with sub_journal:
+                st.caption("Trades sorted by Urgency.")
+                strategy_options = sorted(list(dynamic_benchmarks.keys())) + ["Other"]
+                def fmt_juice(row):
+                    if row['Juice Type'] == 'Recovery Days': return f"{row['Juice Val']:.0f} days"
+                    return f"${row['Juice Val']:.0f}"
+                active_df['Gauge'] = active_df.apply(fmt_juice, axis=1)
+
+                display_cols = ['id', 'Name', 'Link', 'Strategy', 'Urgency Score', 'Action', 'Gauge', 'Status', 'Stability', 'ROI', 'Ann. ROI', 'Theta Eff.', 'lot_size', 'P&L', 'Debit', 'Days Held', 'Notes', 'Tags', 'Parent ID']
+                column_config = {
+                    "id": None, "Name": st.column_config.TextColumn("Trade Name", disabled=True),
+                    "Link": st.column_config.LinkColumn("OS Link", display_text="Open "),
+                    "Strategy": st.column_config.SelectboxColumn("Strat", width="medium", options=strategy_options, required=True),
+                    "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
+                    "Urgency Score": st.column_config.ProgressColumn(" Urgency Ladder", min_value=0, max_value=100, format="%d"),
+                    "Action": st.column_config.TextColumn("Decision", disabled=True),
+                    "Gauge": st.column_config.TextColumn("Tank / Recov"),
+                    "Stability": st.column_config.ProgressColumn(
+                        "Stability", help="Theta / (Delta + 1). Full bar (3.0) = Excellent Health.", format="%.2f", min_value=0, max_value=3,
+                    ),
+                    "Theta Eff.": st.column_config.NumberColumn(" Eff", format="%.2f", disabled=True),
+                    "ROI": st.column_config.NumberColumn("ROI %", format="%.1f%%", disabled=True),
+                    "Ann. ROI": st.column_config.NumberColumn("Ann. ROI %", format="%.1f%%", disabled=True),
+                    "P&L": st.column_config.NumberColumn("P&L", format="$%d", disabled=True),
+                    "Debit": st.column_config.NumberColumn("Debit", format="$%d", disabled=True),
+                    "lot_size": st.column_config.NumberColumn("Lots", min_value=1, step=1),
+                    "Notes": st.column_config.TextColumn(" Notes", width="large"),
+                    "Tags": st.column_config.SelectboxColumn(" Tags", options=["Rolled", "Hedged", "Earnings", "High Risk", "Watch"], width="medium"),
+                    "Parent ID": st.column_config.TextColumn(" Link ID"),
+                }
+                edited_df = st.data_editor(active_df[display_cols], column_config=column_config, hide_index=True, use_container_width=True, key="journal_editor", num_rows="fixed")
+                if st.button(" Save Journal"):
+                    changes = update_journal(edited_df)
+                    if changes: 
+                        st.success(f"Saved {changes} trades!")
+                        st.cache_data.clear()
+                        auto_sync_if_connected()
+                        time.sleep(1) 
+                        st.rerun()
+            
+            with sub_dna:
+                st.subheader(" Trade DNA Fingerprinting")
+                st.caption("Find historical trades that match the Greek profile of your current active trade.")
+                if not expired_df.empty:
+                    selected_dna_trade = st.selectbox("Select Active Trade to Analyze", active_df['Name'].unique())
+                    curr_row = active_df[active_df['Name'] == selected_dna_trade].iloc[0]
+                    similar = find_similar_trades(curr_row, expired_df)
+                    if not similar.empty:
+                        best_match = similar.iloc[0]
+                        st.info(f" **Best Match:** {best_match['Name']} ({best_match['Similarity %']:.0f}% similar)  Made ${best_match['P&L']:,.0f} in {best_match['Days Held']:.0f} days")
+                        st.dataframe(similar.style.format({'P&L': '${:,.0f}', 'ROI': '{:.1f}%', 'Similarity %': '{:.0f}%'}))
+                    else: st.info("No similar historical trades found.")
+                else: st.info("Need closed trade history for DNA analysis.")
+
+            with sub_strat:
+                st.markdown("###  Strategy Performance")
+                sorted_strats = sorted(list(dynamic_benchmarks.keys()))
+                tabs_list = [" Overview"] + [f" {s}" for s in sorted_strats]
+                if "Other" not in sorted_strats: tabs_list.append(" Other / Unclassified")
+                strat_tabs_inner = st.tabs(tabs_list)
+
+                with strat_tabs_inner[0]:
+                    strat_agg = active_df.groupby('Strategy').agg({
+                        'P&L': 'sum', 'Debit': 'sum', 'Theta': 'sum', 'Delta': 'sum',
+                        'Name': 'count', 'Daily Yield %': 'mean', 'Ann. ROI': 'mean', 'Theta Eff.': 'mean', 'P&L Vol': 'mean', 'Stability': 'mean' 
+                    }).reset_index()
+                    strat_agg['Trend'] = strat_agg.apply(lambda r: " Improving" if r['Daily Yield %'] >= dynamic_benchmarks.get(r['Strategy'], {}).get('yield', 0) else " Lagging", axis=1)
+                    strat_agg['Target %'] = strat_agg['Strategy'].apply(lambda x: dynamic_benchmarks.get(x, {}).get('yield', 0))
+                    total_row = pd.DataFrame({
+                        'Strategy': ['TOTAL'], 'P&L': [strat_agg['P&L'].sum()], 'Debit': [strat_agg['Debit'].sum()],
+                        'Theta': [strat_agg['Theta'].sum()], 'Delta': [strat_agg['Delta'].sum()],
+                        'Name': [strat_agg['Name'].sum()], 'Daily Yield %': [active_df['Daily Yield %'].mean()],
+                        'Ann. ROI': [active_df['Ann. ROI'].mean()], 'Theta Eff.': [active_df['Theta Eff.'].mean()],
+                        'P&L Vol': [active_df['P&L Vol'].mean()], 'Stability': [active_df['Stability'].mean()],
+                        'Trend': ['-'], 'Target %': ['-']
+                    })
+                    final_agg = pd.concat([strat_agg, total_row], ignore_index=True)
+                    display_agg = final_agg[['Strategy', 'Trend', 'Daily Yield %', 'Ann. ROI', 'Theta Eff.', 'Stability', 'P&L Vol', 'Target %', 'P&L', 'Debit', 'Theta', 'Delta', 'Name']].copy()
+                    display_agg.columns = ['Strategy', 'Trend', 'Yield/Day', 'Ann. ROI', ' Eff', 'Stability', 'Sleep Well (Vol)', 'Target', 'Total P&L', 'Total Debit', 'Net Theta', 'Net Delta', 'Count']
+                    
+                    def highlight_trend(val): 
+                        val_str = str(val)
+                        if 'Improving' in val_str: return 'color: green; font-weight: bold'
+                        if 'Lagging' in val_str: return 'color: red; font-weight: bold'
+                        return ''
+                    
+                    def style_total(row): return ['background-color: #d1d5db; color: black; font-weight: bold'] * len(row) if row['Strategy'] == 'TOTAL' else [''] * len(row)
+
+                    st.dataframe(
+                        display_agg.style
+                        .format({
+                            'Total P&L': lambda x: safe_fmt(x, "${:,.0f}"), 
+                            'Total Debit': lambda x: safe_fmt(x, "${:,.0f}"), 
+                            'Net Theta': lambda x: safe_fmt(x, "{:,.0f}"), 
+                            'Net Delta': lambda x: safe_fmt(x, "{:,.1f}"), 
+                            'Yield/Day': lambda x: safe_fmt(x, "{:.2f}%"), 
+                            'Ann. ROI': lambda x: safe_fmt(x, "{:.1f}%"), 
+                            ' Eff': lambda x: safe_fmt(x, "{:.2f}"),
+                            'Stability': lambda x: safe_fmt(x, "{:.2f}"),
+                            'Sleep Well (Vol)': lambda x: safe_fmt(x, "{:.1f}"),
+                            'Target': lambda x: safe_fmt(x, "{:.2f}%")
+                        })
+                        .map(highlight_trend, subset=['Trend'])
+                        .apply(style_total, axis=1), 
+                        use_container_width=True
+                    )
+
+                cols = ['Name', 'Link', 'Action', 'Urgency Score', 'Grade', 'Gauge', 'Stability', 'Theta/Cap %', 'Theta Eff.', 'P&L Vol', 'Daily Yield %', 'Ann. ROI', 'P&L', 'Debit', 'Days Held', 'Theta', 'Delta', 'Gamma', 'Vega', 'Notes']
+                for i, strat_name in enumerate(sorted_strats):
+                    with strat_tabs_inner[i+1]:
+                        subset = active_df[active_df['Strategy'] == strat_name].copy()
+                        bench = dynamic_benchmarks.get(strat_name, {})
+                        target_yield = bench.get('yield', 0)
+                        target_disp = bench.get('pnl', 0) * regime_mult
+                        
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Hist. Avg Win", f"${bench.get('pnl',0):,.0f}")
+                        c2.metric("Target Yield", f"{bench.get('yield',0):.2f}%/d")
+                        c3.metric("Target Profit", f"${target_disp:,.0f}")
+                        c4.metric("Avg Hold", f"{bench.get('dit',0):.0f}d")
+                        
+                        if not subset.empty:
+                            sum_row = pd.DataFrame({
+                                'Name': ['TOTAL'], 'Link': [''], 'Action': ['-'], 'Urgency Score': [0], 'Grade': ['-'], 'Gauge': ['-'],
+                                'Theta/Cap %': [subset['Theta/Cap %'].mean()], 'Daily Yield %': [subset['Daily Yield %'].mean()],
+                                'Ann. ROI': [subset['Ann. ROI'].mean()], 'Theta Eff.': [subset['Theta Eff.'].mean()],
+                                'P&L Vol': [subset['P&L Vol'].mean()], 'Stability': [subset['Stability'].mean()],
+                                'P&L': [subset['P&L'].sum()], 'Debit': [subset['Debit'].sum()], 'Days Held': [subset['Days Held'].mean()],
+                                'Theta': [subset['Theta'].sum()], 'Delta': [subset['Delta'].sum()],
+                                'Gamma': [subset['Gamma'].sum()], 'Vega': [subset['Vega'].sum()], 'Notes': ['']
+                            })
+                            display_df = pd.concat([subset[cols], sum_row], ignore_index=True)
+                            
+                            def yield_color(val):
+                                if isinstance(val, (int, float)):
+                                    if val < 0: return 'color: red; font-weight: bold'
+                                    if val >= target_yield * 0.8: return 'color: green; font-weight: bold' 
+                                    return 'color: orange; font-weight: bold' 
+                                return ''
+
+                            st.dataframe(
+                                display_df.style.format({'Theta/Cap %': "{:.2f}%", 'P&L': "${:,.0f}", 'Debit': "${:,.0f}", 'Daily Yield %': "{:.2f}%", 'Ann. ROI': "{:.1f}%", 'Theta Eff.': "{:.2f}", 'P&L Vol': "{:.1f}", 'Stability': "{:.2f}", 'Theta': "{:.1f}", 'Delta': "{:.1f}", 'Gamma': "{:.2f}", 'Vega': "{:.0f}", 'Days Held': "{:.0f}"})
+                                .map(lambda v: 'background-color: #d1e7dd; color: #0f5132; font-weight: bold' if 'TAKE PROFIT' in str(v) else ('background-color: #f8d7da; color: #842029; font-weight: bold' if 'KILL' in str(v) or 'MISSING' in str(v) else ('background-color: #fff3cd; color: #856404; font-weight: bold' if 'WATCH' in str(v) else ('background-color: #cff4fc; color: #055160; font-weight: bold' if 'COOKING' in str(v) else ''))), subset=['Action'])
+                                .map(lambda v: 'color: green; font-weight: bold' if isinstance(v, (int, float)) and v > 0 else ('color: red; font-weight: bold' if isinstance(v, (int, float)) and v < 0 else ''), subset=['P&L'])
+                                .map(yield_color, subset=['Daily Yield %'])
+                                .apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(display_df)-1 else '' for _ in x], axis=1), 
+                                use_container_width=True, 
+                                column_config={
+                                    "Link": st.column_config.LinkColumn("OS Link", display_text="Open "), 
+                                    "Urgency Score": st.column_config.ProgressColumn("Urgency", min_value=0, max_value=100, format="%d"), 
+                                    "Gauge": st.column_config.TextColumn("Tank / Recov"),
+                                    "Stability": st.column_config.ProgressColumn("Stability", format="%.2f", min_value=0, max_value=3)
+                                }
+                            )
+                        else: st.info("No active trades.")
+                if "Other" not in sorted_strats:
+                    with strat_tabs_inner[-1]: 
+                        subset = active_df[active_df['Strategy'] == "Other"].copy()
+                        if not subset.empty: st.dataframe(subset[cols], use_container_width=True)
+                        else: st.info("No unclassified trades.")
+    else: st.info(" Database is empty. Sync your first file.")
+
+with tab_strategies:
+    st.markdown("###  Strategy Configuration Manager")
+    conn = get_db_connection()
+    try:
+        strat_df = pd.read_sql("SELECT * FROM strategy_config", conn)
+        expected_cols = {
+            'name': 'Name',
+            'identifier': 'Identifier',
+            'target_pnl': 'Target PnL',
+            'target_days': 'Target Days',
+            'min_stability': 'Min Stability',
+            'description': 'Description',
+            'typical_debit': 'Typical Debit'
+        }
+        for db_col in expected_cols.keys():
+            if db_col not in strat_df.columns:
+                strat_df[db_col] = 0.0 if 'pnl' in db_col or 'debit' in db_col else (0 if 'days' in db_col else "")
+        strat_df = strat_df[list(expected_cols.keys())].rename(columns=expected_cols)
+        edited_strats = st.data_editor(strat_df, num_rows="dynamic", key="strat_editor_main", use_container_width=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Strategy Name", help="Unique name"),
+                "Identifier": st.column_config.TextColumn("Keyword Match"),
+                "Target PnL": st.column_config.NumberColumn("Profit Target ($)", format="$%d"),
+                "Target Days": st.column_config.NumberColumn("Target DIT (Days)"),
+                "Min Stability": st.column_config.NumberColumn("Min Stability", format="%.2f"),
+                "Typical Debit": st.column_config.NumberColumn("Typical Debit ($)", format="$%d"),
+                "Description": st.column_config.TextColumn("Notes")
+            })
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button(" Save Changes"):
+                if update_strategy_config(edited_strats): st.success("Configuration Saved!"); st.cache_data.clear(); st.rerun()
+        with c2:
+            if st.button(" Reprocess 'Other' Trades"):
+                count = reprocess_other_trades(); st.success(f"Reprocessed {count} trades!"); st.cache_data.clear(); st.rerun()
+        with c3:
+            if st.button(" Reset to Defaults", type="secondary"): seed_default_strategies(force_reset=True); st.cache_data.clear(); st.rerun()
+    except Exception as e: st.error(f"Error loading strategies: {e}")
+    finally: conn.close()
+    
+    st.info(" **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
+
+with tab_analytics:
+    an_overview, an_trends, an_risk, an_lifecycle, an_rolls = st.tabs([" Overview", " Trends & Seasonality", " Risk & Excursion", " Lifecycle (Timing)", " Rolls"])
+
+    with an_overview:
+        if not df.empty and 'Status' in df.columns:
+            active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
+            if not active_df.empty:
+                st.markdown("###  Portfolio Health Check (Breakdown)")
+                health_col1, health_col2, health_col3 = st.columns(3)
+                tot_debit = active_df['Debit'].sum()
+                if tot_debit == 0: tot_debit = 1
+                target_allocation = {'130/160': 0.30, '160/190': 0.40, 'M200': 0.20, 'SMSF': 0.10}
+                actual = active_df.groupby('Strategy')['Debit'].sum() / tot_debit
+                allocation_score = 100 - sum(abs(actual.get(s, 0) - target_allocation.get(s, 0)) * 100 for s in target_allocation)
+                health_col1.metric(" Allocation Score", f"{allocation_score:.0f}/100", delta="Optimal" if allocation_score > 80 else "Review")
+                total_delta_pct = abs(active_df['Delta'].sum() / tot_debit * 100)
+                greek_health = " Safe" if total_delta_pct < 2 else " Warning" if total_delta_pct < 5 else " Danger"
+                health_col2.metric(" Greek Exposure", greek_health, delta=f"{total_delta_pct:.2f}% Delta/Capital", delta_color="inverse")
+                avg_age = active_df['Days Held'].mean()
+                age_health = " Fresh" if avg_age < 25 else " Aging" if avg_age < 35 else " Stale"
+                health_col3.metric(" Portfolio Age", age_health, delta=f"{avg_age:.0f} days avg", delta_color="inverse")
+                conc_warnings = check_concentration_risk(active_df, total_cap) 
+                if not conc_warnings.empty:
+                    st.warning(" **Position Sizing Alert:** The following trades exceed 15% concentration.")
+                    st.dataframe(conc_warnings, use_container_width=True)
+                st.divider()
+
+            st.markdown("###  Performance Deep Dive")
+            realized_pnl = df[df['Status']=='Expired']['P&L'].sum()
+            try:
+                if not expired_df.empty:
+                    smsf_trades = expired_df[expired_df['Strategy'].str.contains("SMSF", case=False, na=False)].copy()
+                    prime_trades = expired_df[~expired_df['Strategy'].str.contains("SMSF", case=False, na=False)].copy()
+                    s_smsf, c_smsf = calculate_portfolio_metrics(smsf_trades, smsf_cap)
+                    s_prime, c_prime = calculate_portfolio_metrics(prime_trades, prime_cap)
+                    s_total, c_total = calculate_portfolio_metrics(expired_df, total_cap)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown("** TOTAL PORTFOLIO**")
+                        st.metric("Banked Profit", f"${realized_pnl:,.0f}")
+                        st.metric("CAGR", f"{c_total:.1f}%")
+                        st.metric("Sharpe", f"{s_total:.2f}")
+
+                    with col2:
+                        st.markdown("** PRIME (Income)**")
+                        st.metric("Profit", f"${prime_trades['P&L'].sum():,.0f}")
+                        st.metric("CAGR", f"{c_prime:.1f}%")
+                        st.metric("Sharpe", f"{s_prime:.2f}", help="Daily Sharpe Ratio (Annualized). >1.0 is Good, >2.0 is Excellent.")
+
+                    with col3:
+                        st.markdown("** SMSF (Wealth)**")
+                        st.metric("Profit", f"${smsf_trades['P&L'].sum():,.0f}")
+                        st.metric("CAGR", f"{c_smsf:.1f}%")
+                        st.metric("Sharpe", f"{s_smsf:.2f}")
+
+                    st.divider()
+                    st.markdown("** Risk Metrics (Max Drawdown)**")
+                    mdd_total = calculate_max_drawdown(expired_df, total_cap)
+                    mdd_prime = calculate_max_drawdown(prime_trades, prime_cap)
+                    mdd_smsf = calculate_max_drawdown(smsf_trades, smsf_cap)
+                    r1, r2, r3 = st.columns(3)
+                    with r1: st.metric("Total Max DD", f"{mdd_total['Max Drawdown %']:.1f}%", help="Largest peak-to-trough decline in total equity.")
+                    with r2: st.metric("Prime Max DD", f"{mdd_prime['Max Drawdown %']:.1f}%")
+                    with r3: st.metric("SMSF Max DD", f"{mdd_smsf['Max Drawdown %']:.1f}%")
+                else:
+                    st.info("Need closed trades for deep dive.")
+            except Exception as e: st.error(f"Error calculating metrics: {e}")
+            st.divider()
+
+        if not expired_df.empty:
+            with st.expander(" Detailed Trade History (Closed Trades)", expanded=False):
+                hist_cols = ['Entry Date', 'Exit Date', 'Days Held', 'Name', 'Strategy', 'Debit', 'P&L', 'ROI', 'Ann. ROI']
+                hist_view = expired_df[hist_cols].copy()
+                hist_view['Entry Date'] = hist_view['Entry Date'].dt.date
+                hist_view['Exit Date'] = hist_view['Exit Date'].dt.date
+                st.dataframe(hist_view.style.format({'Debit': "${:,.0f}", 'P&L': "${:,.0f}", 'ROI': "{:.2f}%", 'Ann. ROI': "{:.2f}%"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['P&L', 'ROI', 'Ann. ROI']), use_container_width=True)
+
+            st.markdown("###  Closed Trade Performance")
+            expired_df['Cap_Days'] = expired_df['Debit'] * expired_df['Days Held'].clip(lower=1)
+            perf_agg = expired_df.groupby('Strategy').agg({'P&L': 'sum', 'Debit': 'sum', 'Cap_Days': 'sum', 'ROI': 'mean', 'id': 'count'}).reset_index()
+            wins = expired_df[expired_df['P&L'] > 0].groupby('Strategy')['id'].count().reset_index(name='Wins')
+            perf_agg = perf_agg.merge(wins, on='Strategy', how='left').fillna(0)
+            perf_agg['Win Rate'] = perf_agg['Wins'] / perf_agg['id']
+            perf_agg['Ann. TWR %'] = (perf_agg['P&L'] / perf_agg['Cap_Days']) * 365 * 100
+            perf_agg['Simple Return %'] = (perf_agg['P&L'] / perf_agg['Debit']) * 100
+            
+            std_roi = expired_df.groupby('Strategy')['ROI'].std().reset_index(name='Std_ROI')
+            perf_agg = perf_agg.merge(std_roi, on='Strategy', how='left').fillna(1)
+            perf_agg['Sharpe'] = (perf_agg['ROI'] / perf_agg['Std_ROI']) * np.sqrt(perf_agg['id'])
+            
+            perf_display = perf_agg[['Strategy', 'id', 'Win Rate', 'P&L', 'Debit', 'Simple Return %', 'Ann. TWR %', 'ROI', 'Sharpe']].copy()
+            perf_display.columns = ['Strategy', 'Trades', 'Win Rate', 'Total P&L', 'Total Volume', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI', 'Sharpe']
+            
+            total_pnl = perf_display['Total P&L'].sum()
+            total_vol = perf_display['Total Volume'].sum()
+            total_cap_days = perf_agg['Cap_Days'].sum()
+            total_trades = perf_display['Trades'].sum()
+            total_wins = perf_agg['Wins'].sum()
+            total_win_rate = total_wins / total_trades if total_trades > 0 else 0
+            total_simple_ret = (total_pnl / total_vol * 100) if total_vol > 0 else 0
+            total_twr = (total_pnl / total_cap_days * 365 * 100) if total_cap_days > 0 else 0
+            avg_trade_roi = expired_df['ROI'].mean()
+            
+            total_row = pd.DataFrame({'Strategy': ['TOTAL'], 'Trades': [total_trades], 'Win Rate': [total_win_rate], 'Total P&L': [total_pnl], 'Total Volume': [total_vol], 'Simple Return %': [total_simple_ret], 'Ann. TWR %': [total_twr], 'Avg Trade ROI': [avg_trade_roi], 'Sharpe': [0]})
+            perf_display = pd.concat([perf_display, total_row], ignore_index=True)
+
+            st.dataframe(perf_display.style.format({'Win Rate': "{:.1%}", 'Total P&L': "${:,.0f}", 'Total Volume': "${:,.0f}", 'Simple Return %': "{:.2f}%", 'Ann. TWR %': "{:.2f}%", 'Avg Trade ROI': "{:.2f}%", 'Sharpe': "{:.2f}"}).map(lambda x: 'color: green' if x > 0 else 'color: red', subset=['Total P&L', 'Simple Return %', 'Ann. TWR %', 'Avg Trade ROI', 'Sharpe']).apply(lambda x: ['background-color: #d1d5db; color: black; font-weight: bold' if x.name == len(perf_display)-1 else '' for _ in x], axis=1), use_container_width=True)
+            
+            st.subheader(" Efficiency Showdown: Active vs Historical")
+            st.caption("Are current campaigns outperforming your historical average? (Metric: Annualized Return on Invested Capital)")
+            active_eff_df = pd.DataFrame()
+            if not active_df.empty:
+                active_df['Cap_Days'] = active_df['Debit'] * active_df['Days Held'].clip(lower=1)
+                active_agg = active_df.groupby('Strategy')[['P&L', 'Cap_Days']].sum().reset_index()
+                active_agg['Return %'] = (active_agg['P&L'] / active_agg['Cap_Days']) * 365 * 100
+                active_agg['Type'] = 'Active (Current)'
+                active_eff_df = active_agg[['Strategy', 'Return %', 'Type']]
+            hist_eff_df = pd.DataFrame()
+            if not perf_agg.empty:
+                hist_eff = perf_agg[['Strategy', 'Ann. TWR %']].copy()
+                hist_eff.rename(columns={'Ann. TWR %': 'Return %'}, inplace=True)
+                hist_eff['Type'] = 'Historical (Closed)'
+                hist_eff_df = hist_eff
+            if not active_eff_df.empty or not hist_eff_df.empty:
+                combined_eff = pd.concat([active_eff_df, hist_eff_df], ignore_index=True)
+                combined_eff = combined_eff[combined_eff['Strategy'] != 'TOTAL']
+                fig_compare = px.bar(combined_eff, x='Strategy', y='Return %', color='Type', barmode='group', title="Capital Efficiency Comparison (Annualized Return)", color_discrete_map={'Active (Current)': '#00CC96', 'Historical (Closed)': '#636EFA'}, text='Return %')
+                fig_compare.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                fig_compare = apply_chart_theme(fig_compare)
+                st.plotly_chart(fig_compare, use_container_width=True)
+
+            st.subheader(" Profit Anatomy: Call vs Put Contribution")
+            strat_anatomy = expired_df.groupby('Strategy')[['Put P&L', 'Call P&L']].mean().reset_index()
+            fig_strat_ana = go.Figure()
+            fig_strat_ana.add_trace(go.Bar(y=strat_anatomy['Strategy'], x=strat_anatomy['Put P&L'], name='Avg Put Profit', orientation='h', marker_color='#EF553B'))
+            fig_strat_ana.add_trace(go.Bar(y=strat_anatomy['Strategy'], x=strat_anatomy['Call P&L'], name='Avg Call Profit', orientation='h', marker_color='#00CC96'))
+            fig_strat_ana.update_layout(barmode='relative', title="Average Profit Sources per Strategy (Stacked)", xaxis_title="Average P&L ($)")
+            fig_strat_ana = apply_chart_theme(fig_strat_ana) 
+            st.plotly_chart(fig_strat_ana, use_container_width=True)
+
+            st.markdown("#####  Trade-by-Trade Attribution")
+            strat_list = sorted(expired_df['Strategy'].unique())
+            sel_strat_ana = st.selectbox("Select Strategy to Analyze:", strat_list, key="ana_strat_sel")
+            trade_subset = expired_df[expired_df['Strategy'] == sel_strat_ana].sort_values('Exit Date')
+            if not trade_subset.empty:
+                fig_trade_ana = go.Figure()
+                fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Put P&L'], name='Put PnL', marker_color='#EF553B'))
+                fig_trade_ana.add_trace(go.Bar(x=trade_subset['Name'], y=trade_subset['Call P&L'], name='Call PnL', marker_color='#00CC96'))
+                fig_trade_ana.update_layout(barmode='relative', title=f"Profit Attribution: {sel_strat_ana}", xaxis_title="Trade", yaxis_title="PnL ($)", xaxis_tickangle=-45)
+                fig_trade_ana = apply_chart_theme(fig_trade_ana) 
+                st.plotly_chart(fig_trade_ana, use_container_width=True)
+
+    with an_trends:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader(" Root Cause Analysis")
+            if not df.empty and 'Status' in df.columns:
+                expired_wins = df[(df['Status'] == 'Expired') & (df['P&L'] > 0)]
+                active_trades = df[df['Status'] == 'Active']
+                if not expired_wins.empty and not active_trades.empty:
+                    avg_win_debit = expired_wins.groupby('Strategy')['Debit/Lot'].mean().reset_index()
+                    avg_act_debit = active_trades.groupby('Strategy')['Debit/Lot'].mean().reset_index()
+                    avg_win_debit['Type'] = 'Winning History'; avg_act_debit['Type'] = 'Active (Current)'
+                    comp_df = pd.concat([avg_win_debit, avg_act_debit])
+                    fig_price = px.bar(comp_df, x='Strategy', y='Debit/Lot', color='Type', barmode='group', title="Entry Price per Lot Comparison", color_discrete_map={'Winning History': 'green', 'Active (Current)': 'orange'})
+                    fig_price = apply_chart_theme(fig_price)
+                    st.plotly_chart(fig_price, use_container_width=True)
+        with col2:
+            st.subheader(" Profit Drivers (Puts vs Calls)")
+            if not df.empty and 'Status' in df.columns:
+                expired = df[df['Status'] == 'Expired'].copy()
+                if not expired.empty:
+                    leg_agg = expired.groupby('Strategy')[['Put P&L', 'Call P&L']].sum().reset_index()
+                    fig_legs = px.bar(leg_agg, x='Strategy', y=['Put P&L', 'Call P&L'], title="Profit Source Split", color_discrete_map={'Put P&L': '#EF553B', 'Call P&L': '#00CC96'})
+                    fig_legs = apply_chart_theme(fig_legs) 
+                    st.plotly_chart(fig_legs, use_container_width=True)
+        st.divider()
+        if not expired_df.empty:
+            ec_df = expired_df.dropna(subset=["Exit Date"]).sort_values("Exit Date").copy()
+            ec_df['Cumulative P&L'] = ec_df['P&L'].cumsum()
+            fig = px.line(ec_df, x='Exit Date', y='Cumulative P&L', title="Realized Equity Curve", markers=True)
+            fig = apply_chart_theme(fig) 
+            st.plotly_chart(fig, use_container_width=True)
+        st.divider()
+        hm1, hm2, hm3 = st.tabs([" Seasonality", " Duration", " Entry Day"])
+        if not expired_df.empty:
+            exp_hm = expired_df.dropna(subset=['Exit Date']).copy()
+            exp_hm['Month'] = exp_hm['Exit Date'].dt.month_name(); exp_hm['Year'] = exp_hm['Exit Date'].dt.year
+            with hm1:
+                hm_data = exp_hm.groupby(['Year', 'Month']).agg({'P&L': 'sum'}).reset_index()
+                months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+                fig = px.density_heatmap(hm_data, x="Month", y="Year", z="P&L", title="Monthly Seasonality ($)", category_orders={"Month": months}, text_auto=True, color_continuous_scale="RdBu")
+                fig = apply_chart_theme(fig) 
+                st.plotly_chart(fig, use_container_width=True)
+            with hm2:
+                fig2 = px.density_heatmap(exp_hm, x="Days Held", y="Strategy", z="P&L", histfunc="avg", title="Duration Sweet Spot (Avg P&L)", color_continuous_scale="RdBu")
+                fig2 = apply_chart_theme(fig2) 
+                st.plotly_chart(fig2, use_container_width=True)
+            with hm3:
+                if 'Entry Date' in exp_hm.columns:
+                    exp_hm['Day'] = exp_hm['Entry Date'].dt.day_name()
+                    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                    fig3 = px.density_heatmap(exp_hm, x="Day", y="Strategy", z="P&L", histfunc="avg", title="Best Entry Day (Avg P&L)", category_orders={"Day": days}, color_continuous_scale="RdBu")
+                    fig3 = apply_chart_theme(fig3) 
+                    st.plotly_chart(fig3, use_container_width=True)
+
+    with an_risk:
+        r_corr, r_mae = st.tabs([" Correlation Matrix", " MAE vs MFE (Edge Analysis)"])
+        with r_corr:
+            st.subheader("Strategy Correlation (Daily P&L)")
+            snaps = load_snapshots()
+            if not snaps.empty:
+                fig_rolling_corr = rolling_correlation_matrix(snaps)
+                if fig_rolling_corr:
+                    st.plotly_chart(fig_rolling_corr, use_container_width=True)
+                    st.caption("Heatmap shows correlations of strategy P&L over the last 30 days. Red = Strategies moving together (Risk). Blue = Diversified.")
+                else: st.info("Insufficient snapshot history.")
+        with r_mae:
+            st.subheader("Excursion Analysis: Pain (MAE) vs Potential (MFE)")
+            mae_view = st.radio("View:", ["Closed Trades Only (Final Result)", "Include Active Trades (Current Drawdown)"], horizontal=True)
+            if not snaps.empty and not df.empty:
+                excursion_df = snaps.groupby('trade_id')['pnl'].agg(['min', 'max']).reset_index()
+                excursion_df.rename(columns={'min': 'MAE', 'max': 'MFE'}, inplace=True)
+                merged_mae = df.merge(excursion_df, left_on='id', right_on='trade_id', how='inner')
+                viz_mae = merged_mae if "Include Active" in mae_view else merged_mae[merged_mae['Status'] == 'Expired'].copy()
+                if not viz_mae.empty:
+                    mae_c1, mae_c2 = st.columns(2)
+                    with mae_c1:
+                        fig_mae_scat = px.scatter(viz_mae, x='MAE', y='P&L', color='Strategy', symbol='Status' if "Include Active" in mae_view else None, hover_data=['Name', 'Days Held'], title="Drawdown (MAE) vs Final P&L")
+                        fig_mae_scat.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.5); fig_mae_scat.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.5)
+                        fig_mae_scat = apply_chart_theme(fig_mae_scat) 
+                        st.plotly_chart(fig_mae_scat, use_container_width=True)
+                    with mae_c2:
+                        viz_mfe = viz_mae[viz_mae['MFE'] > 0]
+                        fig_mfe = px.scatter(viz_mfe, x='MFE', y='P&L', color='Strategy', hover_data=['Name'], title="Potential (MFE) vs Final P&L")
+                        if not viz_mfe.empty:
+                             max_val = max(viz_mfe['MFE'].max(), viz_mfe['P&L'].max())
+                             fig_mfe.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="green", dash="dot"))
+                        fig_mfe = apply_chart_theme(fig_mfe) 
+                        st.plotly_chart(fig_mfe, use_container_width=True)
+
+    with an_lifecycle:
+        st.subheader("⏳ Profit Timing & Capital Efficiency")
+        st.caption("Analyze WHERE in the trade duration the profit is actually made to optimize churn.")
+        
+        snaps = load_snapshots()
+        all_lifecycle_data = []
+        
+        strategies_avail = df['Strategy'].unique()
+        selected_lifecycle_strat = st.multiselect("Select Strategies", strategies_avail, default=strategies_avail[:2] if len(strategies_avail) > 0 else strategies_avail)
+        
+        subset_df = df[df['Strategy'].isin(selected_lifecycle_strat)].copy()
+        
+        if not subset_df.empty:
+            progress_text = "Reconstructing Lifecycle Curves..."
+            my_bar = st.progress(0, text=progress_text)
+            
+            total_items = len(subset_df)
+            for i, (idx, row) in enumerate(subset_df.iterrows()):
+                curve_df = get_trade_lifecycle_data(row, snaps)
+                if not curve_df.empty:
+                    curve_df['Strategy'] = row['Strategy']
+                    curve_df['Trade Name'] = row['Name']
+                    curve_df['Status'] = row['Status']
+                    all_lifecycle_data.append(curve_df)
+                
+                prog_val = min((i + 1) / total_items, 1.0)
+                my_bar.progress(prog_val, text=progress_text)
+            my_bar.empty()
+            
+            if all_lifecycle_data:
+                full_lifecycle_df = pd.concat(all_lifecycle_data, ignore_index=True)
+                
+                st.markdown("##### 1. The Harvest Curve (Profit vs Duration %)")
+                st.caption("How fast do these strategies yield profit? Convex = Fast/Front-Loaded. Concave = Slow/Back-Loaded.")
+                
+                fig_harvest = px.line(
+                    full_lifecycle_df, x='Pct_Duration', y='Pct_PnL', color='Strategy', 
+                    line_group='Trade Name', hover_data=['Trade Name'], color_discrete_sequence=px.colors.qualitative.Vivid
+                )
+                fig_harvest.update_traces(opacity=0.4, line=dict(width=1.5)) 
+                
+                full_lifecycle_df['Pct_Duration_Bin'] = full_lifecycle_df['Pct_Duration'].round(-1)
+                avg_binned = full_lifecycle_df.groupby(['Strategy', 'Pct_Duration_Bin'])['Pct_PnL'].mean().reset_index()
+                
+                for strat in selected_lifecycle_strat:
+                    strat_avg = avg_binned[avg_binned['Strategy'] == strat]
+                    if not strat_avg.empty:
+                        fig_harvest.add_trace(go.Scatter(
+                            x=strat_avg['Pct_Duration_Bin'], y=strat_avg['Pct_PnL'], mode='lines', 
+                            name=f"AVG: {strat}", line=dict(width=4)
+                        ))
+                        
+                fig_harvest.update_layout(xaxis_title="% of Trade Duration", yaxis_title="% of Total Profit", showlegend=True)
+                fig_harvest.add_shape(type="line", x0=0, y0=0, x1=100, y1=100, line=dict(color="white", dash="dot", width=1), opacity=0.5)
+                fig_harvest = apply_chart_theme(fig_harvest) 
+                st.plotly_chart(fig_harvest, use_container_width=True)
+                
+                st.markdown("##### 2. Profit Phasing (Where is the money made?)")
+                c_p1, c_p2 = st.columns(2)
+                
+                with c_p1:
+                    def classify_phase(pct):
+                        if pct <= 30: return "1. Early (0-30%)"
+                        elif pct <= 70: return "2. Mid (30-70%)"
+                        return "3. Late (70-100%)"
+                    
+                    full_lifecycle_df['Phase'] = full_lifecycle_df['Pct_Duration'].apply(classify_phase)
+                    full_lifecycle_df = full_lifecycle_df.sort_values(['Trade Name', 'Pct_Duration'])
+                    full_lifecycle_df['Prev_PnL'] = full_lifecycle_df.groupby('Trade Name')['Cumulative_PnL'].shift(1).fillna(0)
+                    full_lifecycle_df['Marginal_PnL'] = full_lifecycle_df['Cumulative_PnL'] - full_lifecycle_df['Prev_PnL']
+                    
+                    phase_attribution = full_lifecycle_df.groupby(['Strategy', 'Phase'])['Marginal_PnL'].sum().reset_index()
+                    
+                    fig_phase = px.bar(
+                        phase_attribution, x='Strategy', y='Marginal_PnL', color='Phase', barmode='group',
+                        title="Net Profit Generated by Phase ($)",
+                        color_discrete_map={"1. Early (0-30%)": "#636EFA", "2. Mid (30-70%)": "#00CC96", "3. Late (70-100%)": "#EF553B"}
+                    )
+                    fig_phase = apply_chart_theme(fig_phase)
+                    st.plotly_chart(fig_phase, use_container_width=True)
+                    
+                with c_p2:
+                    st.markdown("**Capital Stagnation Analysis**")
+                    closed_winners = subset_df[(subset_df['Status'] == 'Expired') & (subset_df['P&L'] > 0)]['Name'].unique()
+                    winner_curves = full_lifecycle_df[full_lifecycle_df['Trade Name'].isin(closed_winners)].copy()
+                    
+                    stagnation_data = []
+                    for t_name in closed_winners:
+                        t_data = winner_curves[winner_curves['Trade Name'] == t_name]
+                        if t_data.empty: continue
+                        total_days = t_data['Day'].max()
+                        final_pnl = t_data['Cumulative_PnL'].max()
+                        if final_pnl <= 0: continue
+                        
+                        threshold = final_pnl * 0.80
+                        cross_row = t_data[t_data['Cumulative_PnL'] >= threshold].head(1)
+                        
+                        if not cross_row.empty:
+                            day_reached = cross_row['Day'].values[0]
+                            wasted_days = total_days - day_reached
+                            stagnation_data.append({
+                                'Trade': t_name, 'Strategy': t_data['Strategy'].iloc[0], 'Total Days': total_days,
+                                'Days to 80%': day_reached, 'Zombie Days': wasted_days, 'Zombie %': (wasted_days / total_days) * 100
+                            })
+                            
+                    if stagnation_data:
+                        stag_df = pd.DataFrame(stagnation_data)
+                        fig_stag = px.scatter(
+                            stag_df, x='Days to 80%', y='Total Days', color='Strategy', size='Zombie Days',
+                            hover_data=['Trade', 'Zombie %'], title="Efficiency: Days to 80% Gain vs Total Hold"
+                        )
+                        max_d = stag_df['Total Days'].max()
+                        fig_stag.add_shape(type="line", x0=0, y0=0, x1=max_d, y1=max_d, line=dict(color="grey", dash="dash"))
+                        fig_stag.add_annotation(x=max_d*0.8, y=max_d*0.2, text="Efficient Zone", showarrow=False)
+                        fig_stag.add_annotation(x=max_d*0.2, y=max_d*0.8, text="Zombie Zone (Wasted Time)", showarrow=False)
+                        fig_stag = apply_chart_theme(fig_stag) 
+                        st.plotly_chart(fig_stag, use_container_width=True)
+                        st.caption("Trades significantly above the diagonal line achieved their bulk profit early but were held too long.")
+                    else:
+                        st.info("Not enough closed winning trades for Stagnation Analysis.")
+
+                st.markdown("### 💡 Capital Efficiency Engine")
+                st.caption("AI Suggestions: Trades where capital is earning less than your historical average.")
+                
+                redeploy_list = []
+                for strat in selected_lifecycle_strat:
+                    bench = dynamic_benchmarks.get(strat, {})
+                    avg_daily_yield_pct = bench.get('yield', 0.1) 
+                    
+                    strat_active = df[(df['Status'] == 'Active') & (df['Strategy'] == strat)]
+                    
+                    for idx, row in strat_active.iterrows():
+                        curr_yield = row['Daily Yield %']
+                        if row['P&L'] > 0 and curr_yield < (avg_daily_yield_pct * 0.5):
+                             redeploy_list.append({
+                                 'Trade': row['Name'],
+                                 'Strategy': strat,
+                                 'Current Yield': f"{curr_yield:.2f}%/day",
+                                 'Target Yield': f"{avg_daily_yield_pct:.2f}%/day",
+                                 'Action': "Harvest & Redeploy",
+                                 'Reason': "Capital Stagnation"
+                             })
+                
+                if redeploy_list:
+                    st.dataframe(pd.DataFrame(redeploy_list), use_container_width=True)
+                else:
+                    st.success("All active capital is performing near or above historical baselines.")
+
+                st.markdown("### 🌾 The Harvest Window Variance")
+                st.caption("Identifies the 'Sweet Spot' for exiting trades. When do your winners usually close?")
+                
+                winners_df = expired_df[expired_df['P&L'] > 0].copy()
+                if not winners_df.empty:
+                    # Clean horizontal range bar chart
+                    fig_harvest_range = go.Figure()
+                    stats_list = []
+                    
+                    for s in winners_df['Strategy'].unique():
+                        s_wins = winners_df[winners_df['Strategy'] == s]['Days Held']
+                        if len(s_wins) < 2: continue
+                        
+                        p25 = s_wins.quantile(0.25)
+                        p50 = s_wins.median()
+                        p75 = s_wins.quantile(0.75)
+                        
+                        # The "Sweet Spot" Bar (25th to 75th percentile)
+                        fig_harvest_range.add_trace(go.Bar(
+                            y=[s], x=[p75 - p25], base=[p25], orientation='h',
+                            name=f"{s} Sweet Spot", marker_color='rgba(56, 189, 248, 0.85)',
+                            text=f"<b>Optimal: {p25:.0f} - {p75:.0f}d</b>", textposition='inside',
+                            textfont=dict(color='#020617', size=13),
+                            hoverinfo='text', hovertext=f"{s}: Middle 50% of winners close between Day {p25:.0f} and {p75:.0f}"
+                        ))
+                        # Median Exit Dot
+                        fig_harvest_range.add_trace(go.Scatter(
+                            y=[s], x=[p50], mode='markers', 
+                            marker=dict(color='white', size=12, line=dict(color='#0f172a', width=2)),
+                            name='Median Exit', hoverinfo='text', hovertext=f"Median: {p50:.0f} Days", showlegend=False
+                        ))
+                        
+                        stats_list.append({
+                            'Strategy': s,
+                            'Early Harvest (25th %ile)': f"{p25:.0f} Days",
+                            'Most Common Exit (Median)': f"{p50:.0f} Days",
+                            'Late Harvest (75th %ile)': f"{p75:.0f} Days"
+                        })
+                        
+                    fig_harvest_range.update_layout(
+                        title="Optimal Harvest Zones (Middle 50% of Winning Trades)",
+                        barmode='overlay', xaxis_title="Days in Trade (DIT)", yaxis_title="Strategy",
+                        showlegend=False, height=max(250, len(stats_list) * 70),
+                        margin=dict(l=20, r=20, t=40, b=20)
+                    )
+                    fig_harvest_range = apply_chart_theme(fig_harvest_range)
+                    st.plotly_chart(fig_harvest_range, use_container_width=True)
+                    
+                    st.dataframe(pd.DataFrame(stats_list), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Need more closed winning trades to calculate the Harvest Window.")
+
+    with an_rolls: 
+        st.subheader(" Roll Campaign Analysis")
+        rolled_trades = df[df['Parent ID'] != ""].copy()
+        if not rolled_trades.empty:
+            campaign_summary = []
+            for parent in rolled_trades['Parent ID'].unique():
+                if not parent: continue
+                campaign = df[(df['id'] == parent) | (df['Parent ID'] == parent)]
+                if campaign.empty: continue
+                campaign_summary.append({'Campaign': parent[:15], 'Total P&L': campaign['P&L'].sum(), 'Total Days': campaign['Days Held'].sum(), 'Legs': len(campaign), 'Avg P&L/Leg': campaign['P&L'].mean()})
+            
+            if campaign_summary:
+                camp_df = pd.DataFrame(campaign_summary)
+                st.dataframe(camp_df.style.format({'Total P&L': '${:,.0f}', 'Avg P&L/Leg': '${:,.0f}'}), use_container_width=True)
+                avg_single = expired_df[expired_df['Parent ID'].isna() | (expired_df['Parent ID'] == "")]['P&L'].mean()
+                avg_rolled = camp_df['Total P&L'].mean()
+                c1, c2 = st.columns(2)
+                c1.metric("Avg Single Trade P&L", f"${avg_single:,.0f}")
+                c2.metric("Avg Roll Campaign P&L", f"${avg_rolled:,.0f}", delta=f"{avg_rolled-avg_single:,.0f}")
+        else:
+            st.info("No roll campaigns detected. Link trades using the 'Parent ID' column in the Journal.")
+
+with tab_ai:
+    st.markdown("###  The Quant Brain (v150)")
+    st.caption("Self-learning insights based on your specific trading history.")
+    if df.empty or expired_df.empty:
+        st.info(" Need more historical data to power the AI engine.")
+    else:
+        active_trades = df[df['Status'].isin(['Active', 'Missing'])].copy()
+        with st.expander(" Calibration & Thresholds", expanded=False):
+            c_set1, c_set2, c_set3 = st.columns(3)
+            with c_set1:
+                st.markdown("** Rot Detector**")
+                rot_threshold = st.slider("Efficiency Drop Threshold %", 10, 90, 50) / 100.0
+                min_days_rot = st.number_input("Min Days to Check", 5, 60, 10)
+            with c_set2:
+                st.markdown("** Prediction Logic**")
+                prob_high = st.slider("High Confidence Threshold", 60, 95, 75)
+                prob_low = st.slider("Low Confidence Threshold", 10, 50, 40)
+            with c_set3:
+                st.markdown("** Exit Targets**")
+                exit_percentile = st.slider("Optimal Exit Percentile", 50, 95, 75) / 100.0
+
+        st.subheader(" Win Probability Forecast (KNN Model + Half-Kelly Sizing)")
+        strategies_avail = sorted(active_trades['Strategy'].unique().tolist())
+        selected_strat_ai = st.selectbox("Filter by Strategy", ["All"] + strategies_avail, key="ai_strat_filter")
+        if selected_strat_ai != "All": ai_view_df = active_trades[active_trades['Strategy'] == selected_strat_ai].copy()
+        else: ai_view_df = active_trades.copy()
+
+        if not ai_view_df.empty:
+            preds = generate_trade_predictions(ai_view_df, expired_df, prob_low, prob_high, total_cap)
+            if not preds.empty:
+                c_p1, c_p2 = st.columns([2, 3]) 
+                with c_p1:
+                    fig_pred = px.scatter(preds, x="Win Prob %", y="Expected PnL", color="Confidence", size="Rec. Size ($)", hover_data=["Trade Name", "Strategy", "Kelly Size %"], color_continuous_scale="RdYlGn", title="Risk/Reward Map (Size = Kelly Rec)")
+                    fig_pred.add_vline(x=50, line_dash="dash", line_color="gray"); fig_pred.add_hline(y=0, line_dash="dash", line_color="gray")
+                    fig_pred = apply_chart_theme(fig_pred) 
+                    st.plotly_chart(fig_pred, use_container_width=True)
+                with c_p2:
+                    st.dataframe(preds.style.format({'Win Prob %': "{:.1f}%", 'Expected PnL': "${:,.0f}", 'Confidence': "{:.0f}%", 'Kelly Size %': "{:.1f}%", 'Rec. Size ($)': "${:,.0f}"}).map(lambda v: 'color: green; font-weight: bold' if v > prob_high else ('color: red; font-weight: bold' if v < prob_low else 'color: orange'), subset=['Win Prob %']), use_container_width=True)
+            else: st.info("Not enough closed trades with matching Greek profiles for prediction.")
+        
+        st.divider()
+        c_ai_1, c_ai_2 = st.columns(2)
+        with c_ai_1:
+            st.subheader(" Capital Rot Detector")
+            if not active_trades.empty:
+                rot_rows = []
+                for idx, row in active_trades.iterrows():
+                    s_name = row.get('Strategy', 'Unknown')
+                    h_days = dynamic_benchmarks.get(s_name, {}).get('avg_days', 30)
+                    h_win = dynamic_benchmarks.get(s_name, {}).get('avg_win', 100)
+                    
+                    curr_spd, t_eff, status = check_rot_and_efficiency(row, h_days)
+                    base_spd = h_win / max(1, h_days)
+                    
+                    rot_rows.append({
+                        'Trade': row.get('Symbol', f"Trade {idx}"), 
+                        'Strategy': s_name, 'Current Speed': curr_spd, 'Baseline Speed': base_spd, 'Status': status,
+                        'Raw Current': curr_spd, 'Raw Baseline': base_spd 
+                    })
+                rot_df = pd.DataFrame(rot_rows)
+                if not rot_df.empty:
+                    rot_viz = rot_df.copy()
+                    fig_rot = go.Figure()
+                    fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Current'], name='Current Speed', marker_color='#EF553B'))
+                    fig_rot.add_trace(go.Bar(x=rot_viz['Trade'], y=rot_viz['Raw Baseline'], name='Baseline Speed', marker_color='gray'))
+                    fig_rot.update_layout(title="Capital Velocity Lag ($/Day/1k)", barmode='group')
+                    fig_rot = apply_chart_theme(fig_rot) 
+                    st.plotly_chart(fig_rot, use_container_width=True)
+                    st.dataframe(rot_df[['Trade', 'Strategy', 'Current Speed', 'Baseline Speed', 'Status']], use_container_width=True)
+                else: st.success(" Capital is moving efficiently. No rot detected.")
+        with c_ai_2:
+            st.subheader("Diagnostics")
+            velocity_stats = st.session_state.get('velocity_stats', {})
+            if velocity_stats: 
+                if not active_trades.empty:
+                     active_trades['daily_pnl'] = active_trades['P&L'] / active_trades['Days Held'].clip(lower=1)
+                     fastest_trade = active_trades.loc[active_trades['daily_pnl'].idxmax()]
+                     strat = fastest_trade['Strategy']
+                     
+                     if strat in velocity_stats:
+                        v_thresh = velocity_stats[strat]['threshold']
+                        d_pnl = fastest_trade['daily_pnl']
+                        
+                        fig_gauge = go.Figure(go.Indicator(
+                            mode = "gauge+number", value = d_pnl, title = {'text': f"🚀 Top Velocity: {fastest_trade['Name']}"},
+                            gauge = {
+                                'axis': {'range': [None, v_thresh * 1.5]},
+                                'bar': {'color': "#00cc96" if d_pnl < v_thresh else "#EF553B"},
+                                'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': v_thresh},
+                                'steps': [{'range': [0, v_thresh], 'color': "lightgray"}]
+                            }
+                        ))
+                        fig_gauge.update_layout(height=200, margin=dict(l=20,r=20,t=30,b=20))
+                        fig_gauge = apply_chart_theme(fig_gauge) 
+                        st.plotly_chart(fig_gauge, use_container_width=True)
+            
+            st.subheader(f" Optimal Exit Zones ({int(exit_percentile*100)}th Percentile)")
+            targets = get_dynamic_targets(expired_df, exit_percentile)
+            if targets:
+                winners = expired_df[expired_df['P&L'] > 0]
+                if not winners.empty:
+                    fig_exit = px.box(winners, x="Strategy", y="P&L", points="all", title="Historical Win Distribution & Targets")
+                    fig_exit = apply_chart_theme(fig_exit) 
+                    st.plotly_chart(fig_exit, use_container_width=True)
+                target_data = []
+                for s, v in targets.items(): target_data.append({'Strategy': s, 'Median Win': v['Median Win'], 'Optimal Exit': v['Optimal Exit']})
+                t_df = pd.DataFrame(target_data)
+                st.dataframe(t_df.style.format({'Median Win': '${:,.0f}', 'Optimal Exit': '${:,.0f}'}), use_container_width=True)
+
+with tab_rules:
+    strategies_for_rules = sorted(list(dynamic_benchmarks.keys()))
+    adaptive_content = generate_adaptive_rulebook_text(expired_df, strategies_for_rules)
+
+    st.markdown("### 🛡️ Smart Stop & Risk Analysis")
+    mae_stats_dict = st.session_state.get('mae_stats', {})
+    vel_stats_dict = st.session_state.get('velocity_stats', {})
+    
+    for strat, data in dynamic_benchmarks.items():
+        mae = mae_stats_dict.get(strat, "N/A") 
+        vel = vel_stats_dict.get(strat)
+        
+        with st.expander(f"📊 {strat} Risk Profile"):
+            c_r1, c_r2 = st.columns(2)
+            with c_r1:
+                st.write(f"**Target Win:** ${data.get('pnl', 0):.0f}")
+                if mae != "N/A":
+                    st.error(f"**Smart Stop (MAE):** ${mae:.2f}")
+                    safe_range = abs(mae)
+                    fig_mae = go.Figure()
+                    fig_mae.add_trace(go.Bar(x=[safe_range], y=["Risk Room"], orientation='h', marker_color='lightgreen', name="Safe Zone"))
+                    fig_mae.update_layout(xaxis_title="Max Drawdown ($)", xaxis=dict(range=[0, safe_range*1.2]), height=100, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
+                    fig_mae = apply_chart_theme(fig_mae)
+                    st.plotly_chart(fig_mae, use_container_width=True)
+                else: st.write("No MAE data yet.")
+            
+            with c_r2:
+                if vel:
+                    st.success(f"**Velocity Limit:** ${vel['threshold']:.2f}/day")
+                    st.caption("Profit speed exceeding this is an anomaly.")
+                else: st.write("No Velocity data yet.")
+    st.markdown(adaptive_content)
+    st.divider()
+    st.caption("Allantis Trade Guardian v150.0 (Quant Engine Upgraded)")
