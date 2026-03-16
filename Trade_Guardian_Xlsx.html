@@ -226,6 +226,9 @@
           </div>
           <p id="cloud-sync-status" class="text-sm text-slate-500 dark:text-slate-400 mt-4">Cloud sync idle. Configure API URL, then upload both files.</p>
           <p id="cloud-sync-meta" class="text-xs text-slate-400 mt-2"></p>
+          <p id="cloud-last-backup" class="text-xs text-slate-500 dark:text-slate-400 mt-2 inline-flex items-center px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800">
+            <span class="w-2 h-2 rounded-full bg-amber-500 mr-2"></span> Last successful Drive backup: Not available yet
+          </p>
           <pre id="cloud-sync-logs" class="hidden mt-3 p-3 rounded-xl bg-slate-900 text-slate-100 text-xs whitespace-pre-wrap max-h-56 overflow-y-auto"></pre>
           <p class="text-xs text-slate-400 mt-4">Tip: use this page daily for 2-file uploads. For historical replay, download the latest DB and open it in the Fixed viewer.</p>
         </div>
@@ -708,6 +711,26 @@ loadPersistedSettings();
       if (metaEl) metaEl.textContent = metaText || '';
     }
 
+    function formatCloudDateTime(value) {
+      if (!value) return 'Unknown';
+      const dt = new Date(value);
+      if (Number.isNaN(dt.getTime())) return String(value);
+      return dt.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+
+    function renderLastBackupBadge(tone = 'neutral', text = 'Last successful Drive backup: Not available yet') {
+      const el = document.getElementById('cloud-last-backup');
+      if (!el) return;
+      const dotClass = tone === 'ok' ? 'bg-emerald-500' : tone === 'error' ? 'bg-rose-500' : 'bg-amber-500';
+      el.innerHTML = `<span class="w-2 h-2 rounded-full ${dotClass} mr-2"></span>${text}`;
+    }
+
     function renderCloudLogs(logs = []) {
       const logsEl = document.getElementById('cloud-sync-logs');
       if (!logsEl) return;
@@ -748,10 +771,22 @@ loadPersistedSettings();
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         appData.cloud.connected = !!data.drive_connected || !!data.ok;
+        if (data.last_sync && data.last_sync.drive_backup_status) {
+          appData.cloud.lastSync = data.last_sync.sync_time || null;
+          appData.cloud.lastDriveOk = !!data.last_sync.drive_backup_status.ok;
+          appData.cloud.lastMessage = data.last_sync.drive_backup_status.message || '';
+        }
         const driveTxt = data.drive_connected ? 'Drive connected' : 'Drive not configured';
         const dbTxt = data.db_exists ? `DB ready (${data.db_version || 'no version'})` : 'No DB on server yet';
         renderCloudMeta(`${driveTxt} • ${dbTxt}`);
         setCloudStatus(`Cloud status checked: ${driveTxt}`, data.drive_connected ? 'ok' : 'neutral');
+        if (appData.cloud.lastDriveOk && appData.cloud.lastSync) {
+          renderLastBackupBadge('ok', `Last successful Drive backup: ${formatCloudDateTime(appData.cloud.lastSync)}`);
+        } else if (appData.cloud.lastDriveOk === false && appData.cloud.lastSync) {
+          renderLastBackupBadge('error', `Last Drive backup failed: ${formatCloudDateTime(appData.cloud.lastSync)}`);
+        } else {
+          renderLastBackupBadge('neutral', 'Last successful Drive backup: Not available yet');
+        }
         refreshCloudDownloadLink();
         if (showMessage) renderCloudLogs([`Status OK`, `drive_connected=${String(data.drive_connected)}`, `db_exists=${String(data.db_exists)}`]);
       } catch (err) {
@@ -792,11 +827,17 @@ loadPersistedSettings();
         const summary = `New ${data.new_count || 0} • Updated ${data.updated_count || 0} • Missing ${data.missing_marked || 0} • Snapshots ${data.snapshot_count || 0}`;
         setCloudStatus(`Cloud sync complete. ${driveMsg}.`, appData.cloud.lastDriveOk ? 'ok' : 'error');
         renderCloudMeta(`${summary} • ${appData.cloud.lastMessage}`);
+        if (appData.cloud.lastDriveOk) {
+          renderLastBackupBadge('ok', `Last successful Drive backup: ${formatCloudDateTime(appData.cloud.lastSync)}`);
+        } else {
+          renderLastBackupBadge('error', `Last Drive backup failed: ${formatCloudDateTime(appData.cloud.lastSync)}`);
+        }
         renderCloudLogs(data.logs || []);
         refreshCloudDownloadLink();
       } catch (err) {
         setCloudStatus(`Cloud sync failed: ${err.message}. Local analytics still available.`, 'error');
         renderCloudMeta('No server data was updated in this attempt.');
+        renderLastBackupBadge('error', 'Last Drive backup attempt failed. Check cloud logs below.');
         renderCloudLogs([`Cloud sync error: ${err.message}`]);
       }
     }
