@@ -6,7 +6,7 @@
   <title>Trade Guardian XLSX</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
@@ -17,7 +17,7 @@
       darkMode: 'class',
       theme: {
         extend: {
-          fontFamily: { sans: ['Inter', 'sans-serif'] },
+          fontFamily: { sans: ['Manrope', 'sans-serif'] },
           colors: { slate: { 850: '#151e2e', 900: '#0f172a' } }
         }
       }
@@ -25,56 +25,570 @@
   </script>
 
   <style>
-    body { font-family: 'Inter', sans-serif; }
+    :root {
+      --tg-bg: #f3f7fc;
+      --tg-bg-secondary: #e9f0f8;
+      --tg-panel: rgba(255, 255, 255, 0.9);
+      --tg-panel-strong: rgba(255, 255, 255, 0.98);
+      --tg-border: rgba(146, 163, 186, 0.35);
+      --tg-border-strong: rgba(123, 142, 168, 0.45);
+      --tg-shadow: 0 26px 44px -34px rgba(15, 31, 52, 0.42);
+      --tg-shadow-soft: 0 14px 30px -24px rgba(15, 31, 52, 0.35);
+      --tg-text: #10233c;
+      --tg-muted: #5d7088;
+      --tg-accent: #0f6fbb;
+      --tg-accent-soft: rgba(15, 111, 187, 0.12);
+      --tg-accent-strong: #0d4d88;
+      --tg-positive: #0f9f6e;
+      --tg-negative: #d14a4f;
+      --tg-warning: #c08824;
+      --tg-font-body: clamp(14px, 0.35vw + 13px, 15.5px);
+      --tg-font-title-xl: clamp(1.9rem, 2.6vw, 2.75rem);
+      --tg-font-title-lg: clamp(1.4rem, 1.7vw, 2rem);
+      --tg-font-title-md: clamp(1rem, 0.7vw, 1.12rem);
+      --tg-font-label: 11px;
+      --tg-leading-body: 1.52;
+      --tg-leading-heading: 1.16;
+      --tg-icon-stroke: 1.85;
+      --tg-motion-fast: 180ms;
+      --tg-motion-base: 240ms;
+      --tg-motion-slow: 360ms;
+      --tg-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+      --tg-ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+    }
+    .dark {
+      --tg-bg: #09111d;
+      --tg-bg-secondary: #101c2d;
+      --tg-panel: rgba(18, 30, 48, 0.84);
+      --tg-panel-strong: rgba(18, 30, 48, 0.95);
+      --tg-border: rgba(88, 116, 150, 0.36);
+      --tg-border-strong: rgba(108, 136, 172, 0.52);
+      --tg-shadow: 0 34px 50px -36px rgba(0, 0, 0, 0.66);
+      --tg-shadow-soft: 0 20px 34px -28px rgba(0, 0, 0, 0.55);
+      --tg-text: #e3ecf9;
+      --tg-muted: #9db0c9;
+      --tg-accent: #56b4f3;
+      --tg-accent-soft: rgba(86, 180, 243, 0.2);
+      --tg-accent-strong: #8dcfff;
+      --tg-positive: #3ccc96;
+      --tg-negative: #ff7f80;
+      --tg-warning: #e8b45c;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Manrope', sans-serif;
+      background: radial-gradient(1200px 500px at -10% -20%, rgba(15, 111, 187, 0.12), transparent 55%), radial-gradient(900px 400px at 110% -10%, rgba(19, 130, 143, 0.12), transparent 60%), var(--tg-bg);
+      color: var(--tg-text);
+      letter-spacing: 0.005em;
+      font-size: var(--tg-font-body);
+      line-height: var(--tg-leading-body);
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .dark body {
+      background: radial-gradient(1200px 500px at -10% -20%, rgba(86, 180, 243, 0.12), transparent 55%), radial-gradient(900px 400px at 110% -10%, rgba(72, 201, 176, 0.1), transparent 60%), var(--tg-bg);
+    }
+    h1, h2, h3, h4 {
+      letter-spacing: -0.015em;
+      color: var(--tg-text);
+      line-height: var(--tg-leading-heading);
+      text-wrap: balance;
+    }
+    p, li, td, th, label, input, select, button {
+      line-height: var(--tg-leading-body);
+    }
+    .copy-intro {
+      line-height: 1.58;
+      letter-spacing: 0.001em;
+      text-wrap: pretty;
+    }
+    .copy-note {
+      line-height: 1.52;
+      letter-spacing: 0.0015em;
+      text-wrap: pretty;
+      max-width: 78ch;
+    }
+    .copy-caption {
+      line-height: 1.45;
+      letter-spacing: 0.002em;
+      text-wrap: pretty;
+    }
+    #page-title {
+      font-size: clamp(1.04rem, 1.2vw, 1.24rem) !important;
+      font-weight: 700 !important;
+      letter-spacing: -0.014em;
+    }
+    #view-upload > h2,
+    .hero-panel h2 {
+      font-size: var(--tg-font-title-xl) !important;
+      font-weight: 760 !important;
+      letter-spacing: -0.024em !important;
+      line-height: 1.06 !important;
+    }
+    #view-strategies > div:first-child h2,
+    #view-trades > div:first-child h2,
+    #sd-title,
+    #td-title {
+      font-size: var(--tg-font-title-lg) !important;
+      font-weight: 720 !important;
+      letter-spacing: -0.02em !important;
+      line-height: 1.12 !important;
+    }
+    .pro-card h3,
+    .glass-card h3 {
+      font-size: var(--tg-font-title-md);
+      font-weight: 680 !important;
+      letter-spacing: -0.012em;
+      line-height: 1.24;
+    }
+    .pro-card p,
+    .glass-card p {
+      line-height: 1.5;
+    }
+    .lucide {
+      stroke-width: var(--tg-icon-stroke);
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      shape-rendering: geometricPrecision;
+      flex-shrink: 0;
+    }
+    .micro-pill .lucide,
+    .dashboard-subtab .lucide {
+      stroke-width: 1.95;
+    }
+    code, pre, .font-mono {
+      font-family: 'IBM Plex Mono', monospace;
+    }
+    button, a, input, select, textarea {
+      transition:
+        border-color var(--tg-motion-fast) var(--tg-ease-standard),
+        background-color var(--tg-motion-fast) var(--tg-ease-standard),
+        color var(--tg-motion-fast) var(--tg-ease-standard),
+        transform var(--tg-motion-base) var(--tg-ease-standard),
+        box-shadow var(--tg-motion-base) var(--tg-ease-standard);
+    }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--tg-accent);
+      outline-offset: 2px;
+    }
     ::-webkit-scrollbar { width: 8px; height: 8px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-    .dark ::-webkit-scrollbar-thumb { background: #475569; }
-    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    ::-webkit-scrollbar-thumb { background: rgba(126, 145, 169, 0.62); border-radius: 4px; }
+    .dark ::-webkit-scrollbar-thumb { background: rgba(125, 155, 191, 0.6); }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(97, 122, 154, 0.82); }
+
+    header {
+      border-bottom-color: var(--tg-border) !important;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(247, 251, 255, 0.8)) !important;
+      box-shadow: 0 10px 28px -24px rgba(17, 35, 58, 0.52);
+    }
+    .dark header {
+      background: linear-gradient(180deg, rgba(16, 27, 43, 0.9), rgba(13, 23, 37, 0.84)) !important;
+      box-shadow: 0 14px 30px -24px rgba(0, 0, 0, 0.65);
+    }
+    #app-shell {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      overflow: hidden;
+    }
+    #side-panel {
+      width: 286px;
+      border-right: 1px solid var(--tg-border);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(244, 249, 255, 0.72));
+      backdrop-filter: blur(10px);
+      transition: width var(--tg-motion-base) var(--tg-ease-standard), border-color var(--tg-motion-fast) var(--tg-ease-standard);
+      overflow: hidden;
+      z-index: 12;
+    }
+    .dark #side-panel {
+      background: linear-gradient(180deg, rgba(16, 27, 43, 0.82), rgba(12, 20, 34, 0.78));
+      border-right-color: rgba(108, 136, 172, 0.38);
+    }
+    #nav-menu {
+      height: 100%;
+      padding: 0.9rem 0.65rem 1rem;
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 0.42rem;
+    }
+    #nav-menu button {
+      border: 1px solid transparent;
+      transition:
+        transform var(--tg-motion-base) var(--tg-ease-standard),
+        border-color var(--tg-motion-fast) var(--tg-ease-standard),
+        background-color var(--tg-motion-fast) var(--tg-ease-standard),
+        color var(--tg-motion-fast) var(--tg-ease-standard);
+    }
+    #nav-menu button:hover {
+      transform: translateY(-1px);
+      border-color: var(--tg-border);
+    }
+    #nav-menu [data-main-nav] {
+      width: 100%;
+      justify-content: flex-start;
+      padding-left: 0.85rem;
+      padding-right: 0.85rem;
+    }
+    #nav-menu .nav-text {
+      white-space: nowrap;
+    }
+    .nav-group-head {
+      display: flex;
+      align-items: center;
+      gap: 0.32rem;
+    }
+    #nav-dashboard {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    #dashboard-subtabs-toggle {
+      flex: 0 0 auto;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 0.66rem;
+      border: 1px solid transparent;
+      color: var(--tg-muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #dashboard-subtabs-toggle:hover {
+      color: var(--tg-accent-strong);
+      border-color: var(--tg-border);
+      background: rgba(15, 111, 187, 0.08);
+    }
+    .dark #dashboard-subtabs-toggle:hover {
+      background: rgba(86, 180, 243, 0.14);
+    }
+    #dashboard-subtabs-toggle .lucide {
+      width: 15px;
+      height: 15px;
+      margin-right: 0;
+    }
+    body.sidebar-collapsed #dashboard-subtabs-toggle {
+      display: none;
+    }
+    #sidebar-dashboard-subtabs {
+      margin: 0.2rem 0 0.2rem 0.4rem;
+      padding-left: 0.58rem;
+      border-left: 1px solid rgba(129, 154, 186, 0.45);
+      display: grid;
+      gap: 0.22rem;
+    }
+    .dark #sidebar-dashboard-subtabs {
+      border-left-color: rgba(117, 145, 181, 0.45);
+    }
+    #sidebar-dashboard-subtabs .dashboard-subtab {
+      width: 100%;
+      justify-content: flex-start;
+      border-radius: 0.72rem;
+      padding: 0.5rem 0.62rem;
+      font-size: 0.81rem;
+      font-weight: 650;
+    }
+    #sidepanel-toggle {
+      width: 2.6rem;
+      height: 2.6rem;
+      padding: 0;
+      flex-shrink: 0;
+    }
+    #sidepanel-toggle .lucide {
+      margin-right: 0;
+    }
+    body.sidebar-collapsed #side-panel {
+      width: 84px;
+    }
+    body.sidebar-collapsed #nav-menu .nav-text,
+    body.sidebar-collapsed #sidepanel-toggle-text {
+      display: none;
+    }
+    body.sidebar-collapsed #nav-menu [data-main-nav] {
+      justify-content: center;
+      padding-left: 0;
+      padding-right: 0;
+    }
+    body.sidebar-collapsed #nav-menu [data-main-nav] .lucide {
+      margin-right: 0;
+    }
+    body.sidebar-collapsed #sidebar-dashboard-subtabs {
+      display: none !important;
+    }
+    .text-indigo-500, .text-indigo-600, .text-indigo-700 { color: var(--tg-accent-strong) !important; }
+    .bg-indigo-50, .bg-indigo-100 { background-color: rgba(15, 111, 187, 0.11) !important; }
+    .border-indigo-200 { border-color: rgba(15, 111, 187, 0.28) !important; }
+    .bg-indigo-600 { background-color: var(--tg-accent) !important; }
+    .hover\:bg-indigo-700:hover { background-color: #0d5f9f !important; }
+    .border-l-indigo-500 { border-left-color: var(--tg-accent) !important; }
+    .dark .dark\:text-indigo-300 { color: #d4edff !important; }
+    .dark .dark\:bg-indigo-900\/30 { background-color: rgba(86, 180, 243, 0.21) !important; }
+
+    #content-area {
+      background:
+        linear-gradient(120deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0)),
+        linear-gradient(0deg, rgba(255, 255, 255, 0), rgba(15, 111, 187, 0.04));
+    }
+    .dark #content-area {
+      background:
+        linear-gradient(120deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+        linear-gradient(0deg, rgba(255, 255, 255, 0), rgba(86, 180, 243, 0.06));
+    }
+    #content-area > div {
+      width: min(100%, 1560px);
+      margin-left: 0;
+      margin-right: auto;
+    }
+    #view-upload {
+      margin-left: auto !important;
+      margin-right: auto !important;
+    }
+    #content-area .gap-6 { gap: 2rem !important; }
+    #content-area .gap-4 { gap: 1.35rem !important; }
+    #content-area .gap-3 { gap: 1rem !important; }
+    #content-area .space-y-8 > :not([hidden]) ~ :not([hidden]) { margin-top: 2.15rem !important; }
+    #content-area .space-y-6 > :not([hidden]) ~ :not([hidden]) { margin-top: 1.65rem !important; }
+    #content-area .pro-card,
+    #content-area .glass-card:not(.sticky-subnav) {
+      border-radius: 1.35rem;
+      border-color: var(--tg-border-strong);
+      box-shadow: 0 22px 36px -30px rgba(10, 22, 39, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+    }
+    .dark #content-area .pro-card,
+    .dark #content-area .glass-card:not(.sticky-subnav) {
+      box-shadow: 0 24px 40px -32px rgba(0, 0, 0, 0.66), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    #content-area .pro-card:hover,
+    #content-area .glass-card.clickable-card:hover {
+      border-color: rgba(15, 111, 187, 0.34);
+    }
+    #content-area table {
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+    #content-area table thead th {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      font-weight: 800;
+    }
+    #content-area table tbody td {
+      padding-top: 0.78rem !important;
+      padding-bottom: 0.78rem !important;
+    }
+    #content-area table tbody tr {
+      transition: background-color var(--tg-motion-fast) var(--tg-ease-standard);
+    }
+    #content-area table tbody tr:hover {
+      background: rgba(15, 111, 187, 0.05);
+    }
+    .dark #content-area table tbody tr:hover {
+      background: rgba(86, 180, 243, 0.08);
+    }
 
     .glass-card {
-      background: rgba(255,255,255,0.95);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(226,232,240,0.8);
-      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+      background: var(--tg-panel);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--tg-border);
+      box-shadow: var(--tg-shadow-soft);
     }
     .dark .glass-card {
-      background: rgba(30,41,59,0.95);
-      border: 1px solid rgba(51,65,85,0.8);
-      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2), 0 2px 4px -1px rgba(0,0,0,0.1);
+      background: var(--tg-panel);
+      border: 1px solid var(--tg-border);
+      box-shadow: var(--tg-shadow-soft);
     }
-    .fade-in { animation: fadeIn 0.35s cubic-bezier(0.16,1,0.3,1); }
+    .fade-in { animation: fadeIn var(--tg-motion-slow) var(--tg-ease-emphasized); }
     @keyframes fadeIn { from { opacity:0; transform: translateY(10px); } to { opacity:1; transform: translateY(0); } }
-    .clickable-card { cursor: pointer; transition: all 0.2s ease; }
-    .clickable-card:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05); border-color: #818cf8; }
-    .dark .clickable-card:hover { box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); border-color: #6366f1; }
+    @keyframes panelRise { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in > * { animation: panelRise 420ms var(--tg-ease-emphasized) both; }
+    .fade-in > *:nth-child(2) { animation-delay: 60ms; }
+    .fade-in > *:nth-child(3) { animation-delay: 120ms; }
+    .fade-in > *:nth-child(4) { animation-delay: 180ms; }
+    .fade-in > *:nth-child(5) { animation-delay: 240ms; }
 
-    .hero-panel { position: relative; overflow: hidden; border-radius: 1.5rem; background: linear-gradient(135deg, rgba(15,23,42,0.98), rgba(49,46,129,0.92) 55%, rgba(79,70,229,0.82)); color: white; border: 1px solid rgba(129,140,248,0.22); box-shadow: 0 18px 40px -24px rgba(79,70,229,0.55); }
-    .hero-panel::before { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at top right, rgba(255,255,255,0.18), transparent 32%), radial-gradient(circle at bottom left, rgba(56,189,248,0.18), transparent 26%); pointer-events: none; }
-    .hero-stat { border-radius: 1rem; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); padding: 1rem; backdrop-filter: blur(10px); }
+    .clickable-card { cursor: pointer; transition: all var(--tg-motion-base) var(--tg-ease-standard); }
+    .clickable-card:hover { transform: translateY(-3px); box-shadow: var(--tg-shadow); border-color: var(--tg-border-strong); }
+    .dark .clickable-card:hover { box-shadow: var(--tg-shadow); border-color: var(--tg-border-strong); }
 
-    .micro-pill { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.6rem; border-radius: 9999px; font-size: 11px; font-weight: 700; border: 1px solid rgba(99,102,241,0.16); background: rgba(99,102,241,0.08); color: #4f46e5; }
-    .dark .micro-pill { background: rgba(99,102,241,0.14); color: #c7d2fe; border-color: rgba(129,140,248,0.28); }
+    .hero-panel { position: relative; overflow: hidden; border-radius: 1.5rem; background: linear-gradient(140deg, #0b223e 0%, #15385d 52%, #0b4467 100%); color: #f2f8ff; border: 1px solid rgba(122, 182, 224, 0.34); box-shadow: 0 30px 44px -30px rgba(7, 23, 43, 0.78); }
+    .hero-panel::before { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at 14% 12%, rgba(150, 213, 255, 0.24), transparent 33%), radial-gradient(circle at 86% 0%, rgba(124, 250, 227, 0.16), transparent 24%); pointer-events: none; }
+    .hero-stat { border-radius: 1rem; background: rgba(255,255,255,0.08); border: 1px solid rgba(225,242,255,0.2); padding: 1rem; backdrop-filter: blur(10px); }
 
-    .pro-card { border-radius: 1.25rem; border: 1px solid rgba(226,232,240,0.8); background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.95)); box-shadow: 0 16px 36px -28px rgba(15,23,42,0.28); }
-    .dark .pro-card { border-color: rgba(51,65,85,0.82); background: linear-gradient(180deg, rgba(30,41,59,0.98), rgba(15,23,42,0.94)); }
+    .micro-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.28rem 0.7rem;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      border: 1px solid rgba(15, 111, 187, 0.28);
+      background: var(--tg-accent-soft);
+      color: var(--tg-accent-strong);
+    }
+    .dark .micro-pill {
+      background: var(--tg-accent-soft);
+      color: var(--tg-accent-strong);
+      border-color: rgba(117, 197, 255, 0.3);
+    }
 
-    .stat-pill { padding: 0.85rem 1rem; border-radius: 1rem; border: 1px solid rgba(226,232,240,0.9); background: rgba(248,250,252,0.7); }
-    .dark .stat-pill { border-color: rgba(51,65,85,0.9); background: rgba(15,23,42,0.45); }
+    .pro-card {
+      border-radius: 1.25rem;
+      border: 1px solid var(--tg-border);
+      background: linear-gradient(180deg, var(--tg-panel-strong), rgba(247, 251, 255, 0.9));
+      box-shadow: var(--tg-shadow);
+    }
+    .dark .pro-card {
+      border-color: var(--tg-border);
+      background: linear-gradient(180deg, var(--tg-panel-strong), rgba(12, 22, 35, 0.86));
+    }
+
+    .stat-pill {
+      padding: 0.85rem 1rem;
+      border-radius: 1rem;
+      border: 1px solid var(--tg-border);
+      background: rgba(248, 251, 255, 0.76);
+    }
+    .dark .stat-pill { border-color: var(--tg-border); background: rgba(15, 28, 45, 0.62); }
 
     .heatmap-cell { border-radius: 0.9rem; min-height: 86px; padding: 0.9rem; border: 1px solid rgba(226,232,240,0.8); display: flex; flex-direction: column; justify-content: space-between; }
     .dark .heatmap-cell { border-color: rgba(51,65,85,0.82); }
     .score-bar-track { position: relative; width: 100%; height: 8px; border-radius: 9999px; background: rgba(148,163,184,0.18); overflow: hidden; }
-    .score-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 9999px; background: linear-gradient(90deg, #6366f1, #22c55e); }
+    .score-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 9999px; background: linear-gradient(90deg, var(--tg-accent), #22c55e); }
 
     .flag-row { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) auto; gap: 0.9rem; padding: 0.9rem 0; border-bottom: 1px solid rgba(226,232,240,0.7); }
     .dark .flag-row { border-bottom-color: rgba(51,65,85,0.7); }
     .scenario-card { border-radius: 1rem; border: 1px solid rgba(226,232,240,0.8); background: rgba(248,250,252,0.72); padding: 1rem; }
     .dark .scenario-card { border-color: rgba(51,65,85,0.8); background: rgba(15,23,42,0.5); }
+    #quant-settings-grid .stat-pill {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      min-height: 116px;
+      justify-content: center;
+    }
+    #quant-settings-grid .stat-pill input,
+    #quant-settings-grid .stat-pill select {
+      min-height: 2.7rem;
+      line-height: 1.25;
+      font-size: 1.02rem;
+    }
+    .quant-kpi-card {
+      min-height: 166px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+    .quant-kpi-card > p:last-child {
+      min-height: 3rem;
+      line-height: 1.38;
+      word-break: break-word;
+    }
+    .quant-queue-row {
+      grid-template-columns: minmax(240px, 1.25fr) minmax(190px, 0.72fr) minmax(300px, 1.6fr);
+      align-items: start;
+      gap: 1.25rem;
+    }
+    .quant-queue-row > div {
+      min-width: 0;
+    }
+    .quant-queue-row p {
+      margin: 0;
+      word-break: break-word;
+    }
+    .quant-queue-row p + p {
+      margin-top: 0.28rem;
+    }
+    .strategy-tile-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 0.95rem;
+    }
+    .strategy-tile {
+      position: relative;
+      border-radius: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.34);
+      padding: 0.95rem;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(244, 248, 252, 0.82));
+      text-align: left;
+      transition: border-color var(--tg-motion-fast) var(--tg-ease-standard), transform var(--tg-motion-base) var(--tg-ease-standard), box-shadow var(--tg-motion-base) var(--tg-ease-standard);
+    }
+    .strategy-tile:hover {
+      transform: translateY(-2px);
+      border-color: rgba(15, 111, 187, 0.38);
+      box-shadow: 0 16px 26px -24px rgba(15, 31, 52, 0.5);
+    }
+    .strategy-tile.active {
+      border-color: rgba(15, 111, 187, 0.55);
+      box-shadow: inset 0 0 0 1px rgba(15, 111, 187, 0.22);
+      background: linear-gradient(180deg, rgba(15, 111, 187, 0.14), rgba(15, 111, 187, 0.06));
+    }
+    .dark .strategy-tile {
+      border-color: rgba(108, 136, 172, 0.36);
+      background: linear-gradient(180deg, rgba(20, 32, 50, 0.82), rgba(14, 23, 37, 0.8));
+    }
+    .dark .strategy-tile.active {
+      border-color: rgba(117, 197, 255, 0.55);
+      box-shadow: inset 0 0 0 1px rgba(117, 197, 255, 0.26);
+      background: linear-gradient(180deg, rgba(86, 180, 243, 0.2), rgba(86, 180, 243, 0.09));
+    }
+    .strategy-tile-kpi {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 0.7rem;
+    }
+    .strategy-tile-kpi > div {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.7rem;
+      border: 1px solid rgba(148, 163, 184, 0.26);
+      border-radius: 0.72rem;
+      padding: 0.58rem 0.62rem;
+      background: rgba(255, 255, 255, 0.56);
+      min-width: 0;
+      overflow: hidden;
+    }
+    .strategy-kpi-value {
+      display: block;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: visible;
+      text-overflow: clip;
+      line-height: 1.12;
+      font-size: 1.14rem;
+      font-weight: 800;
+      letter-spacing: 0.002em;
+      margin-left: auto;
+    }
+    .dark .strategy-tile-kpi > div {
+      border-color: rgba(108, 136, 172, 0.26);
+      background: rgba(15, 23, 42, 0.42);
+    }
+    .open-strategy-summary {
+      border-radius: 0.9rem;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      background: rgba(248, 250, 252, 0.72);
+      padding: 0.75rem 0.9rem;
+    }
+    .dark .open-strategy-summary {
+      border-color: rgba(108, 136, 172, 0.3);
+      background: rgba(15, 23, 42, 0.52);
+    }
+    @media (max-width: 1280px) {
+      .quant-queue-row {
+        grid-template-columns: minmax(0, 1fr) minmax(170px, 0.7fr) minmax(220px, 1.2fr);
+      }
+    }
 
     .limit-track { position: relative; height: 10px; border-radius: 9999px; background: rgba(148,163,184,0.16); overflow: hidden; }
     .limit-fill { position: absolute; inset: 0; border-radius: 9999px; background: linear-gradient(90deg, #22c55e 0%, #eab308 68%, #ef4444 100%); }
-    .limit-marker { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 9999px; transform: translate(-50%, -50%); background: #fff; border: 3px solid #6366f1; box-shadow: 0 2px 10px rgba(15,23,42,0.22); }
+    .limit-marker { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 9999px; transform: translate(-50%, -50%); background: #fff; border: 3px solid var(--tg-accent); box-shadow: 0 2px 10px rgba(15,23,42,0.22); }
     .limit-card { border-radius: 1rem; border: 1px solid rgba(226,232,240,0.82); background: rgba(248,250,252,0.72); padding: 1rem; }
     .dark .limit-card { border-color: rgba(51,65,85,0.82); background: rgba(15,23,42,0.5); }
 
@@ -82,11 +596,27 @@
     .dark .excursion-bar { background: #334155; }
     .excursion-range-red { position: absolute; height: 100%; background: #f43f5e; border-top-left-radius: 9999px; border-bottom-left-radius: 9999px; }
     .excursion-range-green { position: absolute; height: 100%; background: #10b981; border-top-right-radius: 9999px; border-bottom-right-radius: 9999px; }
-    .excursion-marker { position: absolute; width: 14px; height: 14px; background: white; border: 3px solid #6366f1; border-radius: 50%; top: -2px; transform: translateX(-50%); box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10; }
+    .excursion-marker { position: absolute; width: 14px; height: 14px; background: white; border: 3px solid var(--tg-accent); border-radius: 50%; top: -2px; transform: translateX(-50%); box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10; }
     .excursion-zero { position: absolute; width: 2px; height: 18px; background: #94a3b8; top: -4px; z-index: 5; }
 
-    .upload-tile { border: 2px dashed rgba(148,163,184,0.45); transition: all 0.2s ease; }
-    .upload-tile.ready { border-color: rgba(16,185,129,0.7); background: rgba(16,185,129,0.05); }
+    .upload-tile {
+      border: 1.5px dashed rgba(124, 147, 175, 0.56);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(247, 251, 255, 0.72));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+      transition: all var(--tg-motion-base) var(--tg-ease-standard);
+      padding: 2.35rem !important;
+    }
+    .upload-tile:hover {
+      border-color: rgba(15, 111, 187, 0.45);
+      transform: translateY(-1px);
+      box-shadow: 0 14px 24px -20px rgba(15, 31, 52, 0.45);
+    }
+    .dark .upload-tile {
+      border-color: rgba(106, 136, 170, 0.56);
+      background: linear-gradient(180deg, rgba(22, 35, 54, 0.86), rgba(12, 23, 37, 0.76));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+    }
+    .upload-tile.ready { border-color: rgba(18, 154, 108, 0.75); background: rgba(18, 154, 108, 0.08); }
   .privacy-mode .money, .privacy-mode .pnl, .privacy-mode .currency, .privacy-mode .sym-text, .privacy-mode .strategy-name,
 .privacy-mode #dash-realized, .privacy-mode #dash-unrealized, .privacy-mode #dash-net, .privacy-mode #dash-expectancy,
 .privacy-mode #dash-winloss-ratio, .privacy-mode #dash-profit-factor, .privacy-mode #dash-consistency,
@@ -96,7 +626,8 @@
 .privacy-mode #strategies-grid h3, .privacy-mode #strategies-grid .font-bold,
 .privacy-mode #grouped-trades-container .sym-text, .privacy-mode #grouped-trades-container .font-bold.text-right,
 .privacy-mode #sd-open-grouped-container td, .privacy-mode #sd-closed-grouped-container td,
-.privacy-mode #dash-flagged-trades .font-semibold, .privacy-mode #dash-flagged-trades .text-xs, .privacy-mode #dash-flagged-trades .text-sm {
+.privacy-mode #dash-flagged-trades .font-semibold, .privacy-mode #dash-flagged-trades .text-xs, .privacy-mode #dash-flagged-trades .text-sm,
+.privacy-mode #dash-open-strategy-tiles .font-semibold, .privacy-mode #dash-open-strategy-tiles .strategy-tile-kpi, .privacy-mode #dash-open-strategy-trades-table td {
   filter: blur(6px);
   user-select:none;
 } 
@@ -106,29 +637,114 @@
   content: 'Sensitive details hidden'; position: absolute; right: 12px; top: 10px; font-size: 10px; font-weight: 700; color: #94a3b8;
 }
 .privacy-toggle-fab{ position:fixed; bottom:20px; right:20px; z-index:9999; background:#111827; color:#fff; padding:10px 14px; border-radius:999px; font-size:12px; cursor:pointer; box-shadow:0 10px 25px rgba(0,0,0,0.2);} 
-.dashboard-subtab { display:inline-flex; align-items:center; gap:0.45rem; padding:0.65rem 0.9rem; border-radius:0.9rem; font-size:0.875rem; font-weight:600; color:#64748b; background:transparent; border:1px solid transparent; transition:all .2s ease; }
-.dashboard-subtab:hover { background:rgba(99,102,241,0.06); color:#4f46e5; }
-.dashboard-subtab.active { background:rgba(99,102,241,0.10); color:#4338ca; border-color:rgba(99,102,241,0.18); }
-.dark .dashboard-subtab { color:#94a3b8; }
-.dark .dashboard-subtab:hover { background:rgba(99,102,241,0.14); color:#c7d2fe; }
-.dark .dashboard-subtab.active { background:rgba(99,102,241,0.18); color:#e0e7ff; border-color:rgba(129,140,248,0.28); }
+.dashboard-subtab {
+  display:inline-flex;
+  align-items:center;
+  gap:0.45rem;
+  padding:0.65rem 0.9rem;
+  border-radius:0.85rem;
+  font-size:0.83rem;
+  font-weight:700;
+  color:var(--tg-muted);
+  background:transparent;
+  border:1px solid transparent;
+  transition:all var(--tg-motion-fast) var(--tg-ease-standard);
+}
+.dashboard-subtab:hover { background:rgba(15,111,187,0.08); color:var(--tg-accent-strong); border-color: rgba(15,111,187,0.18); }
+.dashboard-subtab.active {
+  background:linear-gradient(180deg, rgba(15,111,187,0.15), rgba(15,111,187,0.08));
+  color:var(--tg-accent-strong);
+  border-color:rgba(15,111,187,0.3);
+  box-shadow: inset 0 -1px 0 rgba(15,111,187,0.35);
+}
+.dark .dashboard-subtab { color:var(--tg-muted); }
+.dark .dashboard-subtab:hover { background:rgba(86,180,243,0.16); color:#ccecff; border-color: rgba(117,197,255,0.28); }
+.dark .dashboard-subtab.active {
+  background:linear-gradient(180deg, rgba(86,180,243,0.24), rgba(86,180,243,0.14));
+  color:#d9f0ff;
+  border-color:rgba(117,197,255,0.45);
+}
 .dashboard-pane { display:none; }
 .dashboard-pane.active { display:block; }
-.sticky-subnav { position:sticky; top:0; z-index:15; backdrop-filter: blur(10px); } 
+.dashboard-shell { display:flex; flex-direction:column; gap:0.95rem; min-width:0; }
+.sticky-subnav {
+  position: relative;
+  top: auto;
+  z-index: 4;
+  backdrop-filter: blur(10px);
+  margin-bottom: 0.85rem;
+  padding: 0.5rem !important;
+  border: 1px solid var(--tg-border-strong);
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(248,252,255,0.82));
+}
+.dark .sticky-subnav {
+  background: linear-gradient(180deg, rgba(19,30,46,0.9), rgba(14,23,37,0.82));
+}
+.dashboard-subtab-track {
+  display: flex;
+  align-items: center;
+  gap: 0.48rem;
+  overflow-x: auto;
+  min-width: max-content;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+  padding: 0.1rem 0.15rem 0.15rem;
+}
+.dashboard-subtab-track::-webkit-scrollbar { height: 4px; }
+.dashboard-subtab {
+  white-space: nowrap;
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+}
+.dashboard-pane {
+  position: relative;
+  z-index: 1;
+  padding-top: 0.18rem;
+}
 .dark .privacy-toggle-fab{ background:#e5e7eb; color:#111827; }
+@media (max-width: 1024px) {
+  #content-area { padding: 1rem !important; }
+  .flag-row { grid-template-columns: 1fr; gap: 0.55rem; }
+  #content-area .gap-6 { gap: 1.35rem !important; }
+  #content-area .space-y-8 > :not([hidden]) ~ :not([hidden]) { margin-top: 1.55rem !important; }
+}
+@media (max-width: 768px) {
+  #page-title { font-size: 1.05rem !important; }
+  #side-panel { width: 244px; }
+  body.sidebar-collapsed #side-panel { width: 0; border-right-width: 0; }
+  body.sidebar-collapsed #nav-menu { opacity: 0; pointer-events: none; }
+  .micro-pill { font-size: 10px; }
+  .upload-tile { padding: 1.3rem !important; }
+  #content-area .gap-4 { gap: 0.95rem !important; }
+  #content-area .space-y-8 > :not([hidden]) ~ :not([hidden]) { margin-top: 1.2rem !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 </style>
 </head>
-<body class="bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-200 transition-colors duration-300 min-h-screen overflow-hidden">
+<body class="bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-200 transition-colors duration-300 min-h-screen overflow-hidden antialiased">
   <aside class="hidden"></aside>
 
   <main class="w-full flex flex-col h-screen overflow-hidden">
-    <header class="h-16 flex items-center justify-between px-8 border-b border-slate-200 dark:border-slate-800 bg-white/60 dark:bg-slate-850/60 backdrop-blur-md z-10 transition-colors duration-300">
-      <h2 id="page-title" class="text-xl font-bold text-slate-800 dark:text-slate-100">Load Workbooks</h2>
-      <div class="flex items-center space-x-4">
-        <button onclick="toggleTheme()" class="flex items-center justify-center px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 border border-slate-200 rounded-lg hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-700 transition-colors">
-          <i data-lucide="moon" id="theme-icon" class="mr-2 h-4 w-4"></i>
-          <span id="theme-text">Dark Mode</span>
-        </button>
+	    <header class="min-h-[4.25rem] flex items-center justify-between flex-wrap gap-3 px-4 md:px-8 py-3 border-b border-slate-200 dark:border-slate-800 bg-white/60 dark:bg-slate-850/60 backdrop-blur-md z-10 transition-colors duration-300">
+	      <div class="flex items-center gap-3 min-w-0">
+	        <button id="sidepanel-toggle" type="button" aria-label="Collapse Navigation" title="Collapse Navigation" class="flex items-center justify-center text-sm font-medium text-slate-600 bg-slate-100 border border-slate-200 rounded-lg hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-700 transition-colors">
+	          <i id="sidepanel-toggle-icon" data-lucide="panel-left-close" class="h-4 w-4"></i>
+	          <span id="sidepanel-toggle-text" class="sr-only">Collapse Nav</span>
+	        </button>
+	        <h2 id="page-title" class="text-lg md:text-xl font-extrabold tracking-tight text-slate-800 dark:text-slate-100 truncate">Load Workbooks</h2>
+	      </div>
+	      <div class="flex flex-wrap items-center justify-end gap-2 md:gap-3 ml-auto">
+	        <button onclick="toggleTheme()" class="flex items-center justify-center px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 border border-slate-200 rounded-lg hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-700 transition-colors">
+	          <i data-lucide="moon" id="theme-icon" class="mr-2 h-4 w-4"></i>
+	          <span id="theme-text">Dark Mode</span>
+	        </button>
         <span id="upload-status" class="text-sm text-slate-500 dark:text-slate-400 hidden flex items-center bg-slate-100 dark:bg-slate-800 px-3 py-1 rounded-full">
           <span class="w-2 h-2 rounded-full bg-emerald-500 mr-2 animate-pulse"></span> Ready
         </span>
@@ -150,31 +766,47 @@
       </div>
     </header>
 
-    <div id="nav-menu" class="px-4 md:px-8 py-3 border-b border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-850/70 backdrop-blur-md overflow-x-auto">
-      <div class="flex items-center gap-2 min-w-max">
-        <button onclick="navigate('upload')" id="nav-upload" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-indigo-700 bg-indigo-50 dark:bg-indigo-900/30 dark:text-indigo-300 transition-colors">
-          <i data-lucide="files" class="mr-2 h-4 w-4"></i> Load Workbooks
-        </button>
-        <button onclick="navigate('dashboard')" id="nav-dashboard" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
-          <i data-lucide="layout-dashboard" class="mr-2 h-4 w-4"></i> Dashboard
-        </button>
-        <button onclick="navigate('strategies')" id="nav-strategies" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
-          <i data-lucide="briefcase" class="mr-2 h-4 w-4"></i> Strategies
-        </button>
-        <button onclick="navigate('trades')" id="nav-trades" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
-          <i data-lucide="layers" class="mr-2 h-4 w-4"></i> Grouped Trades
-        </button>
-      </div>
-    </div>
+    <div id="app-shell">
+      <aside id="side-panel">
+        <nav id="nav-menu">
+          <button onclick="navigate('upload')" id="nav-upload" data-main-nav="upload" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-indigo-700 bg-indigo-50 dark:bg-indigo-900/30 dark:text-indigo-300 transition-colors">
+            <i data-lucide="files" class="mr-2 h-4 w-4"></i><span class="nav-text">Load Workbooks</span>
+          </button>
+          <div id="nav-dashboard-group" class="hidden">
+            <div class="nav-group-head">
+              <button onclick="navigate('dashboard')" id="nav-dashboard" data-main-nav="dashboard" type="button" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors w-full">
+                <i data-lucide="layout-dashboard" class="mr-2 h-4 w-4"></i><span class="nav-text">Dashboard</span>
+              </button>
+              <button id="dashboard-subtabs-toggle" type="button" aria-label="Toggle Dashboard Sections" aria-expanded="true" title="Collapse Dashboard Sections">
+                <i id="dashboard-subtabs-toggle-icon" data-lucide="chevron-down" class="h-4 w-4"></i>
+              </button>
+            </div>
+            <div id="sidebar-dashboard-subtabs">
+              <button type="button" class="dashboard-subtab sidebar-subtab active" data-dashboard-subtab="overview">Overview</button>
+              <button type="button" class="dashboard-subtab sidebar-subtab" data-dashboard-subtab="risk">Risk</button>
+              <button type="button" class="dashboard-subtab sidebar-subtab" data-dashboard-subtab="strategies">Strategy Intelligence</button>
+              <button type="button" class="dashboard-subtab sidebar-subtab" data-dashboard-subtab="strategy-tiles">Open Strategy Tiles</button>
+              <button type="button" class="dashboard-subtab sidebar-subtab" data-dashboard-subtab="behaviour">Behaviour &amp; Regime</button>
+              <button type="button" class="dashboard-subtab sidebar-subtab" data-dashboard-subtab="quant">Quant Ops</button>
+            </div>
+          </div>
+          <button onclick="navigate('strategies')" id="nav-strategies" data-main-nav="strategies" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
+            <i data-lucide="briefcase" class="mr-2 h-4 w-4"></i><span class="nav-text">Strategies</span>
+          </button>
+          <button onclick="navigate('trades')" id="nav-trades" data-main-nav="trades" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
+            <i data-lucide="layers" class="mr-2 h-4 w-4"></i><span class="nav-text">Grouped Trades</span>
+          </button>
+        </nav>
+      </aside>
 
-    <div class="flex-1 overflow-y-auto p-4 md:p-8 relative" id="content-area">
-      <div id="view-upload" class="h-full flex flex-col items-center justify-center max-w-5xl mx-auto text-center fade-in">
+      <div class="flex-1 overflow-y-auto p-4 md:p-8 relative" id="content-area">
+      <div id="view-upload" class="min-h-full flex flex-col items-center justify-start max-w-5xl mx-auto text-center fade-in pt-6 md:pt-10 pb-16">
         <div class="w-24 h-24 bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 rounded-2xl rotate-3 flex items-center justify-center mb-8 shadow-inner border border-indigo-200 dark:border-indigo-800">
           <i data-lucide="sheet" class="h-10 w-10 -rotate-3"></i>
         </div>
-        <h2 class="text-3xl font-extrabold mb-4 text-slate-800 dark:text-white">Daily Workbook Trade Analyzer</h2>
-        <p class="text-slate-500 dark:text-slate-400 mb-8 max-w-3xl text-lg">
-          Upload your <span class="font-semibold">active</span> and <span class="font-semibold">expired</span> workbooks. The app reconstructs strategy headers plus legs, then builds portfolio, risk, strategy, regime, and stress analytics from those daily exports.
+        <h2 class="text-3xl font-extrabold mb-4 text-slate-800 dark:text-white">Daily Workbook Intelligence</h2>
+        <p class="text-slate-500 dark:text-slate-400 mb-8 max-w-3xl text-lg copy-intro">
+          Upload your <span class="font-semibold">Active</span> and <span class="font-semibold">Expired</span> workbooks. Trade Guardian reconstructs strategy headers and option legs, then computes portfolio, risk, regime, and execution diagnostics from that daily export.
         </p>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
@@ -183,7 +815,7 @@
               <div>
                 <div class="micro-pill mb-3"><i data-lucide="trending-up" class="h-3.5 w-3.5"></i> Open positions</div>
                 <h3 class="text-xl font-bold text-slate-800 dark:text-white">Active Workbook</h3>
-                <p class="text-sm text-slate-500 dark:text-slate-400 mt-2">Upload the daily workbook containing all currently open strategies.</p>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mt-2 copy-note">Daily export of all currently open strategies.</p>
               </div>
               <i data-lucide="file-spreadsheet" class="h-10 w-10 text-slate-400"></i>
             </div>
@@ -195,7 +827,7 @@
               <div>
                 <div class="micro-pill mb-3"><i data-lucide="archive" class="h-3.5 w-3.5"></i> Closed positions</div>
                 <h3 class="text-xl font-bold text-slate-800 dark:text-white">Expired Workbook</h3>
-                <p class="text-sm text-slate-500 dark:text-slate-400 mt-2">Upload the daily workbook containing all expired or closed strategies.</p>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mt-2 copy-note">Daily export of all expired or closed strategies.</p>
               </div>
               <i data-lucide="folder-input" class="h-10 w-10 text-slate-400"></i>
             </div>
@@ -224,43 +856,34 @@
             </label>
             <button id="sync-now-btn" type="button" class="px-4 py-2 rounded-xl text-sm font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">Sync Now</button>
           </div>
-          <p id="cloud-sync-status" class="text-sm text-slate-500 dark:text-slate-400 mt-4">Cloud sync idle. Configure API URL, then upload both files.</p>
+          <p id="cloud-sync-status" class="text-sm text-slate-500 dark:text-slate-400 mt-4 copy-note">Cloud sync idle. Set API URL, then upload both files.</p>
           <p id="cloud-sync-meta" class="text-xs text-slate-400 mt-2"></p>
           <p id="cloud-last-backup" class="text-xs text-slate-500 dark:text-slate-400 mt-2 inline-flex items-center px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800">
             <span class="w-2 h-2 rounded-full bg-amber-500 mr-2"></span> Last successful Drive backup: Not available yet
           </p>
           <pre id="cloud-sync-logs" class="hidden mt-3 p-3 rounded-xl bg-slate-900 text-slate-100 text-xs whitespace-pre-wrap max-h-56 overflow-y-auto"></pre>
-          <p class="text-xs text-slate-400 mt-4">Tip: use this page daily for 2-file uploads. For historical replay, download the latest DB and open it in the Fixed viewer.</p>
+          <p class="text-xs text-slate-400 mt-4 copy-caption">Tip: use this page for daily two-file sync. For historical replay, open the latest DB in the Fixed viewer.</p>
         </div>
 
         <div class="glass-card rounded-2xl p-6 mt-8 w-full text-left">
-          <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="info" class="mr-2 h-5 w-5 text-indigo-500"></i> What this workbook version supports</h3>
+          <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="info" class="mr-2 h-5 w-5 text-indigo-500"></i> Workbook Capability Snapshot</h3>
           <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-slate-600 dark:text-slate-300">
-            <div class="stat-pill"><span class="font-semibold block mb-1">Same-day portfolio analytics</span>Realized vs unrealized PnL, risk limits, heatmaps, stress testing, strategy scorecards, regime analysis.</div>
-            <div class="stat-pill"><span class="font-semibold block mb-1">Strategy + leg reconstruction</span>Header rows become trades, dotted rows become option legs attached to that trade.</div>
-            <div class="stat-pill"><span class="font-semibold block mb-1">Honest limitation</span>This version does <span class="font-semibold">not</span> create true lifecycle replay unless you later decide to upload historical daily workbooks too.</div>
+            <div class="stat-pill"><span class="font-semibold block mb-1">Same-day analytics</span>Realized vs unrealized PnL, risk limits, heatmaps, stress testing, scorecards, and regime analysis.</div>
+            <div class="stat-pill"><span class="font-semibold block mb-1">Strategy + leg parsing</span>Header rows map to trades, and dotted rows map to the attached option legs.</div>
+            <div class="stat-pill"><span class="font-semibold block mb-1">Scope note</span>No full lifecycle replay unless historical daily workbooks are also uploaded over time.</div>
           </div>
         </div>
       </div>
 
-      <div id="view-dashboard" class="hidden fade-in space-y-6 pb-20">
-        <div class="sticky-subnav glass-card rounded-2xl p-3">
-          <div class="flex items-center gap-2 overflow-x-auto min-w-max">
-            <button type="button" class="dashboard-subtab active" data-dashboard-subtab="overview"><i data-lucide="layout-dashboard" class="h-4 w-4"></i> Overview</button>
-            <button type="button" class="dashboard-subtab" data-dashboard-subtab="risk"><i data-lucide="shield" class="h-4 w-4"></i> Risk</button>
-            <button type="button" class="dashboard-subtab" data-dashboard-subtab="strategies"><i data-lucide="briefcase" class="h-4 w-4"></i> Strategy Intelligence</button>
-            <button type="button" class="dashboard-subtab" data-dashboard-subtab="behaviour"><i data-lucide="brain" class="h-4 w-4"></i> Behaviour & Regime</button>
-          </div>
-        </div>
-
+      <div id="view-dashboard" class="hidden fade-in space-y-8 pb-24 dashboard-shell">
         <div class="dashboard-pane active" data-dashboard-pane="overview">
         <div class="hero-panel p-6 md:p-8">
           <div class="relative z-10 grid grid-cols-1 xl:grid-cols-5 gap-6 items-start">
             <div class="xl:col-span-2 space-y-4">
-              <div class="micro-pill"><i data-lucide="sparkles" class="h-3.5 w-3.5"></i> Workbook Analytics Mode</div>
+              <div class="micro-pill"><i data-lucide="sparkles" class="h-3.5 w-3.5"></i> Workbook Intelligence Mode</div>
               <div>
                 <h2 class="text-3xl md:text-4xl font-black tracking-tight">Portfolio Intelligence Center</h2>
-                <p class="text-indigo-100/90 mt-3 leading-7 max-w-xl">Professional-grade overview of realized performance, open exposure, stability, strategy quality, and scenario risk — directly from your daily active and expired exports.</p>
+                <p class="text-indigo-100/90 mt-3 leading-7 max-w-xl copy-intro">Institutional overview of realized performance, open exposure, strategy quality, and scenario risk from your daily Active and Expired exports.</p>
               </div>
             </div>
             <div class="xl:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -287,11 +910,11 @@
           <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-5">
             <div>
               <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="filter" class="mr-2 h-5 w-5 text-indigo-500"></i> Group Universe Control</h3>
-              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Exclude OptionStrat groups such as experiments or testing from all calculations while still keeping them in the uploaded source files.</p>
+              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1 copy-note">Exclude experimental groups from all calculations while keeping them intact in source uploads.</p>
             </div>
             <div class="flex flex-wrap gap-2">
-              <button type="button" id="groups-include-all" class="micro-pill">Include all</button>
-              <button type="button" id="groups-exclude-testing" class="micro-pill">Exclude likely test groups</button>
+              <button type="button" id="groups-include-all" class="micro-pill">Include Everything</button>
+              <button type="button" id="groups-exclude-testing" class="micro-pill">Exclude Test Groups</button>
             </div>
           </div>
           <div class="flex flex-wrap gap-3 mb-4 text-xs">
@@ -418,6 +1041,31 @@
 
         </div>
 
+        <div class="dashboard-pane space-y-6 lg:space-y-7" data-dashboard-pane="strategy-tiles">
+        <div class="pro-card p-6">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+            <div>
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="layout-grid" class="mr-2 h-5 w-5 text-indigo-500"></i> Open Strategy Tile Board</h3>
+              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Each tile shows live Open PnL, Delta, and Theta for a strategy/group. Click a tile to inspect the current open trades inside that strategy.</p>
+            </div>
+            <div class="micro-pill"><i data-lucide="layers-3" class="h-3.5 w-3.5"></i> Live open-position lens</div>
+          </div>
+          <div id="dash-open-strategy-tiles" class="strategy-tile-grid"></div>
+        </div>
+
+        <div id="dash-open-strategy-detail" class="pro-card p-6 hidden">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+            <div>
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="briefcase" class="mr-2 h-5 w-5 text-indigo-500"></i> <span id="dash-open-strategy-name">Strategy</span></h3>
+              <p id="dash-open-strategy-sub" class="text-sm text-slate-500 dark:text-slate-400 mt-1">Open-trade drill-down.</p>
+            </div>
+            <div class="micro-pill"><i data-lucide="list-tree" class="h-3.5 w-3.5"></i> Trade-level exposure</div>
+          </div>
+          <div id="dash-open-strategy-totals" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
+          <div id="dash-open-strategy-trades-table" class="overflow-x-auto mt-5"></div>
+        </div>
+        </div>
+
         <div class="dashboard-pane" data-dashboard-pane="behaviour">
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
           <div class="pro-card p-6">
@@ -492,7 +1140,7 @@
           <div class="pro-card p-6">
             <div class="flex items-center justify-between gap-3 mb-4">
               <div>
-                <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="list-checks" class="mr-2 h-5 w-5 text-indigo-500"></i> Flagged Trades & Diagnostic Queue</h3>
+                <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="list-checks" class="mr-2 h-5 w-5 text-indigo-500"></i> Flagged Trade Queue</h3>
                 <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Highest-priority workbook trades to review based on detected behavioral and risk-pattern warnings.</p>
               </div>
               <div class="micro-pill"><i data-lucide="bot" class="h-3.5 w-3.5"></i> Rule-based queue</div>
@@ -501,19 +1149,142 @@
           </div>
         </div>
         </div>
+
+	        <div class="dashboard-pane space-y-6 lg:space-y-7" data-dashboard-pane="quant">
+	          <div class="pro-card p-6">
+            <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
+              <div>
+                <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="settings-2" class="mr-2 h-5 w-5 text-indigo-500"></i> Quant Settings</h3>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Calibrate capital, regime, and probability thresholds used by the Decision Ladder and KNN sizing engine.</p>
+              </div>
+              <div class="micro-pill"><i data-lucide="sliders-horizontal" class="h-3.5 w-3.5"></i> Persisted locally</div>
+            </div>
+	            <div id="quant-settings-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+	              <label class="stat-pill">
+                <p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400 mb-1">Prime Capital</p>
+                <input id="quant-prime-cap" type="number" min="1000" step="1000" class="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm">
+              </label>
+              <label class="stat-pill">
+                <p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400 mb-1">SMSF Capital</p>
+                <input id="quant-smsf-cap" type="number" min="1000" step="1000" class="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm">
+              </label>
+              <label class="stat-pill">
+                <p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400 mb-1">Regime</p>
+                <select id="quant-regime" class="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm">
+                  <option value="neutral">Neutral</option>
+                  <option value="bullish">Bullish</option>
+                  <option value="bearish">Bearish</option>
+                </select>
+              </label>
+              <label class="stat-pill">
+                <p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400 mb-1">Prob Low %</p>
+                <input id="quant-prob-low" type="number" min="1" max="99" step="1" class="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm">
+              </label>
+              <label class="stat-pill">
+                <p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400 mb-1">Prob High %</p>
+                <input id="quant-prob-high" type="number" min="1" max="99" step="1" class="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm">
+              </label>
+              <label class="stat-pill">
+                <p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400 mb-1">Exit Percentile</p>
+                <input id="quant-exit-pct" type="number" min="50" max="95" step="1" class="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm">
+              </label>
+            </div>
+          </div>
+
+	          <div class="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-5">
+	            <div class="glass-card rounded-2xl p-5 quant-kpi-card">
+	              <p class="text-xs uppercase font-bold tracking-[0.16em] text-slate-400">Portfolio VaR (95%)</p>
+	              <h3 id="quant-var" class="text-2xl font-extrabold mt-2 text-rose-500">$0.00</h3>
+	              <p id="quant-var-sub" class="text-sm text-slate-500 mt-2">Awaiting closed-trade history</p>
+	            </div>
+	            <div class="glass-card rounded-2xl p-5 quant-kpi-card">
+	              <p class="text-xs uppercase font-bold tracking-[0.16em] text-slate-400">Priority Actions</p>
+	              <h3 id="quant-actions-count" class="text-2xl font-extrabold mt-2 text-amber-500">0</h3>
+	              <p id="quant-actions-sub" class="text-sm text-slate-500 mt-2">No urgent decisions</p>
+	            </div>
+	            <div class="glass-card rounded-2xl p-5 quant-kpi-card">
+	              <p class="text-xs uppercase font-bold tracking-[0.16em] text-slate-400">Concentration Alerts</p>
+	              <h3 id="quant-concentration-count" class="text-2xl font-extrabold mt-2 text-indigo-500">0</h3>
+	              <p id="quant-concentration-sub" class="text-sm text-slate-500 mt-2">No oversized positions</p>
+	            </div>
+	            <div class="glass-card rounded-2xl p-5 quant-kpi-card">
+	              <p class="text-xs uppercase font-bold tracking-[0.16em] text-slate-400">Regime Multiplier</p>
+	              <h3 id="quant-regime-mult" class="text-2xl font-extrabold mt-2 text-slate-800 dark:text-white">1.00x</h3>
+	              <p id="quant-regime-sub" class="text-sm text-slate-500 mt-2">Neutral targets</p>
+	            </div>
+	          </div>
+
+          <div class="pro-card p-6">
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="list-checks" class="mr-2 h-5 w-5 text-indigo-500"></i> Priority Action Queue</h3>
+            <div id="quant-priority-queue" class="space-y-2"></div>
+          </div>
+
+          <div class="pro-card p-6">
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="layout-grid" class="mr-2 h-5 w-5 text-indigo-500"></i> Active Decision Matrix</h3>
+            <div id="quant-decision-matrix" class="overflow-x-auto"></div>
+          </div>
+
+          <div class="pro-card p-6">
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="brain-circuit" class="mr-2 h-5 w-5 text-indigo-500"></i> KNN Win Probability + Kelly Sizing</h3>
+            <div id="quant-knn-table" class="overflow-x-auto"></div>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div class="pro-card p-6">
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="shield-alert" class="mr-2 h-5 w-5 text-indigo-500"></i> Smart Stops (MAE) + Velocity Limits</h3>
+              <div id="quant-risk-profiles" class="overflow-x-auto"></div>
+            </div>
+            <div class="pro-card p-6">
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="calendar-range" class="mr-2 h-5 w-5 text-indigo-500"></i> Harvest Window Variance</h3>
+              <div id="quant-harvest-window" class="overflow-x-auto"></div>
+            </div>
+          </div>
+
+          <div class="pro-card p-6">
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="matrix" class="mr-2 h-5 w-5 text-indigo-500"></i> Strategy Correlation Matrix (Realized Daily PnL)</h3>
+            <div id="quant-corr-matrix" class="overflow-x-auto"></div>
+          </div>
+
+          <div class="pro-card p-6">
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="landmark" class="mr-2 h-5 w-5 text-indigo-500"></i> Account Split (Prime vs SMSF)</h3>
+            <div id="quant-account-split" class="overflow-x-auto"></div>
+          </div>
+
+          <div class="pro-card p-6">
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="git-merge" class="mr-2 h-5 w-5 text-indigo-500"></i> Roll Campaign Snapshot</h3>
+            <div id="quant-roll-campaigns" class="overflow-x-auto"></div>
+          </div>
+        </div>
       </div>
 
-      <div id="view-strategies" class="hidden fade-in space-y-6 pb-20">
+      <div id="view-strategies" class="hidden fade-in space-y-8 pb-24">
         <div class="flex justify-between items-end border-b border-slate-200 dark:border-slate-800 pb-4 mb-6">
           <div>
             <h2 class="text-2xl font-bold text-slate-800 dark:text-white">Your Strategies</h2>
-            <p class="text-slate-500 dark:text-slate-400 mt-1">Select a strategy to view its detailed analysis and component trades.</p>
+            <p class="text-slate-500 dark:text-slate-400 mt-1 copy-note">Open any strategy for its full analysis and trade-level context.</p>
           </div>
         </div>
         <div id="strategies-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6"></div>
+        <div class="pro-card p-6">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+            <div>
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="sliders-horizontal" class="mr-2 h-5 w-5 text-indigo-500"></i> Strategy Configuration Manager</h3>
+              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1 copy-note">Maintain strategy identifiers and target benchmarks used by sync classification and quant models.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button id="stratcfg-refresh" type="button" class="micro-pill">Refresh</button>
+              <button id="stratcfg-add-row" type="button" class="micro-pill">Add Row</button>
+              <button id="stratcfg-save" type="button" class="micro-pill">Save</button>
+              <button id="stratcfg-reprocess" type="button" class="micro-pill">Reprocess Other</button>
+              <button id="stratcfg-reset" type="button" class="micro-pill">Reset Defaults</button>
+            </div>
+          </div>
+          <div id="strategy-config-editor" class="overflow-x-auto"></div>
+          <p id="strategy-config-status" class="text-sm text-slate-500 dark:text-slate-400 mt-3 copy-note">Pull strategy configuration from DB to begin editing.</p>
+        </div>
       </div>
 
-      <div id="view-strategy-detail" class="hidden fade-in space-y-6 pb-20">
+      <div id="view-strategy-detail" class="hidden fade-in space-y-8 pb-24">
         <button onclick="navigate('strategies')" class="text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 flex items-center bg-indigo-50 dark:bg-indigo-900/30 px-3 py-1.5 rounded-lg w-max mb-2">
           <i data-lucide="arrow-left" class="mr-1.5 h-4 w-4"></i> Back to Strategies
         </button>
@@ -546,7 +1317,7 @@
           </div>
         </div>
 
-        <div class="space-y-6 mt-8">
+        <div class="space-y-8 mt-10">
           <div>
             <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4 flex items-center"><span class="w-3 h-3 rounded-full bg-amber-500 mr-2"></span> Open Positions</h3>
             <div id="sd-open-grouped-container" class="space-y-4"></div>
@@ -558,18 +1329,32 @@
         </div>
       </div>
 
-      <div id="view-trades" class="hidden fade-in space-y-6 pb-20">
+      <div id="view-trades" class="hidden fade-in space-y-8 pb-24">
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-end border-b border-slate-200 dark:border-slate-800 pb-4 mb-6">
           <div>
             <h2 class="text-2xl font-bold text-slate-800 dark:text-white">All Trades</h2>
-            <p class="text-slate-500 dark:text-slate-400 mt-1">Grouped by Strategy & Status</p>
+            <p class="text-slate-500 dark:text-slate-400 mt-1 copy-note">Grouped by strategy and status.</p>
           </div>
           <input type="text" id="trade-search" placeholder="Search symbol..." class="mt-4 sm:mt-0 px-4 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-850 focus:ring-2 focus:ring-indigo-500 w-full sm:w-64">
         </div>
         <div id="grouped-trades-container" class="space-y-8 pb-10"></div>
+        <div class="pro-card p-6">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+            <div>
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="book-open-text" class="mr-2 h-5 w-5 text-indigo-500"></i> Active Journal</h3>
+              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1 copy-note">Edit strategy, lot size, notes, tags, and parent links for Active and Missing trades, then save to DB.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button id="journal-refresh" type="button" class="micro-pill">Refresh</button>
+              <button id="journal-save" type="button" class="micro-pill">Save Journal</button>
+            </div>
+          </div>
+          <div id="journal-editor" class="overflow-x-auto"></div>
+          <p id="journal-status" class="text-sm text-slate-500 dark:text-slate-400 mt-3 copy-note">Pull journal rows from DB to begin editing.</p>
+        </div>
       </div>
 
-      <div id="view-trade-detail" class="hidden fade-in space-y-6 max-w-6xl mx-auto pb-20">
+      <div id="view-trade-detail" class="hidden fade-in space-y-8 max-w-6xl mx-auto pb-24">
         <button onclick="navigate('strategies')" id="td-back-btn" class="text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 flex items-center bg-indigo-50 dark:bg-indigo-900/30 px-3 py-1.5 rounded-lg w-max mb-2">
           <i data-lucide="arrow-left" class="mr-1.5 h-4 w-4"></i> Back
         </button>
@@ -600,9 +1385,9 @@
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div class="lg:col-span-2 space-y-6">
+          <div class="lg:col-span-2 space-y-8">
             <div class="glass-card rounded-2xl p-6">
-              <h3 class="font-bold text-sm text-slate-500 uppercase mb-4 flex items-center"><i data-lucide="sparkles" class="mr-2 h-4 w-4"></i> Trade Snapshot Diagnostics</h3>
+              <h3 class="font-bold text-sm text-slate-500 uppercase mb-4 flex items-center"><i data-lucide="sparkles" class="mr-2 h-4 w-4"></i> Trade Diagnostics</h3>
               <div id="td-stats-strip" class="grid grid-cols-2 xl:grid-cols-4 gap-3"></div>
               <div id="td-diagnostics" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5"></div>
             </div>
@@ -620,6 +1405,7 @@
         </div>
       </div>
     </div>
+    </div>
   </main>
 
   <script>
@@ -631,11 +1417,24 @@
       files: { active: null, expired: null },
       availableGroups: [],
       filters: { excludedGroups: new Set() },
+      strategyConfigRows: [],
+      journalRows: [],
+      journalStrategyOptions: [],
       cloud: { connected: false, lastSync: null, lastDriveOk: null, lastMessage: '' },
       settings: {
         autoExcludeKeywords: ['test','testing','experiment','exp','demo','sandbox','paper'],
         apiBase: '',
-        autoCloudSync: true
+        autoCloudSync: true,
+        sidebarCollapsed: false,
+        dashboardSubtabsExpanded: true,
+        quant: {
+          primeCap: 115000,
+          smsfCap: 150000,
+          regime: 'neutral',
+          probLow: 40,
+          probHigh: 75,
+          exitPercentile: 75
+        }
       }
     };
 
@@ -647,6 +1446,11 @@ function loadPersistedSettings(){
     if(saved.autoExcludeKeywords) appData.settings.autoExcludeKeywords = saved.autoExcludeKeywords;
     if(typeof saved.apiBase === 'string') appData.settings.apiBase = saved.apiBase;
     if(typeof saved.autoCloudSync === 'boolean') appData.settings.autoCloudSync = saved.autoCloudSync;
+    if(typeof saved.sidebarCollapsed === 'boolean') appData.settings.sidebarCollapsed = saved.sidebarCollapsed;
+    if(typeof saved.dashboardSubtabsExpanded === 'boolean') appData.settings.dashboardSubtabsExpanded = saved.dashboardSubtabsExpanded;
+    if(saved.quant && typeof saved.quant === 'object'){
+      appData.settings.quant = { ...appData.settings.quant, ...saved.quant };
+    }
   }catch(e){ console.warn('settings load failed',e); }
 }
 
@@ -656,7 +1460,10 @@ function persistSettings(){
       excludedGroups:[...appData.filters.excludedGroups],
       autoExcludeKeywords:appData.settings.autoExcludeKeywords,
       apiBase: appData.settings.apiBase || '',
-      autoCloudSync: !!appData.settings.autoCloudSync
+      autoCloudSync: !!appData.settings.autoCloudSync,
+      sidebarCollapsed: !!appData.settings.sidebarCollapsed,
+      dashboardSubtabsExpanded: !!appData.settings.dashboardSubtabsExpanded,
+      quant: appData.settings.quant || {}
     }));
   }catch(e){ console.warn('settings save failed',e); }
 }
@@ -664,8 +1471,51 @@ function persistSettings(){
 loadPersistedSettings();
     let chartInstances = {};
     let currentDashboardSubtab = 'overview';
+    let currentOpenStrategyFocus = null;
     let currentTheme = 'light';
     let navHistory = [{ view: 'upload', id: null }];
+    function syncSidebarDashboardSubtabsVisibility() {
+      const group = document.getElementById('nav-dashboard-group');
+      const subtabs = document.getElementById('sidebar-dashboard-subtabs');
+      const toggle = document.getElementById('dashboard-subtabs-toggle');
+      if (!subtabs) return;
+      const groupVisible = !!group && !group.classList.contains('hidden');
+      const show = groupVisible && !!appData.settings.dashboardSubtabsExpanded && !appData.settings.sidebarCollapsed;
+      subtabs.classList.toggle('hidden', !show);
+      if (toggle) toggle.classList.toggle('hidden', !groupVisible || !!appData.settings.sidebarCollapsed);
+    }
+
+    function setDashboardSubtabsExpanded(expanded, shouldPersist = true) {
+      appData.settings.dashboardSubtabsExpanded = !!expanded;
+      const toggle = document.getElementById('dashboard-subtabs-toggle');
+      const icon = document.getElementById('dashboard-subtabs-toggle-icon');
+      if (toggle) {
+        const isExpanded = !!appData.settings.dashboardSubtabsExpanded;
+        toggle.setAttribute('aria-expanded', String(isExpanded));
+        toggle.setAttribute('title', isExpanded ? 'Collapse Dashboard Sections' : 'Expand Dashboard Sections');
+      }
+      if (icon) icon.setAttribute('data-lucide', appData.settings.dashboardSubtabsExpanded ? 'chevron-down' : 'chevron-right');
+      syncSidebarDashboardSubtabsVisibility();
+      if (shouldPersist) persistSettings();
+      lucide.createIcons();
+    }
+
+    function applySidebarState() {
+      const collapsed = !!appData.settings.sidebarCollapsed;
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      const icon = document.getElementById('sidepanel-toggle-icon');
+      const text = document.getElementById('sidepanel-toggle-text');
+      const btn = document.getElementById('sidepanel-toggle');
+      if (icon) icon.setAttribute('data-lucide', collapsed ? 'panel-left-open' : 'panel-left-close');
+      if (text) text.textContent = collapsed ? 'Expand Nav' : 'Collapse Nav';
+      if (btn) {
+        const tip = collapsed ? 'Expand Navigation' : 'Collapse Navigation';
+        btn.setAttribute('title', tip);
+        btn.setAttribute('aria-label', tip);
+      }
+      syncSidebarDashboardSubtabsVisibility();
+      lucide.createIcons();
+    }
 
     function getApiBase() {
       return String(appData.settings.apiBase || '').trim().replace(/\/+$/,'');
@@ -842,6 +1692,197 @@ loadPersistedSettings();
       }
     }
 
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    async function apiFetchJson(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (!(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+      const resp = await fetch(apiUrl(path), { ...options, headers });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.ok === false) {
+        throw new Error(data.error || `HTTP ${resp.status}`);
+      }
+      return data;
+    }
+
+    function setStrategyConfigStatus(text, tone = 'neutral') {
+      const el = document.getElementById('strategy-config-status');
+      if (!el) return;
+      el.textContent = text;
+      el.classList.remove('text-slate-500', 'text-rose-500', 'text-emerald-500', 'text-amber-500', 'dark:text-slate-400');
+      if (tone === 'ok') el.classList.add('text-emerald-500');
+      else if (tone === 'error') el.classList.add('text-rose-500');
+      else if (tone === 'warn') el.classList.add('text-amber-500');
+      else el.classList.add('text-slate-500', 'dark:text-slate-400');
+    }
+
+    function setJournalStatus(text, tone = 'neutral') {
+      const el = document.getElementById('journal-status');
+      if (!el) return;
+      el.textContent = text;
+      el.classList.remove('text-slate-500', 'text-rose-500', 'text-emerald-500', 'text-amber-500', 'dark:text-slate-400');
+      if (tone === 'ok') el.classList.add('text-emerald-500');
+      else if (tone === 'error') el.classList.add('text-rose-500');
+      else if (tone === 'warn') el.classList.add('text-amber-500');
+      else el.classList.add('text-slate-500', 'dark:text-slate-400');
+    }
+
+    function renderStrategyConfigEditor() {
+      const el = document.getElementById('strategy-config-editor');
+      if (!el) return;
+      const rows = appData.strategyConfigRows || [];
+      if (!rows.length) {
+        el.innerHTML = '<p class="text-sm text-slate-500">No strategy rows found. Use Add Row or Reset Defaults.</p>';
+        return;
+      }
+      el.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-2 py-2">Name</th><th class="px-2 py-2">Identifier</th><th class="px-2 py-2 text-right">Target PnL</th><th class="px-2 py-2 text-right">Target Days</th><th class="px-2 py-2 text-right">Min Stability</th><th class="px-2 py-2 text-right">Typical Debit</th><th class="px-2 py-2">Description</th><th class="px-2 py-2 text-right">Delete</th></tr></thead><tbody>${rows.map((r, i) => `<tr class="border-b border-slate-100 dark:border-slate-800/60" data-sc-row="${i}"><td class="px-2 py-2"><input data-f="name" value="${escapeHtml(r.name || '')}" class="w-full px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="identifier" value="${escapeHtml(r.identifier || '')}" class="w-full px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="target_pnl" type="number" step="1" value="${Number(r.target_pnl || 0)}" class="w-28 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="target_days" type="number" step="1" value="${Number(r.target_days || 0)}" class="w-24 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="min_stability" type="number" step="0.01" value="${Number(r.min_stability || 0)}" class="w-24 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="typical_debit" type="number" step="1" value="${Number(r.typical_debit || 0)}" class="w-28 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="description" value="${escapeHtml(r.description || '')}" class="w-full px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2 text-right"><button type="button" data-sc-del="${i}" class="text-rose-500 text-xs font-semibold">Remove</button></td></tr>`).join('')}</tbody></table>`;
+    }
+
+    function collectStrategyConfigRowsFromDom() {
+      const rows = [];
+      document.querySelectorAll('#strategy-config-editor tbody tr[data-sc-row]').forEach(tr => {
+        const getVal = f => {
+          const inp = tr.querySelector(`[data-f="${f}"]`);
+          return inp ? inp.value : '';
+        };
+        const name = String(getVal('name') || '').trim();
+        if (!name) return;
+        rows.push({
+          name,
+          identifier: String(getVal('identifier') || '').trim(),
+          target_pnl: Number(getVal('target_pnl')) || 0,
+          target_days: Number(getVal('target_days')) || 0,
+          min_stability: Number(getVal('min_stability')) || 0,
+          typical_debit: Number(getVal('typical_debit')) || 0,
+          description: String(getVal('description') || '').trim()
+        });
+      });
+      return rows;
+    }
+
+    async function loadStrategyConfigEditor() {
+      const el = document.getElementById('strategy-config-editor');
+      if (!el) return;
+      setStrategyConfigStatus('Loading strategy config...');
+      try {
+        const data = await apiFetchJson('/api/strategy-config', { method: 'GET' });
+        appData.strategyConfigRows = Array.isArray(data.rows) ? data.rows : [];
+        renderStrategyConfigEditor();
+        setStrategyConfigStatus(`Loaded ${appData.strategyConfigRows.length} strategy rows.`, 'ok');
+      } catch (err) {
+        setStrategyConfigStatus(`Failed to load strategy config: ${err.message}`, 'error');
+      }
+    }
+
+    async function saveStrategyConfigEditor() {
+      const rows = collectStrategyConfigRowsFromDom();
+      if (!rows.length) {
+        setStrategyConfigStatus('Add at least one strategy row before saving.', 'warn');
+        return;
+      }
+      setStrategyConfigStatus('Saving strategy config...');
+      try {
+        await apiFetchJson('/api/strategy-config/save', { method: 'POST', body: JSON.stringify({ rows }) });
+        appData.strategyConfigRows = rows;
+        renderStrategyConfigEditor();
+        setStrategyConfigStatus(`Saved ${rows.length} strategy rows.`, 'ok');
+      } catch (err) {
+        setStrategyConfigStatus(`Save failed: ${err.message}`, 'error');
+      }
+    }
+
+    async function resetStrategyConfigDefaults() {
+      setStrategyConfigStatus('Resetting defaults...');
+      try {
+        await apiFetchJson('/api/strategy-config/reset', { method: 'POST', body: JSON.stringify({}) });
+        await loadStrategyConfigEditor();
+        setStrategyConfigStatus('Reset to default strategies.', 'ok');
+      } catch (err) {
+        setStrategyConfigStatus(`Reset failed: ${err.message}`, 'error');
+      }
+    }
+
+    async function reprocessOtherTradesNow() {
+      setStrategyConfigStatus("Reprocessing 'Other' trades...");
+      try {
+        const data = await apiFetchJson('/api/strategy-config/reprocess-other', { method: 'POST', body: JSON.stringify({}) });
+        setStrategyConfigStatus(`Reprocessed ${Number(data.updated_count || 0)} trades.`, 'ok');
+      } catch (err) {
+        setStrategyConfigStatus(`Reprocess failed: ${err.message}`, 'error');
+      }
+    }
+
+    function renderJournalEditor() {
+      const el = document.getElementById('journal-editor');
+      if (!el) return;
+      const rows = appData.journalRows || [];
+      const strategyOptions = appData.journalStrategyOptions || [];
+      if (!rows.length) {
+        el.innerHTML = '<p class="text-sm text-slate-500">No Active/Missing rows found in DB.</p>';
+        return;
+      }
+      const optionHtml = strategyOptions.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+      el.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-2 py-2">Trade</th><th class="px-2 py-2">Status</th><th class="px-2 py-2">Strategy</th><th class="px-2 py-2 text-right">Lots</th><th class="px-2 py-2 text-right">PnL</th><th class="px-2 py-2 text-right">Days</th><th class="px-2 py-2">Tags</th><th class="px-2 py-2">Parent ID</th><th class="px-2 py-2">Notes</th></tr></thead><tbody>${rows.map((r, i) => `<tr class="border-b border-slate-100 dark:border-slate-800/60" data-j-row="${i}" data-id="${escapeHtml(r.id)}"><td class="px-2 py-2"><div class="font-medium">${r.link ? `<a href="${escapeHtml(r.link)}" target="_blank" rel="noopener noreferrer" class="hover:text-indigo-500">${escapeHtml(r.name || r.id)}</a>` : escapeHtml(r.name || r.id)}</div></td><td class="px-2 py-2">${escapeHtml(r.status || '')}</td><td class="px-2 py-2"><input list="journal-strategy-options" data-f="strategy" value="${escapeHtml(r.strategy || '')}" class="w-36 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="lot_size" type="number" min="1" step="1" value="${Math.max(1, Number(r.lot_size || 1))}" class="w-20 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2 text-right ${clrMoney(r.pnl)}">${fmtMoney(r.pnl)}</td><td class="px-2 py-2 text-right">${Number(r.days_held || 0)}</td><td class="px-2 py-2"><input data-f="tags" value="${escapeHtml(r.tags || '')}" class="w-36 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="parent_id" value="${escapeHtml(r.parent_id || '')}" class="w-36 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="notes" value="${escapeHtml(r.notes || '')}" class="w-56 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td></tr>`).join('')}</tbody></table><datalist id="journal-strategy-options">${optionHtml}</datalist>`;
+    }
+
+    function collectJournalRowsFromDom() {
+      const rows = [];
+      document.querySelectorAll('#journal-editor tbody tr[data-j-row]').forEach(tr => {
+        const id = tr.getAttribute('data-id') || '';
+        if (!id) return;
+        const getVal = f => {
+          const inp = tr.querySelector(`[data-f="${f}"]`);
+          return inp ? inp.value : '';
+        };
+        rows.push({
+          id,
+          strategy: String(getVal('strategy') || '').trim(),
+          lot_size: Math.max(1, Number(getVal('lot_size')) || 1),
+          tags: String(getVal('tags') || '').trim(),
+          parent_id: String(getVal('parent_id') || '').trim(),
+          notes: String(getVal('notes') || '').trim()
+        });
+      });
+      return rows;
+    }
+
+    async function loadJournalEditor() {
+      const el = document.getElementById('journal-editor');
+      if (!el) return;
+      setJournalStatus('Loading journal rows...');
+      try {
+        const data = await apiFetchJson('/api/journal/active', { method: 'GET' });
+        appData.journalRows = Array.isArray(data.rows) ? data.rows : [];
+        appData.journalStrategyOptions = Array.isArray(data.strategy_options) ? data.strategy_options : [];
+        renderJournalEditor();
+        setJournalStatus(`Loaded ${appData.journalRows.length} Active/Missing rows.`, 'ok');
+      } catch (err) {
+        setJournalStatus(`Failed to load journal: ${err.message}`, 'error');
+      }
+    }
+
+    async function saveJournalEditor() {
+      const rows = collectJournalRowsFromDom();
+      if (!rows.length) {
+        setJournalStatus('No journal rows to save.', 'warn');
+        return;
+      }
+      setJournalStatus('Saving journal updates...');
+      try {
+        const data = await apiFetchJson('/api/journal/save', { method: 'POST', body: JSON.stringify({ rows }) });
+        setJournalStatus(`Saved ${Number(data.updated_count || 0)} journal rows.`, 'ok');
+      } catch (err) {
+        setJournalStatus(`Save failed: ${err.message}`, 'error');
+      }
+    }
+
     function toggleTheme() {
       const html = document.documentElement;
       html.classList.toggle('dark');
@@ -894,6 +1935,16 @@ loadPersistedSettings();
       const m = String(d.getMonth() + 1).padStart(2, '0');
       const day = String(d.getDate()).padStart(2, '0');
       return `${y}-${m}-${day}`;
+    }
+
+    function toValidTradeDate(value) {
+      const d = normalizeDateValue(value);
+      if (!d) return null;
+      const year = d.getFullYear();
+      if (year < 2000 || year > 2100) return null;
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${m}-${day}`;
     }
 
     function compareDateValues(a, b) {
@@ -964,6 +2015,24 @@ loadPersistedSettings();
       return neg ? -num : num;
     }
 
+    function parsePnlFromRow(row) {
+      const preferred = [
+        parseNumber(row.total_return_dollar),
+        parseNumber(row.total_return_usd),
+        parseNumber(row.pnl)
+      ];
+      const preferredHit = preferred.find(v => Number.isFinite(v) && Math.abs(v) > 0);
+      if (preferredHit !== undefined) return preferredHit;
+
+      const fallback = [
+        parseNumber(row.total_return),
+        parseNumber(row.total_return_1),
+        parseNumber(row.total_return_2)
+      ].filter(v => Number.isFinite(v));
+      if (!fallback.length) return 0;
+      return fallback.sort((a, b) => Math.abs(b) - Math.abs(a))[0];
+    }
+
     function readWorkbookRows(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -986,7 +2055,14 @@ loadPersistedSettings();
 
     function normalizeRow(rawRow) {
       const row = {};
-      Object.entries(rawRow).forEach(([k, v]) => row[cleanKey(k)] = v);
+      Object.entries(rawRow).forEach(([k, v]) => {
+        const rawKey = String(k || '');
+        const key = cleanKey(k);
+        row[key] = v;
+        const lower = rawKey.toLowerCase();
+        if (lower.includes('total return') && (lower.includes('$') || lower.includes('usd') || lower.includes('dollar'))) row.total_return_dollar = v;
+        if (lower.includes('total return') && (lower.includes('%') || lower.includes('percent'))) row.total_return_pct = v;
+      });
       return row;
     }
 
@@ -1014,16 +2090,18 @@ loadPersistedSettings();
         if (!name) return;
         const isLeg = name.startsWith('.');
         if (!isLeg) {
+          const openDateIso = toValidTradeDate(row.created_at);
+          const expiryIso = toValidTradeDate(row.expiration);
           currentTrade = {
             id: buildTradeId(row, status, idx),
             sym: name,
             strat: detectStrategyName(row),
             group: String(row.group || '').trim() || 'Uncategorized',
             status,
-            pnl: parseNumber(row.total_return),
-            pnlPct: parseNumber(row.total_return_1),
-            openDate: toIsoDate(row.created_at) || String(row.created_at || `row-${idx}`),
-            expiration: toIsoDate(row.expiration) || String(row.expiration || ''),
+            pnl: parsePnlFromRow(row),
+            pnlPct: parseNumber(row.total_return_pct || row.total_return_1 || 0),
+            openDate: openDateIso || '',
+            expiration: expiryIso || '',
             maxGain: Math.max(parseNumber(row.high), parseNumber(row.max_profit), parseNumber(row.total_return), 0),
             maxDrawdown: Math.min(parseNumber(row.low), -Math.abs(parseNumber(row.max_loss)), parseNumber(row.total_return), 0),
             netDebitCredit: parseNumber(row.net_debit_credit),
@@ -1037,19 +2115,22 @@ loadPersistedSettings();
             rho: parseNumber(row.rho),
             iv: parseNumber(row.iv),
             link: String(row.link || '').trim(),
+            notes: String(row.notes || '').trim(),
+            tags: String(row.tags || '').trim(),
+            parentId: String(row.parent_id || '').trim(),
             high: parseNumber(row.high),
             low: parseNumber(row.low),
             legs: [],
             raw: row,
-            closeDate: status === 'CLOSED' ? (toIsoDate(row.expiration) || toIsoDate(row.created_at) || '') : '',
-            openMonth: monthFromDate(row.created_at),
-            closeMonth: status === 'CLOSED' ? monthFromDate(row.expiration || row.created_at) : 'Unknown'
+            closeDate: status === 'CLOSED' ? (expiryIso || openDateIso || '') : '',
+            openMonth: monthFromDate(openDateIso || row.created_at),
+            closeMonth: status === 'CLOSED' ? monthFromDate(expiryIso || openDateIso || row.created_at) : 'Unknown'
           };
           trades.push(currentTrade);
         } else if (currentTrade) {
           currentTrade.legs.push({
             name,
-            expiration: toIsoDate(row.expiration) || String(row.expiration || ''),
+            expiration: toValidTradeDate(row.expiration) || '',
             delta: parseNumber(row.delta),
             theta: parseNumber(row.theta),
             gamma: parseNumber(row.gamma),
@@ -1095,7 +2176,10 @@ loadPersistedSettings();
         applyGroupFilters(false);
 
         document.getElementById('upload-status').classList.remove('hidden');
-        ['dashboard', 'strategies', 'trades'].forEach(n => document.getElementById(`nav-${n}`).classList.remove('hidden'));
+        const dashboardGroup = document.getElementById('nav-dashboard-group');
+        if (dashboardGroup) dashboardGroup.classList.remove('hidden');
+        setDashboardSubtabsExpanded(appData.settings.dashboardSubtabsExpanded, false);
+        ['strategies', 'trades'].forEach(n => document.getElementById(`nav-${n}`).classList.remove('hidden'));
         document.getElementById('nav-upload').classList.add('hidden');
         navigate('dashboard');
         if (appData.settings.autoCloudSync) {
@@ -1286,6 +2370,574 @@ loadPersistedSettings();
       });
     }
 
+    function getQuantSettings() {
+      const defaults = { primeCap: 115000, smsfCap: 150000, regime: 'neutral', probLow: 40, probHigh: 75, exitPercentile: 75 };
+      const q = { ...defaults, ...(appData.settings.quant || {}) };
+      q.primeCap = Math.max(1000, Number(q.primeCap) || defaults.primeCap);
+      q.smsfCap = Math.max(1000, Number(q.smsfCap) || defaults.smsfCap);
+      q.probLow = Math.max(1, Math.min(99, Number(q.probLow) || defaults.probLow));
+      q.probHigh = Math.max(1, Math.min(99, Number(q.probHigh) || defaults.probHigh));
+      q.exitPercentile = Math.max(50, Math.min(95, Number(q.exitPercentile) || defaults.exitPercentile));
+      q.regime = ['neutral', 'bullish', 'bearish'].includes(String(q.regime || '').toLowerCase()) ? String(q.regime).toLowerCase() : 'neutral';
+      if (q.probLow >= q.probHigh) q.probLow = Math.max(1, q.probHigh - 5);
+      return q;
+    }
+
+    function getRegimeMeta(regime) {
+      if (regime === 'bullish') return { mult: 1.1, label: 'Aggressive targets' };
+      if (regime === 'bearish') return { mult: 0.9, label: 'Defensive targets' };
+      return { mult: 1.0, label: 'Neutral targets' };
+    }
+
+    function inferLotSizeFromTrade(trade) {
+      const sym = String(trade.sym || '');
+      const m = sym.match(/(\d+)\s*(?:LOT|L\b)/i);
+      if (m) return Math.max(1, Number(m[1]) || 1);
+      return 1;
+    }
+
+    function getTradeRisk(trade) {
+      const debit = Math.abs(Number(trade.netDebitCredit) || 0);
+      const maxLoss = Math.abs(Number(trade.maxLoss) || 0);
+      if (debit > 0 && maxLoss > 0) return Math.max(debit, maxLoss);
+      if (maxLoss > 0) return maxLoss;
+      if (debit > 0) return debit;
+      return Math.max(1, Math.abs(Number(trade.pnl) || 0));
+    }
+
+    function getDebitPerLot(trade) {
+      const lot = inferLotSizeFromTrade(trade);
+      return getTradeRisk(trade) / Math.max(1, lot);
+    }
+
+    function getThetaCapPct(trade) {
+      const risk = getTradeRisk(trade);
+      if (risk <= 0) return 0;
+      return ((Number(trade.theta) || 0) / risk) * 100;
+    }
+
+    function computeTradeStability(trade) {
+      const theta = Number(trade.theta) || 0;
+      const delta = Math.abs(Number(trade.delta) || 0);
+      if (theta <= 0) return 0;
+      return theta / (delta + 1);
+    }
+
+    function computeThetaEfficiency(trade, daysHeld) {
+      const theta = Number(trade.theta) || 0;
+      if (!theta || !daysHeld) return 0;
+      return (Number(trade.pnl) || 0) / (theta * daysHeld);
+    }
+
+    function buildDynamicBenchmarksFromClosed(closedTrades) {
+      const out = {};
+      const byStrat = {};
+      closedTrades.forEach(t => {
+        if (!byStrat[t.strat]) byStrat[t.strat] = [];
+        byStrat[t.strat].push(t);
+      });
+      Object.entries(byStrat).forEach(([strat, arr]) => {
+        const winners = arr.filter(t => Number(t.pnl) > 0);
+        const winnerPnls = winners.map(t => Number(t.pnl) || 0);
+        const winnerDays = winners.map(t => Math.max(1, getTradeDaysHeld(t)));
+        const yields = winners.map(t => ((Number(t.pnl) || 0) / Math.max(1, getTradeRisk(t)) / Math.max(1, getTradeDaysHeld(t))) * 100);
+        out[strat] = {
+          pnl: winnerPnls.length ? winnerPnls.reduce((a, b) => a + b, 0) / winnerPnls.length : 500,
+          dit: winnerDays.length ? winnerDays.reduce((a, b) => a + b, 0) / winnerDays.length : 40,
+          yield: yields.length ? yields.reduce((a, b) => a + b, 0) / yields.length : 0
+        };
+      });
+      return out;
+    }
+
+    function calculateDecisionLadder(trade, benchmarks, regimeMult = 1) {
+      const strat = String(trade.strat || 'Other');
+      const days = Math.max(1, getTradeDaysHeld(trade));
+      const pnl = Number(trade.pnl) || 0;
+      const theta = Number(trade.theta) || 0;
+      const stability = computeTradeStability(trade);
+      const thetaEff = computeThetaEfficiency(trade, days);
+      const lotSize = inferLotSizeFromTrade(trade);
+      const debit = getTradeRisk(trade);
+      const bench = benchmarks[strat] || { pnl: 500, dit: 40 };
+      const histAvgPnl = Number(bench.pnl) || 500;
+      const histAvgDays = Math.max(1, Number(bench.dit) || 40);
+      const targetProfit = histAvgPnl * regimeMult * lotSize;
+
+      let score = 50;
+      let action = 'HOLD';
+      let reason = 'Normal';
+      let juiceVal = 0;
+      let juiceType = 'Neutral';
+
+      if (pnl < 0) {
+        juiceType = 'Recovery Days';
+        if (theta > 0) {
+          const recovDays = Math.abs(pnl) / theta;
+          juiceVal = recovDays;
+          const remainingTime = Math.max(1, histAvgDays - days);
+          if (recovDays > remainingTime) {
+            score += 40;
+            action = 'STRUCTURAL FAILURE';
+            reason = `Zombie (Recov ${recovDays.toFixed(0)}d > Left ${remainingTime.toFixed(0)}d)`;
+          }
+        } else {
+          juiceVal = 999;
+          if (days > 15) {
+            score += 30;
+            reason = 'Negative Theta';
+          }
+        }
+      } else {
+        juiceType = 'Left in Tank';
+        const leftInTank = Math.max(0, targetProfit - pnl);
+        juiceVal = leftInTank;
+        if (debit > 0 && (leftInTank / debit) < 0.05) {
+          score += 40;
+          reason = 'Squeezed Dry';
+        } else if (leftInTank < (100 * lotSize)) {
+          score += 35;
+          reason = `Empty Tank (<$${100 * lotSize})`;
+        }
+      }
+
+      if (pnl >= targetProfit) {
+        return { trade, action: 'TAKE PROFIT', score: 100, reason: `Hit Target ${fmtMoney(targetProfit)}`, juiceVal, juiceType, targetProfit, days, thetaEff, stability };
+      }
+      if (pnl >= targetProfit * 0.8) {
+        score += 30;
+        action = 'PREPARE EXIT';
+        reason = 'Near Target';
+      }
+
+      const staleThreshold = histAvgDays * 1.25;
+      if (strat === '130/160') {
+        const limit130 = Math.min(staleThreshold, 30);
+        if (days > limit130 && pnl < (100 * lotSize)) {
+          return { trade, action: 'KILL', score: 95, reason: `Stale (> ${limit130.toFixed(0)}d)`, juiceVal, juiceType, targetProfit, days, thetaEff, stability };
+        } else if (days > (limit130 * 0.8)) {
+          score += 20;
+          reason = 'Aging';
+        }
+      } else if (strat === '160/190') {
+        const cookingLimit = Math.max(30, histAvgDays * 0.7);
+        if (days < cookingLimit) {
+          score = 10;
+          action = 'COOKING';
+          reason = `Too Early (<${cookingLimit.toFixed(0)}d)`;
+        } else if (days > staleThreshold) {
+          score += 25;
+          action = 'WATCH';
+          reason = `Mature (>${staleThreshold.toFixed(0)}d)`;
+        }
+      } else if (strat === 'M200') {
+        if (days >= 13 && days <= 15) {
+          score += 10;
+          action = 'DAY 14 CHECK';
+          reason = 'Scheduled Review';
+        }
+      }
+
+      if (stability < 0.3 && days > 5) {
+        score += 25;
+        action = 'RISK REVIEW';
+        reason += ' + Coin Flip';
+      }
+      if (thetaEff < 0.2 && days > 10) {
+        score += 15;
+        reason += ' + Bad Decay';
+      }
+
+      if (pnl > 0 && days > 5) {
+        const histVel = histAvgPnl / Math.max(1, histAvgDays);
+        const currVel = pnl / days;
+        if (currVel < (histVel * 0.6) && pnl > (targetProfit * 0.2)) {
+          score += 15;
+          if (action === 'HOLD') {
+            action = 'REDEPLOY?';
+            reason = `Slow Capital (${fmtMoney(currVel)}/d vs ${fmtMoney(histVel)}/d)`;
+          }
+        }
+      }
+
+      score = Math.max(0, Math.min(100, score));
+      if (score >= 90) action = 'CRITICAL';
+      else if (score >= 70) action = 'WATCH';
+      else if (score <= 30) action = 'COOKING';
+
+      return { trade, action, score, reason, juiceVal, juiceType, targetProfit, days, thetaEff, stability };
+    }
+
+    function calculateKellyFraction(winRate, avgWin, avgLoss, penalty = 0.5) {
+      const aWin = Number(avgWin) || 0;
+      const aLoss = Number(avgLoss) || 0;
+      if (aWin <= 0 || aLoss === 0) return 0;
+      const b = Math.abs(aWin / aLoss);
+      const kelly = (winRate * b - (1 - winRate)) / b;
+      return Math.max(0, Math.min(kelly * penalty, 0.25));
+    }
+
+    function buildKnnPredictions(openTrades, closedTrades, probLow, probHigh, totalCapital) {
+      const history = closedTrades.map(t => ({
+        trade: t,
+        thetaCap: getThetaCapPct(t),
+        delta: Number(t.delta) || 0,
+        debitLot: getDebitPerLot(t),
+        pnl: Number(t.pnl) || 0
+      })).filter(t => Number.isFinite(t.thetaCap) && Number.isFinite(t.delta) && Number.isFinite(t.debitLot));
+      if (history.length < 5) return [];
+
+      const dist = (a, b) => Math.sqrt(
+        Math.pow((a.thetaCap - b.thetaCap), 2) +
+        Math.pow((a.delta - b.delta), 2) +
+        Math.pow((a.debitLot - b.debitLot), 2)
+      );
+
+      const preds = [];
+      openTrades.forEach(t => {
+        const curr = { thetaCap: getThetaCapPct(t), delta: Number(t.delta) || 0, debitLot: getDebitPerLot(t) };
+        const ranked = history
+          .map(h => ({ ...h, d: dist(curr, h) }))
+          .sort((a, b) => a.d - b.d)
+          .slice(0, 7);
+        if (!ranked.length) return;
+        const winProb = ranked.filter(x => x.pnl > 0).length / ranked.length;
+        const avgPnl = ranked.reduce((a, b) => a + b.pnl, 0) / ranked.length;
+        const wins = ranked.filter(x => x.pnl > 0).map(x => x.pnl);
+        const losses = ranked.filter(x => x.pnl < 0).map(x => x.pnl);
+        const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+        const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : -Math.abs(avgPnl) * 0.5;
+        const kelly = calculateKellyFraction(winProb, avgWin, avgLoss, 0.5);
+        const avgDist = ranked.reduce((a, b) => a + b.d, 0) / ranked.length;
+        const confidence = Math.max(0, 100 - avgDist * 10);
+        let rec = 'HOLD';
+        if (winProb * 100 < probLow) rec = 'REDUCE/CLOSE';
+        else if (winProb * 100 > probHigh) rec = 'PRESS WINNER';
+        preds.push({
+          trade: t,
+          winProb: winProb * 100,
+          expectedPnl: avgPnl,
+          kellyPct: kelly * 100,
+          recSize: kelly * totalCapital,
+          confidence,
+          rec
+        });
+      });
+      return preds.sort((a, b) => b.winProb - a.winProb);
+    }
+
+    function calculatePortfolioVar95(closedTrades, capital) {
+      if (!closedTrades.length || capital <= 0) return 0;
+      const byDate = {};
+      closedTrades.forEach(t => {
+        const d = toIsoDate(t.closeDate || t.expiration || t.openDate);
+        if (!d) return;
+        byDate[d] = (byDate[d] || 0) + (Number(t.pnl) || 0);
+      });
+      const dates = Object.keys(byDate).sort((a, b) => compareDateValues(a, b));
+      if (dates.length < 5) return 0;
+      const returns = dates.map(d => (byDate[d] || 0) / capital).filter(v => Number.isFinite(v));
+      if (returns.length < 5) return 0;
+      const varRet = quantile(returns, 0.05);
+      return Math.min(0, varRet * capital);
+    }
+
+    function buildConcentrationWarnings(openTrades, totalCapital, threshold = 0.15) {
+      if (!openTrades.length || totalCapital <= 0) return [];
+      return openTrades.map(t => {
+        const risk = getTradeRisk(t);
+        return {
+          trade: t,
+          risk,
+          ratio: risk / totalCapital
+        };
+      }).filter(x => x.ratio > threshold).sort((a, b) => b.ratio - a.ratio);
+    }
+
+    function buildMaeVelocityProfiles(closedTrades) {
+      const byStrat = {};
+      closedTrades.forEach(t => {
+        if (!byStrat[t.strat]) byStrat[t.strat] = [];
+        byStrat[t.strat].push(t);
+      });
+      const profiles = [];
+      Object.entries(byStrat).forEach(([strat, arr]) => {
+        const winners = arr.filter(t => Number(t.pnl) > 0);
+        const maeVals = winners.map(t => Number(t.maxDrawdown) || 0).filter(v => v < 0).sort((a, b) => a - b);
+        const mae = maeVals.length ? quantile(maeVals, 0.05) : null;
+        const vels = winners.map(t => (Number(t.pnl) || 0) / Math.max(1, getTradeDaysHeld(t))).filter(v => Number.isFinite(v));
+        let vMean = 0;
+        let vStd = 0;
+        if (vels.length) {
+          vMean = vels.reduce((a, b) => a + b, 0) / vels.length;
+          if (vels.length > 1) {
+            const varV = vels.reduce((sum, v) => sum + Math.pow(v - vMean, 2), 0) / (vels.length - 1);
+            vStd = Math.sqrt(Math.max(0, varV));
+          }
+        }
+        profiles.push({ strat, smartStop: mae, velocityLimit: vMean + (2 * vStd), winnerCount: winners.length });
+      });
+      return profiles.sort((a, b) => a.strat.localeCompare(b.strat));
+    }
+
+    function buildHarvestWindowStats(closedTrades) {
+      const byStrat = {};
+      closedTrades.filter(t => Number(t.pnl) > 0).forEach(t => {
+        if (!byStrat[t.strat]) byStrat[t.strat] = [];
+        byStrat[t.strat].push(Math.max(1, getTradeDaysHeld(t)));
+      });
+      const rows = [];
+      Object.entries(byStrat).forEach(([strat, days]) => {
+        if (days.length < 2) return;
+        rows.push({
+          strat,
+          p25: quantile(days, 0.25),
+          p50: quantile(days, 0.50),
+          p75: quantile(days, 0.75),
+          count: days.length
+        });
+      });
+      return rows.sort((a, b) => a.strat.localeCompare(b.strat));
+    }
+
+    function buildRealizedCorrelationMatrix(closedTrades) {
+      const strategyList = [...new Set(closedTrades.map(t => t.strat))].sort((a, b) => a.localeCompare(b));
+      if (strategyList.length < 2) return { strategies: strategyList, matrix: [] };
+
+      const daily = {};
+      closedTrades.forEach(t => {
+        const d = toIsoDate(t.closeDate || t.expiration || t.openDate);
+        if (!d) return;
+        if (!daily[d]) daily[d] = {};
+        daily[d][t.strat] = (daily[d][t.strat] || 0) + (Number(t.pnl) || 0);
+      });
+      const dates = Object.keys(daily).sort((a, b) => compareDateValues(a, b));
+      if (!dates.length) return { strategies: strategyList, matrix: [] };
+
+      const seriesByStrat = {};
+      strategyList.forEach(s => {
+        seriesByStrat[s] = dates.map(d => Number(daily[d][s] || 0));
+      });
+
+      const corr = (a, b) => {
+        if (!a.length || !b.length || a.length !== b.length) return 0;
+        const ma = a.reduce((x, y) => x + y, 0) / a.length;
+        const mb = b.reduce((x, y) => x + y, 0) / b.length;
+        let cov = 0;
+        let va = 0;
+        let vb = 0;
+        for (let i = 0; i < a.length; i++) {
+          const da = a[i] - ma;
+          const db = b[i] - mb;
+          cov += da * db;
+          va += da * da;
+          vb += db * db;
+        }
+        const den = Math.sqrt(va * vb);
+        if (!den) return 0;
+        return cov / den;
+      };
+
+      const matrix = strategyList.map(r => strategyList.map(c => corr(seriesByStrat[r], seriesByStrat[c])));
+      return { strategies: strategyList, matrix };
+    }
+
+    function calculatePortfolioMetricsFromClosed(closedTrades, capital) {
+      if (!closedTrades.length || capital <= 0) return { pnl: 0, sharpe: 0, cagr: 0, maxDd: 0 };
+      const byDate = {};
+      closedTrades.forEach(t => {
+        const d = toIsoDate(t.closeDate || t.expiration || t.openDate);
+        if (!d) return;
+        byDate[d] = (byDate[d] || 0) + (Number(t.pnl) || 0);
+      });
+      const dates = Object.keys(byDate).sort((a, b) => compareDateValues(a, b));
+      if (!dates.length) return { pnl: 0, sharpe: 0, cagr: 0, maxDd: 0 };
+
+      const start = normalizeDateValue(dates[0]);
+      const end = normalizeDateValue(dates[dates.length - 1]);
+      if (!start || !end) return { pnl: 0, sharpe: 0, cagr: 0, maxDd: 0 };
+
+      const allDates = [];
+      for (let d = new Date(start); d <= end; d = new Date(d.getTime() + 86400000)) {
+        allDates.push(toIsoDate(d));
+      }
+      let equity = capital;
+      const eq = [];
+      allDates.forEach(d => {
+        equity += Number(byDate[d] || 0);
+        eq.push(equity);
+      });
+      const returns = [];
+      for (let i = 1; i < eq.length; i++) {
+        if (eq[i - 1] !== 0) returns.push((eq[i] - eq[i - 1]) / eq[i - 1]);
+      }
+      let sharpe = 0;
+      if (returns.length > 1) {
+        const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / (returns.length - 1);
+        const stdev = Math.sqrt(Math.max(variance, 0));
+        sharpe = stdev > 0 ? (mean / stdev) * Math.sqrt(252) : 0;
+      }
+      let runningMax = -Infinity;
+      let maxDd = 0;
+      eq.forEach(v => {
+        runningMax = Math.max(runningMax, v);
+        if (runningMax > 0) {
+          const dd = (v - runningMax) / runningMax;
+          maxDd = Math.min(maxDd, dd);
+        }
+      });
+      const totalPnl = closedTrades.reduce((sum, t) => sum + (Number(t.pnl) || 0), 0);
+      const totalDays = Math.max(1, Math.round((end - start) / 86400000));
+      const endVal = capital + totalPnl;
+      const cagr = endVal > 0 ? Math.pow(endVal / capital, 365 / totalDays) - 1 : -1;
+      return { pnl: totalPnl, sharpe, cagr, maxDd };
+    }
+
+    function buildRollCampaignSummary(trades) {
+      const rolled = trades.filter(t => String(t.parentId || '').trim() !== '');
+      if (!rolled.length) return [];
+      const byParent = {};
+      rolled.forEach(t => {
+        const pid = String(t.parentId || '').trim();
+        if (!byParent[pid]) byParent[pid] = [];
+        byParent[pid].push(t);
+      });
+      return Object.entries(byParent).map(([pid, arr]) => {
+        const totalPnl = arr.reduce((s, t) => s + (Number(t.pnl) || 0), 0);
+        const totalDays = arr.reduce((s, t) => s + Math.max(1, getTradeDaysHeld(t)), 0);
+        return {
+          parentId: pid,
+          legs: arr.length,
+          totalPnl,
+          totalDays,
+          avgPnlPerLeg: totalPnl / Math.max(1, arr.length)
+        };
+      }).sort((a, b) => b.totalPnl - a.totalPnl);
+    }
+
+    function renderQuantOps() {
+      const queueEl = document.getElementById('quant-priority-queue');
+      if (!queueEl) return;
+
+      const q = getQuantSettings();
+      appData.settings.quant = { ...q };
+      const regimeMeta = getRegimeMeta(q.regime);
+      const totalCap = q.primeCap + q.smsfCap;
+      const allTrades = appData.trades.slice();
+      const openTrades = allTrades.filter(t => t.status === 'OPEN');
+      const closedTrades = allTrades.filter(t => t.status === 'CLOSED');
+      const benchmarks = buildDynamicBenchmarksFromClosed(closedTrades);
+      const ladders = openTrades.map(t => calculateDecisionLadder(t, benchmarks, regimeMeta.mult)).sort((a, b) => b.score - a.score);
+      const todo = ladders.filter(x => x.score >= 70);
+      const concentration = buildConcentrationWarnings(openTrades, totalCap, 0.15);
+      const var95 = calculatePortfolioVar95(closedTrades, totalCap);
+      const knn = buildKnnPredictions(openTrades, closedTrades, q.probLow, q.probHigh, totalCap);
+      const riskProfiles = buildMaeVelocityProfiles(closedTrades);
+      const harvestRows = buildHarvestWindowStats(closedTrades);
+      const corr = buildRealizedCorrelationMatrix(closedTrades);
+      const rollCampaigns = buildRollCampaignSummary(allTrades);
+
+      const varEl = document.getElementById('quant-var');
+      const varSubEl = document.getElementById('quant-var-sub');
+      const actCountEl = document.getElementById('quant-actions-count');
+      const actSubEl = document.getElementById('quant-actions-sub');
+      const concCountEl = document.getElementById('quant-concentration-count');
+      const concSubEl = document.getElementById('quant-concentration-sub');
+      const regimeMultEl = document.getElementById('quant-regime-mult');
+      const regimeSubEl = document.getElementById('quant-regime-sub');
+      if (varEl) varEl.textContent = fmtMoney(Math.abs(var95));
+      if (varSubEl) varSubEl.textContent = var95 < 0 ? `Estimated 1-day downside at 95% confidence` : 'Not enough closed-trade history yet';
+      if (actCountEl) actCountEl.textContent = String(todo.length);
+      if (actSubEl) actSubEl.textContent = todo.length ? `${todo[0].trade.sym}: ${todo[0].action}` : 'No urgent decisions';
+      if (concCountEl) concCountEl.textContent = String(concentration.length);
+      if (concSubEl) concSubEl.textContent = concentration.length ? `${concentration[0].trade.sym} at ${(concentration[0].ratio * 100).toFixed(1)}%` : 'No oversized positions';
+      if (regimeMultEl) regimeMultEl.textContent = `${regimeMeta.mult.toFixed(2)}x`;
+      if (regimeSubEl) regimeSubEl.textContent = regimeMeta.label;
+
+      queueEl.innerHTML = todo.length
+        ? todo.map(item => `<div class="flag-row quant-queue-row"><div><p class="font-semibold text-slate-800 dark:text-slate-100">${item.trade.sym}</p><p class="text-xs text-slate-500 mt-1">${item.trade.strat} • ${item.days} days • PnL ${fmtMoney(item.trade.pnl)}</p></div><div><p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-400 mb-1">Action</p><p class="text-sm text-slate-700 dark:text-slate-200">${item.action} (${item.score})</p></div><div><p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-400 mb-1">Reason</p><p class="text-sm text-slate-600 dark:text-slate-300">${item.reason}</p></div></div>`).join('')
+        : '<p class="text-sm text-slate-500">No active trades are above the urgency threshold.</p>';
+
+      const matrixEl = document.getElementById('quant-decision-matrix');
+      if (matrixEl) {
+        if (!ladders.length) {
+          matrixEl.innerHTML = '<p class="text-sm text-slate-500">No active trades loaded.</p>';
+        } else {
+          const rows = ladders.map(item => {
+            const stratBench = benchmarks[item.trade.strat] || { dit: 40, pnl: 500 };
+            const pctTime = (item.days / Math.max(1, stratBench.dit)) * 100;
+            const pctProfit = item.targetProfit > 0 ? (Number(item.trade.pnl) / item.targetProfit) * 100 : 0;
+            let quadrant = 'Developing';
+            if (pctProfit >= 80 && pctTime <= 100) quadrant = 'Star';
+            else if (pctProfit >= 80 && pctTime > 100) quadrant = 'Mature';
+            else if (pctProfit < 80 && pctTime > 100) quadrant = 'Zombie';
+            return `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${item.trade.sym}</td><td class="px-3 py-2">${item.trade.strat}</td><td class="px-3 py-2">${quadrant}</td><td class="px-3 py-2 text-right">${pctTime.toFixed(0)}%</td><td class="px-3 py-2 text-right">${pctProfit.toFixed(0)}%</td><td class="px-3 py-2 text-right ${clrMoney(item.trade.pnl)}">${fmtMoney(item.trade.pnl)}</td><td class="px-3 py-2 text-right">${item.action}</td></tr>`;
+          }).join('');
+          matrixEl.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Trade</th><th class="px-3 py-2">Strategy</th><th class="px-3 py-2">Quadrant</th><th class="px-3 py-2 text-right">Time %</th><th class="px-3 py-2 text-right">Profit %</th><th class="px-3 py-2 text-right">PnL</th><th class="px-3 py-2 text-right">Action</th></tr></thead><tbody>${rows}</tbody></table>`;
+        }
+      }
+
+      const knnEl = document.getElementById('quant-knn-table');
+      if (knnEl) {
+        if (!knn.length) {
+          knnEl.innerHTML = '<p class="text-sm text-slate-500">Need at least 5 closed trades for KNN prediction.</p>';
+        } else {
+          knnEl.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Trade</th><th class="px-3 py-2">Strategy</th><th class="px-3 py-2 text-right">Win Prob</th><th class="px-3 py-2 text-right">Expected PnL</th><th class="px-3 py-2 text-right">Kelly %</th><th class="px-3 py-2 text-right">Rec Size</th><th class="px-3 py-2 text-right">Confidence</th><th class="px-3 py-2 text-right">AI Rec</th></tr></thead><tbody>${knn.map(r => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${r.trade.sym}</td><td class="px-3 py-2">${r.trade.strat}</td><td class="px-3 py-2 text-right">${r.winProb.toFixed(1)}%</td><td class="px-3 py-2 text-right ${clrMoney(r.expectedPnl)}">${fmtMoney(r.expectedPnl)}</td><td class="px-3 py-2 text-right">${r.kellyPct.toFixed(1)}%</td><td class="px-3 py-2 text-right">${fmtMoney(r.recSize)}</td><td class="px-3 py-2 text-right">${r.confidence.toFixed(0)}%</td><td class="px-3 py-2 text-right">${r.rec}</td></tr>`).join('')}</tbody></table>`;
+        }
+      }
+
+      const rpEl = document.getElementById('quant-risk-profiles');
+      if (rpEl) {
+        rpEl.innerHTML = riskProfiles.length
+          ? `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Strategy</th><th class="px-3 py-2 text-right">Winners</th><th class="px-3 py-2 text-right">Smart Stop (MAE)</th><th class="px-3 py-2 text-right">Velocity Limit</th></tr></thead><tbody>${riskProfiles.map(r => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${r.strat}</td><td class="px-3 py-2 text-right">${r.winnerCount}</td><td class="px-3 py-2 text-right">${r.smartStop == null ? 'N/A' : fmtMoney(r.smartStop)}</td><td class="px-3 py-2 text-right">${fmtMoney(r.velocityLimit)}/day</td></tr>`).join('')}</tbody></table>`
+          : '<p class="text-sm text-slate-500">Need closed winners to estimate MAE and velocity bounds.</p>';
+      }
+
+      const hwEl = document.getElementById('quant-harvest-window');
+      if (hwEl) {
+        hwEl.innerHTML = harvestRows.length
+          ? `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Strategy</th><th class="px-3 py-2 text-right">Winners</th><th class="px-3 py-2 text-right">P25</th><th class="px-3 py-2 text-right">Median</th><th class="px-3 py-2 text-right">P75</th></tr></thead><tbody>${harvestRows.map(r => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${r.strat}</td><td class="px-3 py-2 text-right">${r.count}</td><td class="px-3 py-2 text-right">${r.p25.toFixed(0)}d</td><td class="px-3 py-2 text-right">${r.p50.toFixed(0)}d</td><td class="px-3 py-2 text-right">${r.p75.toFixed(0)}d</td></tr>`).join('')}</tbody></table>`
+          : '<p class="text-sm text-slate-500">Need more closed winners for harvest-window estimates.</p>';
+      }
+
+      const corrEl = document.getElementById('quant-corr-matrix');
+      if (corrEl) {
+        if (!corr.matrix.length) {
+          corrEl.innerHTML = '<p class="text-sm text-slate-500">Need at least 2 strategies with closed-trade history.</p>';
+        } else {
+          const cell = v => {
+            const value = Math.max(-1, Math.min(1, Number(v) || 0));
+            const alpha = 0.1 + Math.abs(value) * 0.45;
+            const bg = value >= 0 ? `rgba(16,185,129,${alpha.toFixed(3)})` : `rgba(244,63,94,${alpha.toFixed(3)})`;
+            return `<td class="px-3 py-2 text-right font-semibold" style="background:${bg}">${value.toFixed(2)}</td>`;
+          };
+          const head = `<tr><th class="px-3 py-2 text-left">Strategy</th>${corr.strategies.map(s => `<th class="px-3 py-2 text-right">${s}</th>`).join('')}</tr>`;
+          const rows = corr.strategies.map((s, i) => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${s}</td>${corr.matrix[i].map(v => cell(v)).join('')}</tr>`).join('');
+          corrEl.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider">${head}</thead><tbody>${rows}</tbody></table>`;
+        }
+      }
+
+      const accEl = document.getElementById('quant-account-split');
+      if (accEl) {
+        const isSmsf = t => /SMSF/i.test(String(t.strat || ''));
+        const closedPrime = closedTrades.filter(t => !isSmsf(t));
+        const closedSmsf = closedTrades.filter(t => isSmsf(t));
+        const totalM = calculatePortfolioMetricsFromClosed(closedTrades, totalCap);
+        const primeM = calculatePortfolioMetricsFromClosed(closedPrime, q.primeCap);
+        const smsfM = calculatePortfolioMetricsFromClosed(closedSmsf, q.smsfCap);
+        const row = (label, trades, m) => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${label}</td><td class="px-3 py-2 text-right">${trades.length}</td><td class="px-3 py-2 text-right ${clrMoney(m.pnl)}">${fmtMoney(m.pnl)}</td><td class="px-3 py-2 text-right">${(m.cagr * 100).toFixed(1)}%</td><td class="px-3 py-2 text-right">${m.sharpe.toFixed(2)}</td><td class="px-3 py-2 text-right text-rose-500">${(m.maxDd * 100).toFixed(1)}%</td></tr>`;
+        accEl.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Segment</th><th class="px-3 py-2 text-right">Closed Trades</th><th class="px-3 py-2 text-right">Banked PnL</th><th class="px-3 py-2 text-right">CAGR</th><th class="px-3 py-2 text-right">Sharpe</th><th class="px-3 py-2 text-right">Max DD</th></tr></thead><tbody>${row('Total', closedTrades, totalM)}${row('Prime', closedPrime, primeM)}${row('SMSF', closedSmsf, smsfM)}</tbody></table>`;
+      }
+
+      const rollEl = document.getElementById('quant-roll-campaigns');
+      if (rollEl) {
+        rollEl.innerHTML = rollCampaigns.length
+          ? `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Parent ID</th><th class="px-3 py-2 text-right">Legs</th><th class="px-3 py-2 text-right">Total PnL</th><th class="px-3 py-2 text-right">Total Days</th><th class="px-3 py-2 text-right">Avg PnL / Leg</th></tr></thead><tbody>${rollCampaigns.map(r => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${r.parentId}</td><td class="px-3 py-2 text-right">${r.legs}</td><td class="px-3 py-2 text-right ${clrMoney(r.totalPnl)}">${fmtMoney(r.totalPnl)}</td><td class="px-3 py-2 text-right">${r.totalDays}</td><td class="px-3 py-2 text-right ${clrMoney(r.avgPnlPerLeg)}">${fmtMoney(r.avgPnlPerLeg)}</td></tr>`).join('')}</tbody></table>`
+          : '<p class="text-sm text-slate-500">No roll campaigns detected. Populate the Parent ID field in your workbook exports to enable this view.</p>';
+      }
+    }
+
     function setDashboardSubtab(tab) {
       currentDashboardSubtab = tab || 'overview';
       document.querySelectorAll('[data-dashboard-subtab]').forEach(btn => {
@@ -1299,10 +2951,12 @@ loadPersistedSettings();
 
     function navigate(view, id = null, parentContext = null) {
       navHistory.push({ view, id, parentContext });
-      document.querySelectorAll('#nav-menu button').forEach(el => {
-        if (!el.id) return;
-        let vName = el.id.replace('nav-', '');
-        if (vName === view || (vName === 'strategies' && view === 'strategy-detail')) {
+      document.querySelectorAll('#nav-menu [data-main-nav]').forEach(el => {
+        const vName = el.dataset.mainNav;
+        const isActive = vName === view
+          || (vName === 'strategies' && view === 'strategy-detail')
+          || (vName === 'trades' && view === 'trade-detail');
+        if (isActive) {
           el.classList.add('bg-indigo-50', 'text-indigo-700', 'dark:bg-indigo-900/30', 'dark:text-indigo-300');
           el.classList.remove('text-slate-600', 'dark:text-slate-400');
         } else {
@@ -1310,6 +2964,7 @@ loadPersistedSettings();
           el.classList.add('text-slate-600', 'dark:text-slate-400');
         }
       });
+      syncSidebarDashboardSubtabsVisibility();
       document.querySelectorAll('#content-area > div').forEach(el => el.classList.add('hidden'));
       const viewEl = document.getElementById(`view-${view}`);
       if (viewEl) viewEl.classList.remove('hidden');
@@ -1328,6 +2983,100 @@ loadPersistedSettings();
       }
       lucide.createIcons();
       document.getElementById('content-area').scrollTo(0, 0);
+    }
+
+    function fmtSigned(value, digits = 2) {
+      const num = Number(value) || 0;
+      const abs = Math.abs(num).toFixed(digits);
+      return `${num > 0 ? '+' : num < 0 ? '-' : ''}${abs}`;
+    }
+
+    function getOpenStrategySummaries() {
+      return Object.values(appData.strategies || {})
+        .map(s => {
+          const openTrades = (s.trades || []).filter(t => t.status === 'OPEN');
+          return {
+            name: s.name,
+            trades: openTrades,
+            count: openTrades.length,
+            pnl: openTrades.reduce((sum, t) => sum + (Number(t.pnl) || 0), 0),
+            delta: openTrades.reduce((sum, t) => sum + (Number(t.delta) || 0), 0),
+            theta: openTrades.reduce((sum, t) => sum + (Number(t.theta) || 0), 0)
+          };
+        })
+        .filter(s => s.count > 0)
+        .sort((a, b) => {
+          const pnlDiff = Math.abs(b.pnl) - Math.abs(a.pnl);
+          if (pnlDiff !== 0) return pnlDiff;
+          if (b.count !== a.count) return b.count - a.count;
+          return a.name.localeCompare(b.name);
+        });
+    }
+
+    function formatTradeExpiryDisplay(trade) {
+      const expiryIso = toValidTradeDate(trade?.expiration);
+      return expiryIso ? formatDisplayDate(expiryIso) : '—';
+    }
+
+    function renderOpenStrategyDetail(summary) {
+      const detailCard = document.getElementById('dash-open-strategy-detail');
+      const nameEl = document.getElementById('dash-open-strategy-name');
+      const subEl = document.getElementById('dash-open-strategy-sub');
+      const totalsEl = document.getElementById('dash-open-strategy-totals');
+      const tableEl = document.getElementById('dash-open-strategy-trades-table');
+      if (!detailCard || !nameEl || !subEl || !totalsEl || !tableEl) return;
+
+      if (!summary) {
+        detailCard.classList.add('hidden');
+        return;
+      }
+      detailCard.classList.remove('hidden');
+      nameEl.textContent = summary.name;
+      subEl.textContent = `${summary.count} open trade${summary.count === 1 ? '' : 's'} in this strategy/group.`;
+
+      const summaryCards = [
+        { label: 'Open PnL', value: fmtMoney(summary.pnl), className: clrMoney(summary.pnl) },
+        { label: 'Net Delta', value: fmtSigned(summary.delta), className: summary.delta >= 0 ? 'text-cyan-500' : 'text-rose-500' },
+        { label: 'Net Theta', value: fmtSigned(summary.theta), className: summary.theta >= 0 ? 'text-amber-500' : 'text-rose-500' }
+      ];
+      totalsEl.innerHTML = summaryCards.map(item => `<div class="open-strategy-summary"><p class="text-[10px] uppercase tracking-[0.14em] font-bold text-slate-400">${item.label}</p><p class="text-xl font-black mt-1 ${item.className}">${item.value}</p></div>`).join('');
+
+      const rows = summary.trades
+        .slice()
+        .sort((a, b) => compareDateValues(a.openDate, b.openDate))
+        .map(t => {
+          const tradeId = escapeHtml(t.id || '');
+          return `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2"><button type="button" class="font-semibold text-slate-800 dark:text-slate-100 hover:text-indigo-500" data-nav-view="trade-detail" data-nav-id="${tradeId}" data-nav-parent="grouped">${escapeHtml(t.sym || 'Trade')}</button><p class="text-[11px] text-slate-400 mt-1">Opened ${formatDisplayDate(t.openDate)}</p></td><td class="px-3 py-2 text-right font-bold ${clrMoney(t.pnl)}">${fmtMoney(t.pnl)}</td><td class="px-3 py-2 text-right ${Number(t.delta) >= 0 ? 'text-cyan-500' : 'text-rose-500'}">${fmtSigned(t.delta)}</td><td class="px-3 py-2 text-right ${Number(t.theta) >= 0 ? 'text-amber-500' : 'text-rose-500'}">${fmtSigned(t.theta)}</td><td class="px-3 py-2 text-right">${getTradeDaysHeld(t)}</td><td class="px-3 py-2 text-right">${formatTradeExpiryDisplay(t)}</td></tr>`;
+        })
+        .join('');
+      tableEl.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Trade</th><th class="px-3 py-2 text-right">PnL</th><th class="px-3 py-2 text-right">Delta</th><th class="px-3 py-2 text-right">Theta</th><th class="px-3 py-2 text-right">DIT</th><th class="px-3 py-2 text-right">Expiry</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    function renderOpenStrategyTiles() {
+      const tileWrap = document.getElementById('dash-open-strategy-tiles');
+      if (!tileWrap) return;
+      const summaries = getOpenStrategySummaries();
+      if (!summaries.length) {
+        currentOpenStrategyFocus = null;
+        tileWrap.innerHTML = '<p class="text-sm text-slate-500">No open strategies found. Upload an Active workbook to populate this board.</p>';
+        renderOpenStrategyDetail(null);
+        return;
+      }
+
+      if (!currentOpenStrategyFocus || !summaries.some(s => s.name === currentOpenStrategyFocus)) {
+        currentOpenStrategyFocus = summaries[0].name;
+      }
+
+      tileWrap.innerHTML = summaries.map(s => {
+        const isActive = s.name === currentOpenStrategyFocus;
+        const pnlFull = fmtMoney(s.pnl);
+        const deltaFull = fmtSigned(s.delta);
+        const thetaFull = fmtSigned(s.theta);
+        return `<button type="button" class="strategy-tile${isActive ? ' active' : ''}" data-open-strategy-tile="${escapeHtml(s.name)}"><div class="flex items-start justify-between gap-3"><div><p class="font-semibold text-slate-800 dark:text-slate-100 break-words">${escapeHtml(s.name)}</p><p class="text-xs text-slate-500 mt-1">${s.count} open trade${s.count === 1 ? '' : 's'}</p></div><span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500">OPEN</span></div><div class="strategy-tile-kpi"><div><p class="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-bold">PnL</p><p class="strategy-kpi-value ${clrMoney(s.pnl)}" title="${escapeHtml(pnlFull)}">${pnlFull}</p></div><div><p class="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-bold">Delta</p><p class="strategy-kpi-value ${s.delta >= 0 ? 'text-cyan-500' : 'text-rose-500'}" title="${escapeHtml(deltaFull)}">${deltaFull}</p></div><div><p class="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-bold">Theta</p><p class="strategy-kpi-value ${s.theta >= 0 ? 'text-amber-500' : 'text-rose-500'}" title="${escapeHtml(thetaFull)}">${thetaFull}</p></div></div></button>`;
+      }).join('');
+
+      const selected = summaries.find(s => s.name === currentOpenStrategyFocus) || summaries[0];
+      renderOpenStrategyDetail(selected);
     }
 
     function renderDashboardCharts() {
@@ -1637,6 +3386,8 @@ loadPersistedSettings();
 
       document.getElementById('dash-flagged-trades').innerHTML = mistakeAnalytics.flagged.length ? mistakeAnalytics.flagged.map(item => `<div class="flag-row"><div><p class="font-semibold text-slate-800 dark:text-slate-100">${item.sym}</p><p class="text-xs text-slate-500 mt-1">${item.strat} • ${item.daysHeld} days held • Final ${fmtMoney(item.pnl)}</p></div><div><p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-400 mb-1">Flags</p><p class="text-sm text-slate-600 dark:text-slate-300">${item.reasons.join(' • ')}</p></div><div class="flex items-start justify-end"><button type="button" class="micro-pill" data-nav-view="trade-detail" data-nav-id="${item.id}" data-nav-parent="grouped">Review</button></div></div>`).join('') : '<p class="text-sm text-slate-500">No elevated mistake patterns detected in closed trades.</p>';
       document.getElementById('dash-stress-scenarios').innerHTML = stressScenarios.map(s => `<div class="scenario-card"><div class="flex items-start justify-between gap-3"><div><p class="font-semibold text-slate-800 dark:text-slate-100">${s.label}</p><p class="text-xs text-slate-500 mt-1">${s.detail}</p></div><p class="text-lg font-black ${s.value >= 0 ? 'text-emerald-500' : 'text-rose-500'}">${fmtMoney(s.value)}</p></div></div>`).join('');
+      renderOpenStrategyTiles();
+      renderQuantOps();
     }
 
     function runInternalSanityChecks() {
@@ -1671,6 +3422,7 @@ loadPersistedSettings();
         card.innerHTML = `<div class="mb-4 pointer-events-none"><div class="flex justify-between items-start mb-2"><h3 class="font-bold text-lg text-slate-800 dark:text-white truncate pr-2">${s.name}</h3><div class="flex space-x-1">${s.openCount > 0 ? `<span class="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 rounded-full">${s.openCount} OPEN</span>` : ''}</div></div><p class="text-sm text-slate-500">${s.closedCount} Closed • ${winPct} Win Rate</p></div><div class="flex justify-between items-end pt-4 border-t border-slate-100 dark:border-slate-800/50 pointer-events-none"><div><p class="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Realized</p><p class="font-bold ${clrMoney(s.realized)}">${fmtMoney(s.realized)}</p></div><div class="text-right"><p class="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Unrealized</p><p class="font-bold ${clrMoney(s.unrealized)}">${fmtMoney(s.unrealized)}</p></div></div>`;
         grid.appendChild(card);
       });
+      loadStrategyConfigEditor();
       lucide.createIcons();
     }
 
@@ -1752,6 +3504,7 @@ loadPersistedSettings();
         grp.appendChild(listWrap);
         container.appendChild(grp);
       });
+      loadJournalEditor();
       lucide.createIcons();
     }
 
@@ -1853,10 +3606,36 @@ loadPersistedSettings();
     });
 
     document.addEventListener('click', e => {
+      const dashboardToggle = e.target.closest('#dashboard-subtabs-toggle');
+      if (dashboardToggle) {
+        e.preventDefault();
+        setDashboardSubtabsExpanded(!appData.settings.dashboardSubtabsExpanded);
+        return;
+      }
+      const strategyTile = e.target.closest('[data-open-strategy-tile]');
+      if (strategyTile) {
+        e.preventDefault();
+        currentOpenStrategyFocus = strategyTile.getAttribute('data-open-strategy-tile') || null;
+        renderOpenStrategyTiles();
+        return;
+      }
       const subtab = e.target.closest('[data-dashboard-subtab]');
       if (subtab) {
         e.preventDefault();
+        const current = navHistory[navHistory.length - 1];
+        if (!current || current.view !== 'dashboard') navigate('dashboard');
         setDashboardSubtab(subtab.dataset.dashboardSubtab);
+        return;
+      }
+      const deleteConfigBtn = e.target.closest('[data-sc-del]');
+      if (deleteConfigBtn) {
+        e.preventDefault();
+        const idx = Number(deleteConfigBtn.getAttribute('data-sc-del'));
+        if (Number.isInteger(idx) && idx >= 0 && idx < appData.strategyConfigRows.length) {
+          appData.strategyConfigRows.splice(idx, 1);
+          renderStrategyConfigEditor();
+          setStrategyConfigStatus('Strategy row removed. Click Save to persist changes.', 'warn');
+        }
         return;
       }
       if (e.target.id === 'groups-include-all') {
@@ -1929,10 +3708,78 @@ loadPersistedSettings();
       syncWorkbookToCloud(false);
     });
 
+    document.getElementById('stratcfg-refresh').addEventListener('click', () => {
+      loadStrategyConfigEditor();
+    });
+    document.getElementById('stratcfg-add-row').addEventListener('click', () => {
+      appData.strategyConfigRows.push({
+        name: '',
+        identifier: '',
+        target_pnl: 0,
+        target_days: 0,
+        min_stability: 0.8,
+        typical_debit: 5000,
+        description: ''
+      });
+      renderStrategyConfigEditor();
+      setStrategyConfigStatus('Added a blank strategy row. Fill values and click Save.', 'warn');
+    });
+    document.getElementById('stratcfg-save').addEventListener('click', () => {
+      saveStrategyConfigEditor();
+    });
+    document.getElementById('stratcfg-reprocess').addEventListener('click', () => {
+      reprocessOtherTradesNow();
+    });
+    document.getElementById('stratcfg-reset').addEventListener('click', () => {
+      resetStrategyConfigDefaults();
+    });
+
+    document.getElementById('journal-refresh').addEventListener('click', () => {
+      loadJournalEditor();
+    });
+    document.getElementById('journal-save').addEventListener('click', () => {
+      saveJournalEditor();
+    });
+
     document.getElementById('auto-cloud-sync').addEventListener('change', e => {
       appData.settings.autoCloudSync = !!e.target.checked;
       persistSettings();
       setCloudStatus(appData.settings.autoCloudSync ? 'Auto cloud sync enabled.' : 'Auto cloud sync disabled.', 'neutral');
+    });
+    const sidepanelToggleEl = document.getElementById('sidepanel-toggle');
+    if (sidepanelToggleEl) {
+      sidepanelToggleEl.addEventListener('click', () => {
+        appData.settings.sidebarCollapsed = !appData.settings.sidebarCollapsed;
+        persistSettings();
+        applySidebarState();
+      });
+    }
+
+    const quantInputMap = {
+      primeCap: document.getElementById('quant-prime-cap'),
+      smsfCap: document.getElementById('quant-smsf-cap'),
+      regime: document.getElementById('quant-regime'),
+      probLow: document.getElementById('quant-prob-low'),
+      probHigh: document.getElementById('quant-prob-high'),
+      exitPercentile: document.getElementById('quant-exit-pct')
+    };
+    const currQuant = getQuantSettings();
+    if (quantInputMap.primeCap) quantInputMap.primeCap.value = String(currQuant.primeCap);
+    if (quantInputMap.smsfCap) quantInputMap.smsfCap.value = String(currQuant.smsfCap);
+    if (quantInputMap.regime) quantInputMap.regime.value = String(currQuant.regime);
+    if (quantInputMap.probLow) quantInputMap.probLow.value = String(currQuant.probLow);
+    if (quantInputMap.probHigh) quantInputMap.probHigh.value = String(currQuant.probHigh);
+    if (quantInputMap.exitPercentile) quantInputMap.exitPercentile.value = String(currQuant.exitPercentile);
+    Object.entries(quantInputMap).forEach(([key, el]) => {
+      if (!el) return;
+      el.addEventListener('change', () => {
+        const next = { ...(appData.settings.quant || {}) };
+        next[key] = key === 'regime' ? String(el.value || 'neutral') : Number(el.value);
+        appData.settings.quant = next;
+        persistSettings();
+        const currentView = navHistory[navHistory.length - 1];
+        if (currentView && currentView.view === 'dashboard') renderDashboardCharts();
+      });
     });
 
     const apiInputEl = document.getElementById('api-base-input');
@@ -1947,10 +3794,12 @@ loadPersistedSettings();
       checkCloudStatus(false);
     }
 
+    setDashboardSubtabsExpanded(appData.settings.dashboardSubtabsExpanded, false);
+    applySidebarState();
     runInternalSanityChecks();
     setDashboardSubtab(currentDashboardSubtab);
-    console.assert(document.querySelectorAll('[data-dashboard-subtab]').length === 4, 'Dashboard subtab count mismatch');
-    console.assert(document.querySelectorAll('[data-dashboard-pane]').length === 4, 'Dashboard pane count mismatch');
+    console.assert(document.querySelectorAll('[data-dashboard-subtab]').length === 6, 'Dashboard subtab count mismatch');
+    console.assert(document.querySelectorAll('[data-dashboard-pane]').length === 6, 'Dashboard pane count mismatch');
     lucide.createIcons();
     renderGroupFilterPanel();
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) toggleTheme();
