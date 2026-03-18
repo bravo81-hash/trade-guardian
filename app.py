@@ -41,170 +41,286 @@ except ImportError:
     GOOGLE_DEPS_INSTALLED = False
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Allantis Trade Guardian (Cloud)", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Trade Guardian XLSX", layout="wide", page_icon="🛡️")
 
 # --- UI OVERHAUL: CSS INJECTION ---
 def inject_custom_css():
-    st.markdown("""
+    st.markdown(
+        """
         <style>
-        /* IMPORT FONTS */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-        /* MAIN APP BACKGROUND */
+        :root {
+            --tg-bg: #f8fafc;
+            --tg-bg-secondary: #f1f5f9;
+            --tg-panel: rgba(255, 255, 255, 0.95);
+            --tg-panel-strong: rgba(255, 255, 255, 0.98);
+            --tg-border: rgba(226, 232, 240, 0.82);
+            --tg-border-strong: rgba(226, 232, 240, 0.95);
+            --tg-shadow: 0 16px 36px -28px rgba(15, 23, 42, 0.28);
+            --tg-shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            --tg-text: #0f172a;
+            --tg-muted: #64748b;
+            --tg-accent: #6366f1;
+            --tg-accent-soft: rgba(99, 102, 241, 0.12);
+            --tg-accent-strong: #4f46e5;
+            --tg-positive: #10b981;
+            --tg-negative: #f43f5e;
+            --tg-warning: #f59e0b;
+            --tg-font-body: clamp(14px, 0.35vw + 13px, 15.5px);
+            --tg-font-title-xl: clamp(1.9rem, 2.6vw, 2.75rem);
+            --tg-font-title-lg: clamp(1.4rem, 1.7vw, 2rem);
+            --tg-font-title-md: clamp(1rem, 0.7vw, 1.12rem);
+            --tg-font-label: 11px;
+            --tg-leading-body: 1.52;
+            --tg-leading-heading: 1.16;
+            --tg-icon-stroke: 1.85;
+            --tg-motion-fast: 180ms;
+            --tg-motion-base: 240ms;
+            --tg-motion-slow: 360ms;
+            --tg-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+            --tg-ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        * { box-sizing: border-box; }
+
         .stApp {
-            background-color: #0f172a; /* Slate 900 */
-            color: #e2e8f0; /* Slate 200 */
+            font-family: 'Inter', sans-serif;
+            background:
+                radial-gradient(1200px 500px at -10% -20%, rgba(99, 102, 241, 0.10), transparent 55%),
+                radial-gradient(900px 400px at 110% -10%, rgba(56, 189, 248, 0.10), transparent 60%),
+                var(--tg-bg);
+            color: var(--tg-text);
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        [data-testid="stSidebar"] {
+            background: rgba(255, 255, 255, 0.92);
+            border-right: 1px solid var(--tg-border);
+            backdrop-filter: blur(10px);
+        }
+
+        h1, h2, h3, h4, h5, h6 {
+            color: var(--tg-text) !important;
+            letter-spacing: -0.025em;
+            line-height: var(--tg-leading-heading);
+            font-weight: 700 !important;
+        }
+
+        p, label, span, div, li {
             font-family: 'Inter', sans-serif;
         }
 
-        /* SIDEBAR */
-        [data-testid="stSidebar"] {
-            background-color: #020617; /* Slate 950 */
-            border-right: 1px solid #1e293b;
+        code, pre, .font-mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
         }
 
-        /* HEADERS */
-        h1, h2, h3 {
-            color: #f1f5f9 !important;
-            font-weight: 800 !important;
-            letter-spacing: -0.025em;
-        }
-
-        /* GRADIENT TEXT CLASS */
         .gradient-text {
-            background: linear-gradient(to right, #38bdf8, #818cf8);
+            background: linear-gradient(to right, #6366f1, #38bdf8);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             font-weight: 800;
         }
 
-        /* METRIC CARDS - COMPACT VERSION */
+        button, a, input, select, textarea {
+            transition:
+                border-color var(--tg-motion-fast) var(--tg-ease-standard),
+                background-color var(--tg-motion-fast) var(--tg-ease-standard),
+                color var(--tg-motion-fast) var(--tg-ease-standard),
+                transform var(--tg-motion-base) var(--tg-ease-standard),
+                box-shadow var(--tg-motion-base) var(--tg-ease-standard);
+        }
+
+        button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+            outline: 2px solid var(--tg-accent);
+            outline-offset: 2px;
+        }
+
         div[data-testid="stMetric"] {
-            background-color: rgba(30, 41, 59, 0.4); /* Slate 800 with opacity */
-            padding: 10px 15px !important; /* REDUCED PADDING */
-            border-radius: 8px;
-            border: 1px solid rgba(148, 163, 184, 0.1);
+            background: var(--tg-panel);
+            border: 1px solid var(--tg-border);
+            border-radius: 1rem;
+            box-shadow: var(--tg-shadow-soft);
             backdrop-filter: blur(10px);
-            transition: transform 0.2s ease, border-color 0.2s ease;
-            min-height: 80px; /* Force smaller height */
+            padding: 0.95rem 1rem !important;
+            min-height: 84px;
         }
+
         div[data-testid="stMetric"]:hover {
-            transform: translateY(-2px);
-            border-color: rgba(56, 189, 248, 0.3);
-            box-shadow: 0 10px 30px -10px rgba(56, 189, 248, 0.1);
+            transform: translateY(-1px);
+            border-color: rgba(99, 102, 241, 0.28);
+            box-shadow: 0 10px 30px -16px rgba(79, 70, 229, 0.24);
         }
+
         [data-testid="stMetricLabel"] {
-            color: #94a3b8 !important; /* Slate 400 */
-            font-size: 0.75rem !important; /* Smaller Label */
-            margin-bottom: 0px !important;
-        }
-        [data-testid="stMetricValue"] {
-            color: #f8fafc !important; /* Slate 50 */
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 1.5rem !important; /* Compact Value */
-            padding-bottom: 0px !important;
-        }
-        [data-testid="stMetricDelta"] {
+            color: var(--tg-muted) !important;
             font-size: 0.75rem !important;
+            margin-bottom: 0 !important;
         }
 
-        /* EXPANDERS (GLASSMORPHISM) */
+        [data-testid="stMetricValue"] {
+            color: var(--tg-text) !important;
+            font-size: 1.55rem !important;
+            font-weight: 800 !important;
+            line-height: 1.1;
+        }
+
+        [data-testid="stMetricDelta"] {
+            font-size: 0.78rem !important;
+        }
+
         div[data-testid="stExpander"] {
-            background-color: rgba(30, 41, 59, 0.3);
-            border: 1px solid rgba(56, 189, 248, 0.1);
-            border-radius: 12px;
+            background: var(--tg-panel);
+            border: 1px solid var(--tg-border);
+            border-radius: 1rem;
+            box-shadow: var(--tg-shadow-soft);
         }
-        
-        /* TABS - BOLD HEADERS */
+
         .stTabs [data-baseweb="tab-list"] {
-            gap: 24px;
+            gap: 0.5rem;
         }
+
         .stTabs [data-baseweb="tab"] {
-            height: 50px;
+            height: 46px;
             white-space: pre-wrap;
-            background-color: transparent;
-            border-radius: 4px;
-            color: #94a3b8;
-            font-weight: 800 !important; /* BOLD LETTERS */
-            font-size: 1rem;
+            background: transparent;
+            border-radius: 0.9rem;
+            color: var(--tg-muted);
+            font-weight: 700 !important;
+            font-size: 0.94rem;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.08em;
         }
+
         .stTabs [data-baseweb="tab"]:hover {
-            color: #38bdf8;
+            color: var(--tg-accent-strong);
+            background: rgba(99, 102, 241, 0.07);
         }
+
         .stTabs [aria-selected="true"] {
-            background-color: transparent !important;
-            color: #38bdf8 !important;
-            border-bottom: 2px solid #38bdf8;
+            background: linear-gradient(180deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.08)) !important;
+            color: var(--tg-accent-strong) !important;
+            border-bottom: 1px solid rgba(99, 102, 241, 0.35);
+            box-shadow: inset 0 -1px 0 rgba(99, 102, 241, 0.35);
         }
 
-        /* DATAFRAMES */
+        .stButton > button,
+        .stDownloadButton > button,
+        .stFileUploader button,
+        [data-testid="stSidebar"] button {
+            border-radius: 0.9rem !important;
+            font-weight: 700 !important;
+            border: 1px solid transparent;
+            box-shadow: none;
+        }
+
+        .stButton > button {
+            background: var(--tg-accent);
+            color: #fff;
+        }
+
+        .stButton > button:hover {
+            background: var(--tg-accent-strong);
+            box-shadow: 0 14px 24px -20px rgba(99, 102, 241, 0.45);
+        }
+
+        .stDownloadButton > button {
+            background: rgba(16, 185, 129, 0.10);
+            color: #047857;
+            border-color: rgba(16, 185, 129, 0.22);
+        }
+
+        .stDownloadButton > button:hover {
+            background: rgba(16, 185, 129, 0.16);
+        }
+
+        [data-testid="stFileUploader"] section {
+            border-radius: 1rem;
+            border: 1px dashed rgba(124, 147, 175, 0.58);
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.76));
+            padding: 0.4rem;
+        }
+
+        [data-testid="stFileUploader"] small {
+            color: var(--tg-muted);
+        }
+
+        [data-baseweb="input"] > div,
+        [data-baseweb="textarea"] textarea,
+        [data-baseweb="select"] > div {
+            border-radius: 0.9rem !important;
+        }
+
         [data-testid="stDataFrame"] {
-            border: 1px solid #1e293b;
-            border-radius: 8px;
+            border: 1px solid var(--tg-border);
+            border-radius: 1rem;
+            overflow: hidden;
+            box-shadow: var(--tg-shadow-soft);
         }
 
-        /* BUTTONS */
-        .stButton button {
-            background-color: #38bdf8;
-            color: #0f172a;
-            font-weight: 600;
-            border-radius: 8px;
-            border: none;
-            transition: all 0.3s ease;
-        }
-        .stButton button:hover {
-            background-color: #0ea5e9;
-            box-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
-        }
-        div[data-testid="stButton"] button[kind="secondary"] {
-            background-color: transparent;
-            border: 1px solid #475569;
-            color: #cbd5e1;
+        [data-baseweb="notification"] {
+            border-radius: 0.9rem;
         }
 
-        /* ALERTS */
-        div[data-baseweb="notification"] {
-            border-radius: 8px;
+        hr {
+            border-color: var(--tg-border);
+            opacity: 0.85;
         }
-        
+
+        .stApp [data-testid="stVerticalBlock"] {
+            gap: 0.9rem;
+        }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(126, 145, 169, 0.62); border-radius: 9999px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(97, 122, 154, 0.82); }
+
+        @media (max-width: 768px) {
+            [data-testid="stMetricValue"] { font-size: 1.35rem !important; }
+            .stTabs [data-baseweb="tab"] { font-size: 0.8rem; height: 42px; }
+        }
         </style>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
 inject_custom_css()
 
-# --- PLOTLY THEME CONFIG ---
+
 def apply_chart_theme(fig):
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(family="Inter, sans-serif", color="#94a3b8"),
-        title_font=dict(family="Inter, sans-serif", size=20, color="#f1f5f9"),
-        hoverlabel=dict(bgcolor="#1e293b", font_size=14, font_family="JetBrains Mono"),
-        colorway=['#38bdf8', '#34d399', '#818cf8', '#f472b6', '#fbbf24'],
-        xaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
-        yaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.1)', zerolinecolor='rgba(148, 163, 184, 0.2)'),
+        font=dict(family="Inter, sans-serif", color="#475569"),
+        title_font=dict(family="Inter, sans-serif", size=20, color="#0f172a"),
+        hoverlabel=dict(bgcolor="#1e293b", font_size=13, font_family="Inter"),
+        colorway=['#6366f1', '#10b981', '#38bdf8', '#f59e0b', '#f43f5e'],
+        xaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.16)', zerolinecolor='rgba(148, 163, 184, 0.24)'),
+        yaxis=dict(showgrid=True, gridcolor='rgba(148, 163, 184, 0.16)', zerolinecolor='rgba(148, 163, 184, 0.24)'),
     )
     return fig
 
 # --- DEBUG BANNER ---
 st.markdown("""
-    <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 8px 16px; margin-bottom: 20px; font-size: 0.8rem; color: #38bdf8; display: flex; align-items: center; gap: 10px;">
-        <i class="fas fa-rocket"></i> 
-        <span>RUNNING VERSION: v150.0 (Quant Logic + State Management Overhaul)</span>
+    <div style="background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.16); border-radius: 9999px; padding: 0.5rem 0.9rem; margin-bottom: 1rem; font-size: 0.78rem; color: #4f46e5; display: inline-flex; align-items: center; gap: 0.55rem; font-weight: 700;">
+        <span style="width:0.55rem;height:0.55rem;border-radius:9999px;background:#10b981;display:inline-block;"></span>
+        <span>RUNNING VERSION: v150.0 (Workbook workflow + group universe controls)</span>
     </div>
 """, unsafe_allow_html=True)
 
 # --- HERO HEADER ---
 st.markdown("""
-    <div style="margin-bottom: 30px;">
-        <div style="display: inline-block; padding: 4px 12px; background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); border-radius: 20px; color: #38bdf8; font-size: 0.75rem; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.05em;">
-            INSTITUTIONAL GRADE
-        </div>
-        <h1 style="font-size: 3.5rem; line-height: 1.1; margin-bottom: 10px;">
+    <div class="pro-card" style="margin-bottom: 1.35rem; padding: 1.35rem 1.45rem;">
+        <div class="micro-pill" style="margin-bottom: 0.8rem;">Workbook Intelligence Mode</div>
+        <h1 style="font-size: var(--tg-font-title-xl); line-height: 1.08; margin-bottom: 0.5rem;">
             Allantis <span class="gradient-text">Trade Guardian</span>
         </h1>
+        <p style="max-width: 56rem; color: var(--tg-muted); margin: 0;">
+            Streamlined two-workbook workflow for all active and all closed OptionStrat exports, with group universe controls and the same cleaner Inter-based visual language as the XLSX viewer.
+        </p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -1150,6 +1266,78 @@ def reprocess_other_trades():
     conn.close()
     return updated_count
 
+def get_trade_group_series(trades_df):
+    if trades_df is None or trades_df.empty:
+        return pd.Series(dtype=str)
+
+    index = trades_df.index
+    if 'original_group' in trades_df.columns:
+        group_series = trades_df['original_group'].fillna('').astype(str).str.strip()
+    else:
+        group_series = pd.Series([''] * len(trades_df), index=index, dtype=str)
+
+    group_series = group_series.replace({'nan': '', 'None': ''})
+
+    if 'Strategy' in trades_df.columns:
+        fallback = trades_df['Strategy'].fillna('').astype(str).str.strip()
+    else:
+        fallback = pd.Series([''] * len(trades_df), index=index, dtype=str)
+
+    group_series = group_series.where(group_series != '', fallback)
+    group_series = group_series.replace({'nan': 'Uncategorized', 'None': 'Uncategorized', '': 'Uncategorized'})
+    return group_series
+
+def is_test_group(group_name):
+    text = str(group_name or '').strip().lower()
+    return any(token in text for token in ['test', 'demo', 'paper', 'sandbox', 'tmp'])
+
+def get_group_universe_options(trades_df):
+    if trades_df is None or trades_df.empty:
+        return []
+    groups = get_trade_group_series(trades_df).dropna().astype(str).str.strip()
+    groups = [g for g in groups.tolist() if g and g != 'nan']
+    return sorted(dict.fromkeys(groups))
+
+def apply_group_universe_filter(trades_df):
+    if trades_df is None or trades_df.empty:
+        return trades_df
+    excluded = set(st.session_state.get('group_universe_excluded', []))
+    if not excluded:
+        return trades_df.copy()
+    group_series = get_trade_group_series(trades_df)
+    return trades_df.loc[~group_series.isin(excluded)].copy()
+
+def render_group_universe_control(trades_df):
+    groups = get_group_universe_options(trades_df)
+    if 'group_universe_excluded' not in st.session_state:
+        st.session_state['group_universe_excluded'] = []
+
+    with st.sidebar.expander("Group Universe Control", expanded=True):
+        if not groups:
+            st.caption("Upload both workbooks to manage group filters.")
+            return []
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Include Everything", key="group_universe_include_all"):
+                st.session_state['group_universe_excluded'] = []
+        with c2:
+            if st.button("Exclude Test Groups", key="group_universe_exclude_test"):
+                st.session_state['group_universe_excluded'] = [g for g in groups if is_test_group(g)]
+
+        excluded = st.multiselect(
+            "Exclude groups from calculations",
+            options=groups,
+            default=st.session_state.get('group_universe_excluded', []),
+            key="group_universe_excluded",
+        )
+        st.caption(
+            f"Included groups: {len(groups) - len(set(excluded))} • "
+            f"Excluded groups: {len(set(excluded))} • "
+            f"Active calculation universe: {int((~get_trade_group_series(trades_df).isin(set(excluded))).sum())} trades"
+        )
+        return excluded
+
 # --- DATA LOADER ---
 @st.cache_data(ttl=60)
 def load_data():
@@ -1416,6 +1604,8 @@ def generate_adaptive_rulebook_text(history_df, strategies):
 # --- INITIALIZE DB ---
 init_db()
 
+ui_df = load_data()
+
 # --- SIDEBAR ---
 st.sidebar.markdown("###  Daily Workflow")
 
@@ -1525,17 +1715,20 @@ with st.sidebar.expander("1.  STARTUP (Restore Local)", expanded=False):
 
 st.sidebar.markdown(" *then...*")
 with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
-    active_up = st.file_uploader("Active Trades", accept_multiple_files=True, key="act")
-    history_up = st.file_uploader("History (Closed)", accept_multiple_files=True, key="hist")
-    if st.button(" Process & Reconcile"):
+    st.caption("Upload one workbook for all active trades and one workbook for all closed trades.")
+    active_up = st.file_uploader("All Active Workbook", type=['xlsx', 'xls', 'csv'], key="act")
+    history_up = st.file_uploader("All Closed Workbook", type=['xlsx', 'xls', 'csv'], key="hist")
+    if st.button(" Process Workbooks"):
         logs = []
-        if active_up: logs.extend(sync_data(active_up, "Active"))
-        if history_up: logs.extend(sync_data(history_up, "History"))
+        if active_up: logs.extend(sync_data([active_up], "Active"))
+        if history_up: logs.extend(sync_data([history_up], "History"))
         if logs:
             for l in logs: st.write(l)
             st.cache_data.clear()
             st.success("Sync Complete!")
             auto_sync_if_connected()
+
+render_group_universe_control(ui_df)
 
 st.sidebar.markdown(" *finally...*")
 with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
@@ -1697,7 +1890,7 @@ def calculate_decision_ladder(row, benchmarks_dict):
     return action, score, reason, juice_val, juice_type
 
 # --- MAIN APP ---
-df = load_data()
+df = apply_group_universe_filter(load_data())
 BASE_CONFIG = {
     '130/160': {'pnl': 500, 'dit': 36, 'stability': 0.8}, 
     '160/190': {'pnl': 700, 'dit': 44, 'stability': 0.8}, 
@@ -1739,75 +1932,6 @@ if not df.empty and 'Status' in df.columns:
 tab_dash, tab_active, tab_analytics, tab_ai, tab_strategies, tab_rules = st.tabs([" Dashboard", " ⚡ Active Management", " Analytics", " AI & Insights", " Strategies", " Rules"])
 
 with tab_dash:
-    with st.expander(" Universal Pre-Flight Calculator", expanded=False):
-        pf_c1, pf_c2, pf_c3 = st.columns(3)
-        with pf_c1:
-            pf_goal = st.selectbox("Strategy Profile", [
-                " Hedged Income (Butterflies, Calendars, M200)", 
-                " Standard Income (Credit Spreads, Iron Condors)", 
-                " Directional (Long Calls/Puts, Verticals)", 
-                " Speculative Vol (Straddles, Earnings)"
-            ])
-            pf_dte = st.number_input("DTE (Days)", min_value=1, value=45, step=1)
-        with pf_c2:
-            pf_price = st.number_input("Net Price ($)", value=5000.0, step=100.0, help="Total Debit or Credit (Risk Amount)")
-            pf_theta = st.number_input("Theta ($)", value=15.0, step=1.0)
-        with pf_c3:
-            pf_delta = st.number_input("Net Delta", value=-10.0, step=1.0, format="%.2f")
-            pf_vega = st.number_input("Vega", value=100.0, step=1.0, format="%.2f")
-            
-        if st.button("Run Pre-Flight Check"):
-            st.markdown("---")
-            res_c1, res_c2, res_c3 = st.columns(3)
-            if "Hedged Income" in pf_goal:
-                stability = pf_theta / (abs(pf_delta) + 1)
-                yield_pct = (pf_theta / abs(pf_price)) * 100
-                annualized_roi = (yield_pct * 365)
-                vega_cushion = pf_vega / pf_theta if pf_theta != 0 else 0
-                with res_c1:
-                    if stability > 1.0: st.success(f" Stability: {stability:.2f} (Fortress)")
-                    elif stability > 0.5: st.info(f" Stability: {stability:.2f} (Good)")
-                    else: st.error(f" Stability: {stability:.2f} (Coin Flip)")
-                with res_c2:
-                    if annualized_roi > 50: st.success(f" Ann. ROI: {annualized_roi:.0f}%")
-                    elif annualized_roi > 25: st.info(f" Ann. ROI: {annualized_roi:.0f}%")
-                    else: st.error(f" Ann. ROI: {annualized_roi:.0f}%")
-                with res_c3:
-                    if pf_dte < 21: st.warning(" High Gamma Risk (Low DTE)")
-                    elif pf_vega > 0: st.success(f" Hedge: {vega_cushion:.1f}x (Good)")
-                    else: st.error(f" Hedge: {pf_vega:.0f} (Negative Vega)")
-            elif "Standard Income" in pf_goal:
-                stability = pf_theta / (abs(pf_delta) + 1)
-                yield_pct = (pf_theta / abs(pf_price)) * 100
-                annualized_roi = (yield_pct * 365)
-                fragility = abs(pf_vega) / pf_theta if pf_theta != 0 else 999
-                with res_c1:
-                    if stability > 0.5: st.success(f" Stability: {stability:.2f} (Good)")
-                    else: st.error(f" Stability: {stability:.2f} (Unstable)")
-                with res_c2:
-                    if annualized_roi > 40: st.success(f" Ann. ROI: {annualized_roi:.0f}%")
-                    else: st.warning(f" Ann. ROI: {annualized_roi:.0f}%")
-                with res_c3:
-                    if pf_dte < 21: st.warning(" High Gamma Risk (Low DTE)")
-                    elif pf_vega < 0 and fragility < 5: st.success(f" Fragility: {fragility:.1f} (Robust)")
-                    else: st.warning(f" Fragility: {fragility:.1f} (High)")
-            elif "Directional" in pf_goal:
-                leverage = abs(pf_delta) / abs(pf_price) * 100
-                theta_drag = (pf_theta / abs(pf_price)) * 100
-                with res_c1: st.metric("Leverage", f"{leverage:.2f} /$100")
-                with res_c2:
-                    if theta_drag > -0.1: st.success(f" Burn: {theta_drag:.2f}% (Low)")
-                    else: st.warning(f" Burn: {theta_drag:.2f}% (High)")
-                with res_c3:
-                    proj_roi = (abs(pf_delta) * 5) / abs(pf_price) * 100 
-                    st.metric("ROI on $5 Move", f"{proj_roi:.1f}%")
-            elif "Speculative Vol" in pf_goal:
-                vega_efficiency = abs(pf_vega) / abs(pf_price) * 100
-                move_needed = abs(pf_theta / pf_vega) if pf_vega != 0 else 0
-                with res_c1: st.metric("Vega Exposure", f"{vega_efficiency:.1f}%")
-                with res_c2: st.metric("Daily Cost", f"${pf_theta:.0f}")
-                with res_c3: st.info(f"Need {move_needed:.1f}% IV move to break even")
-
     if not df.empty and 'Status' in df.columns:
         active_df = df[df['Status'].isin(['Active', 'Missing'])].copy()
         if active_df.empty:
@@ -2194,7 +2318,7 @@ with tab_strategies:
     st.info(" **How to use:** \n1. **Reset to Defaults** if this table is blank. \n2. **Edit Identifiers:** Ensure '130/160' is longer than '160'. \n3. **Save Changes.** \n4. **Reprocess All Trades** to fix old grouping errors.")
 
 with tab_analytics:
-    an_overview, an_trends, an_risk, an_lifecycle, an_rolls = st.tabs([" Overview", " Trends & Seasonality", " Risk & Excursion", " Lifecycle (Timing)", " Rolls"])
+    an_overview, an_trends, an_risk, an_lifecycle = st.tabs([" Overview", " Trends & Seasonality", " Risk & Excursion", " Lifecycle (Timing)"])
 
     with an_overview:
         if not df.empty and 'Status' in df.columns:
@@ -2634,28 +2758,6 @@ with tab_analytics:
                     st.dataframe(pd.DataFrame(stats_list), use_container_width=True, hide_index=True)
                 else:
                     st.info("Need more closed winning trades to calculate the Harvest Window.")
-
-    with an_rolls: 
-        st.subheader(" Roll Campaign Analysis")
-        rolled_trades = df[df['Parent ID'] != ""].copy()
-        if not rolled_trades.empty:
-            campaign_summary = []
-            for parent in rolled_trades['Parent ID'].unique():
-                if not parent: continue
-                campaign = df[(df['id'] == parent) | (df['Parent ID'] == parent)]
-                if campaign.empty: continue
-                campaign_summary.append({'Campaign': parent[:15], 'Total P&L': campaign['P&L'].sum(), 'Total Days': campaign['Days Held'].sum(), 'Legs': len(campaign), 'Avg P&L/Leg': campaign['P&L'].mean()})
-            
-            if campaign_summary:
-                camp_df = pd.DataFrame(campaign_summary)
-                st.dataframe(camp_df.style.format({'Total P&L': '${:,.0f}', 'Avg P&L/Leg': '${:,.0f}'}), use_container_width=True)
-                avg_single = expired_df[expired_df['Parent ID'].isna() | (expired_df['Parent ID'] == "")]['P&L'].mean()
-                avg_rolled = camp_df['Total P&L'].mean()
-                c1, c2 = st.columns(2)
-                c1.metric("Avg Single Trade P&L", f"${avg_single:,.0f}")
-                c2.metric("Avg Roll Campaign P&L", f"${avg_rolled:,.0f}", delta=f"{avg_rolled-avg_single:,.0f}")
-        else:
-            st.info("No roll campaigns detected. Link trades using the 'Parent ID' column in the Journal.")
 
 with tab_ai:
     st.markdown("###  The Quant Brain (v150)")
