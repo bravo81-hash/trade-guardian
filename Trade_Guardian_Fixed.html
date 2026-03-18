@@ -526,9 +526,12 @@
                         <div class="flex-1">
                             <span id="td-status-badge" class="inline-block px-3 py-1 text-xs font-bold rounded-full mb-3 tracking-wider uppercase shadow-sm">STATUS</span>
                             <h2 id="td-title" class="text-2xl md:text-3xl font-extrabold text-slate-800 dark:text-white tracking-tight break-all">Trade Symbol</h2>
-                            <p id="td-strategy" class="text-slate-500 dark:text-slate-400 mt-2 font-medium flex items-center cursor-pointer hover:text-indigo-500 transition-colors">
-                                <i data-lucide="briefcase" class="mr-2 h-4 w-4"></i> Strategy Name
-                            </p>
+                            <div class="mt-2 flex flex-wrap items-center gap-3">
+                                <p id="td-strategy" class="text-slate-500 dark:text-slate-400 font-medium flex items-center cursor-pointer hover:text-indigo-500 transition-colors">
+                                    <i data-lucide="briefcase" class="mr-2 h-4 w-4"></i> Strategy Name
+                                </p>
+                                <a id="td-optionstrat-link" href="#" target="_blank" rel="noopener noreferrer" class="micro-pill hidden"><i data-lucide="external-link" class="h-3.5 w-3.5"></i> Open in OptionStrat</a>
+                            </div>
                         </div>
                         <div class="w-full md:w-72 bg-white/50 dark:bg-slate-900/50 p-5 rounded-2xl border border-slate-100 dark:border-slate-700/50 backdrop-blur-sm flex flex-col justify-center">
                             <div class="flex justify-between items-end mb-2">
@@ -1133,6 +1136,7 @@
                     id: tradeId,
                     sym: symbol,
                     strat: strategy,
+                    link: String(trade.link || '').trim(),
                     status,
                     pnl: finalPnl,
                     maxGain,
@@ -1189,6 +1193,7 @@
             const colTheta = getCol(['theta', 'tht']);
             const colMfe = getCol(['mfe', 'max_gain', 'highest', 'max_profit']);
             const colMae = getCol(['mae', 'max_drawdown', 'lowest', 'max_loss']);
+            const colLink = getCol(['link', 'url', 'optionstrat']);
 
             const tradesById = {};
             rows.forEach((row, i) => {
@@ -1210,6 +1215,7 @@
                     strat: String(row[colStrat] || 'Uncategorized'),
                     mfe: row[colMfe] == null ? null : Number(row[colMfe]),
                     mae: row[colMae] == null ? null : Number(row[colMae]),
+                    link: String(row[colLink] || '').trim(),
                     raw: row,
                     sym: String(row[colSym] || `Trade_${i}`),
                     rowId: key
@@ -1230,6 +1236,7 @@
                     id: String(first.rowId || `trd_${index}`),
                     sym: first.sym,
                     strat: first.strat,
+                    link: String(last.link || '').trim(),
                     status: last.status,
                     pnl: last.pnl,
                     maxGain: Math.max(maxGain, last.pnl, 0),
@@ -1332,6 +1339,18 @@
         const fmtMoney = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(n) || 0);
         const fmtPct = (w, total) => total > 0 ? ((w / total) * 100).toFixed(1) + '%' : '0%';
         const clrMoney = n => Number(n) >= 0 ? 'text-emerald-500' : 'text-rose-500';
+        const isValidHttpLink = value => /^https?:\/\//i.test(String(value || '').trim());
+        const escapeAttr = value => String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        function renderOptionStratLink(url, label = 'Open') {
+            const link = String(url || '').trim();
+            if (!isValidHttpLink(link)) return '<span class="text-slate-400">—</span>';
+            return `<a href="${escapeAttr(link)}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 dark:text-indigo-400 hover:underline" onclick="event.stopPropagation()">${escapeAttr(label)}</a>`;
+        }
         const fmtMonthStr = ym => {
             if (!ym || ym === 'Unknown') return 'Unknown';
             const p = ym.split('-');
@@ -2161,7 +2180,7 @@
                         <div class="glass-card rounded-xl overflow-hidden shadow-sm">
                             <table class="w-full text-sm text-left">
                                <thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider">
-                                 <tr><th class="px-5 py-2">Symbol</th><th class="px-5 py-2 text-right">Net PnL</th><th class="px-5 py-2 text-right hidden md:table-cell">Excursion (Max Gain / Drawdown)</th></tr>
+                                 <tr><th class="px-5 py-2">Symbol</th><th class="px-5 py-2 text-center">Link</th><th class="px-5 py-2 text-right">Net PnL</th><th class="px-5 py-2 text-right hidden md:table-cell">Excursion (Max Gain / Drawdown)</th></tr>
                                </thead>
                                <tbody class="divide-y divide-slate-100 dark:divide-slate-800/50">
                     `;
@@ -2169,6 +2188,7 @@
                         html += `
                         <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/80 cursor-pointer transition-colors" data-nav-view="trade-detail" data-nav-id="${t.id}" data-nav-parent="strategy">
                            <td class="px-5 py-3 font-medium text-slate-800 dark:text-slate-200">${t.sym}</td>
+                           <td class="px-5 py-3 text-center">${renderOptionStratLink(t.link)}</td>
                            <td class="px-5 py-3 text-right font-bold ${clrMoney(t.pnl)}">${fmtMoney(t.pnl)}</td>
                            <td class="px-5 py-3 text-right text-xs hidden md:table-cell">
                               <span class="text-emerald-500">${fmtMoney(t.maxGain)}</span> <span class="text-slate-300 dark:text-slate-600 px-1">/</span>
@@ -2218,17 +2238,18 @@
                 listWrap.className = 'p-0';
 
                 const buildRows = (trades, badgeHtml) => trades.forEach(t => {
-                    const row = document.createElement('button');
-                    row.type = 'button';
+                    const optionLink = renderOptionStratLink(t.link, 'OptionStrat');
+                    const row = document.createElement('div');
                     row.className = 'trade-row w-full flex justify-between items-center px-6 py-3 border-b border-slate-100 dark:border-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-800/30 cursor-pointer transition-colors text-left';
                     row.dataset.navView = 'trade-detail';
                     row.dataset.navId = t.id;
                     row.dataset.navParent = 'grouped';
                     row.innerHTML = `
-                        <div class="pointer-events-none flex items-center space-x-4 w-2/3">
-                            <div class="w-20 hidden sm:block">${badgeHtml}</div>
-                            <div class="font-medium text-slate-800 dark:text-slate-200 truncate sym-text">${t.sym}</div>
-                            <div class="text-xs text-slate-400 hidden md:block">${t.openDate}</div>
+                        <div class="flex items-center space-x-4 w-2/3">
+                            <div class="w-20 hidden sm:block pointer-events-none">${badgeHtml}</div>
+                            <div class="font-medium text-slate-800 dark:text-slate-200 truncate sym-text pointer-events-none">${t.sym}</div>
+                            <div class="text-xs text-slate-400 hidden md:block pointer-events-none">${t.openDate}</div>
+                            <div class="text-xs">${optionLink}</div>
                         </div>
                         <div class="pointer-events-none font-bold text-right ${clrMoney(t.pnl)}">${fmtMoney(t.pnl)}</div>
                     `;
@@ -2287,6 +2308,17 @@
             const stratEl = document.getElementById('td-strategy');
             stratEl.innerHTML = `<i data-lucide="briefcase" class="mr-2 h-4 w-4"></i> ${t.strat}`;
             stratEl.onclick = () => navigate('strategy-detail', t.strat);
+            const linkEl = document.getElementById('td-optionstrat-link');
+            const tradeLink = String(t.link || '').trim();
+            if (linkEl) {
+                if (isValidHttpLink(tradeLink)) {
+                    linkEl.href = tradeLink;
+                    linkEl.classList.remove('hidden');
+                } else {
+                    linkEl.removeAttribute('href');
+                    linkEl.classList.add('hidden');
+                }
+            }
 
             const pnlEl = document.getElementById('td-pnl');
             pnlEl.textContent = fmtMoney(t.pnl);
