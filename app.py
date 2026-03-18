@@ -51,19 +51,19 @@ def inject_custom_css():
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
         :root {
-            --tg-bg: #f8fafc;
-            --tg-bg-secondary: #f1f5f9;
-            --tg-panel: rgba(255, 255, 255, 0.95);
-            --tg-panel-strong: rgba(255, 255, 255, 0.98);
-            --tg-border: rgba(226, 232, 240, 0.82);
-            --tg-border-strong: rgba(226, 232, 240, 0.95);
-            --tg-shadow: 0 16px 36px -28px rgba(15, 23, 42, 0.28);
-            --tg-shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
-            --tg-text: #0f172a;
-            --tg-muted: #64748b;
+            --tg-bg: #0f172a;
+            --tg-bg-secondary: #111827;
+            --tg-panel: rgba(30, 41, 59, 0.95);
+            --tg-panel-strong: rgba(30, 41, 59, 0.98);
+            --tg-border: rgba(51, 65, 85, 0.82);
+            --tg-border-strong: rgba(51, 65, 85, 0.95);
+            --tg-shadow: 0 20px 38px -28px rgba(0, 0, 0, 0.55);
+            --tg-shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+            --tg-text: #e2e8f0;
+            --tg-muted: #94a3b8;
             --tg-accent: #6366f1;
-            --tg-accent-soft: rgba(99, 102, 241, 0.12);
-            --tg-accent-strong: #4f46e5;
+            --tg-accent-soft: rgba(99, 102, 241, 0.14);
+            --tg-accent-strong: #c7d2fe;
             --tg-positive: #10b981;
             --tg-negative: #f43f5e;
             --tg-warning: #f59e0b;
@@ -87,7 +87,7 @@ def inject_custom_css():
         .stApp {
             font-family: 'Inter', sans-serif;
             background:
-                radial-gradient(1200px 500px at -10% -20%, rgba(99, 102, 241, 0.10), transparent 55%),
+                radial-gradient(1200px 500px at -10% -20%, rgba(99, 102, 241, 0.12), transparent 55%),
                 radial-gradient(900px 400px at 110% -10%, rgba(56, 189, 248, 0.10), transparent 60%),
                 var(--tg-bg);
             color: var(--tg-text);
@@ -97,7 +97,7 @@ def inject_custom_css():
         }
 
         [data-testid="stSidebar"] {
-            background: rgba(255, 255, 255, 0.92);
+            background: rgba(15, 23, 42, 0.92);
             border-right: 1px solid var(--tg-border);
             backdrop-filter: blur(10px);
         }
@@ -196,14 +196,14 @@ def inject_custom_css():
 
         .stTabs [data-baseweb="tab"]:hover {
             color: var(--tg-accent-strong);
-            background: rgba(99, 102, 241, 0.07);
+            background: rgba(99, 102, 241, 0.12);
         }
 
         .stTabs [aria-selected="true"] {
-            background: linear-gradient(180deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.08)) !important;
+            background: linear-gradient(180deg, rgba(99, 102, 241, 0.24), rgba(99, 102, 241, 0.14)) !important;
             color: var(--tg-accent-strong) !important;
-            border-bottom: 1px solid rgba(99, 102, 241, 0.35);
-            box-shadow: inset 0 -1px 0 rgba(99, 102, 241, 0.35);
+            border-bottom: 1px solid rgba(129, 140, 248, 0.45);
+            box-shadow: inset 0 -1px 0 rgba(129, 140, 248, 0.45);
         }
 
         .stButton > button,
@@ -227,19 +227,19 @@ def inject_custom_css():
         }
 
         .stDownloadButton > button {
-            background: rgba(16, 185, 129, 0.10);
-            color: #047857;
-            border-color: rgba(16, 185, 129, 0.22);
+            background: rgba(16, 185, 129, 0.14);
+            color: #a7f3d0;
+            border-color: rgba(16, 185, 129, 0.24);
         }
 
         .stDownloadButton > button:hover {
-            background: rgba(16, 185, 129, 0.16);
+            background: rgba(16, 185, 129, 0.2);
         }
 
         [data-testid="stFileUploader"] section {
             border-radius: 1rem;
-            border: 1px dashed rgba(124, 147, 175, 0.58);
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.76));
+            border: 1px dashed rgba(124, 147, 175, 0.42);
+            background: linear-gradient(180deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.8));
             padding: 0.4rem;
         }
 
@@ -271,6 +271,34 @@ def inject_custom_css():
 
         .stApp [data-testid="stVerticalBlock"] {
             gap: 0.9rem;
+        }
+
+        .pro-card {
+            border-radius: 1.25rem;
+            border: 1px solid rgba(51, 65, 85, 0.82);
+            background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.94));
+            box-shadow: 0 16px 36px -28px rgba(0, 0, 0, 0.45);
+        }
+
+        .micro-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            border: 1px solid rgba(129, 140, 248, 0.28);
+            background: rgba(99, 102, 241, 0.14);
+            color: #c7d2fe;
+        }
+
+        .gradient-text {
+            background: linear-gradient(to right, #c7d2fe, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
         }
 
         ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -305,7 +333,7 @@ def apply_chart_theme(fig):
 
 # --- DEBUG BANNER ---
 st.markdown("""
-    <div style="background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.16); border-radius: 9999px; padding: 0.5rem 0.9rem; margin-bottom: 1rem; font-size: 0.78rem; color: #4f46e5; display: inline-flex; align-items: center; gap: 0.55rem; font-weight: 700;">
+    <div style="background: rgba(99, 102, 241, 0.14); border: 1px solid rgba(129, 140, 248, 0.26); border-radius: 9999px; padding: 0.5rem 0.9rem; margin-bottom: 1rem; font-size: 0.78rem; color: #c7d2fe; display: inline-flex; align-items: center; gap: 0.55rem; font-weight: 700;">
         <span style="width:0.55rem;height:0.55rem;border-radius:9999px;background:#10b981;display:inline-block;"></span>
         <span>RUNNING VERSION: v150.0 (Workbook workflow + group universe controls)</span>
     </div>
