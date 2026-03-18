@@ -42,7 +42,7 @@ except ImportError:
     GOOGLE_DEPS_INSTALLED = False
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Trade Guardian XLSX", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="BVS Trade Guardian", layout="wide", page_icon="🛡️")
 
 # --- UI OVERHAUL: CSS INJECTION ---
 def inject_custom_css():
@@ -336,7 +336,7 @@ def apply_chart_theme(fig):
 st.markdown("""
     <div style="background: rgba(99, 102, 241, 0.14); border: 1px solid rgba(129, 140, 248, 0.26); border-radius: 9999px; padding: 0.5rem 0.9rem; margin-bottom: 1rem; font-size: 0.78rem; color: #c7d2fe; display: inline-flex; align-items: center; gap: 0.55rem; font-weight: 700;">
         <span style="width:0.55rem;height:0.55rem;border-radius:9999px;background:#10b981;display:inline-block;"></span>
-        <span>RUNNING VERSION: v151.0 (Strategy-first cockpit + cleaned signal stack)</span>
+        <span>RUNNING VERSION: v151.1 (Open/Closed strategy view + lifecycle replay)</span>
     </div>
 """, unsafe_allow_html=True)
 
@@ -345,7 +345,7 @@ st.markdown("""
     <div class="pro-card" style="margin-bottom: 1.35rem; padding: 1.35rem 1.45rem;">
         <div class="micro-pill" style="margin-bottom: 0.8rem;">Workbook Intelligence Mode</div>
         <h1 style="font-size: var(--tg-font-title-xl); line-height: 1.08; margin-bottom: 0.5rem;">
-            Allantis <span class="gradient-text">Trade Guardian</span>
+            BVS <span class="gradient-text">Trade Guardian</span>
         </h1>
         <p style="max-width: 56rem; color: var(--tg-muted); margin: 0;">
             Streamlined two-workbook workflow for all active and all closed OptionStrat exports, with group universe controls and the same cleaner Inter-based visual language as the XLSX viewer.
@@ -2097,6 +2097,67 @@ def build_realized_equity_curve(expired_trades, initial_capital):
     return day_pnl
 
 
+def build_trade_lifecycle_series(trade_row, snapshots_df):
+    """
+    Build timestamped lifecycle path for PnL, Theta, Delta from entry to current/exit.
+    Uses snapshot history when available and anchors start/end points.
+    """
+    cols = ['timestamp', 'pnl', 'theta', 'delta']
+    if trade_row is None:
+        return pd.DataFrame(columns=cols)
+
+    trade_id = trade_row.get('id')
+    entry_dt = pd.to_datetime(trade_row.get('Entry Date'), errors='coerce')
+    exit_dt = pd.to_datetime(trade_row.get('Exit Date'), errors='coerce')
+    status = str(trade_row.get('Status', ''))
+
+    if pd.isna(entry_dt):
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    rows.append({
+        'timestamp': entry_dt,
+        'pnl': 0.0,
+        'theta': float(trade_row.get('Theta', 0.0) or 0.0),
+        'delta': float(trade_row.get('Delta', 0.0) or 0.0),
+    })
+
+    if snapshots_df is not None and not snapshots_df.empty:
+        snap = snapshots_df[snapshots_df['trade_id'] == trade_id].copy()
+        if not snap.empty:
+            snap = snap.sort_values('snapshot_date')
+            for _, s in snap.iterrows():
+                rows.append({
+                    'timestamp': pd.to_datetime(s['snapshot_date'], errors='coerce'),
+                    'pnl': float(s.get('pnl', 0.0) or 0.0),
+                    'theta': float(s.get('theta', 0.0) or 0.0),
+                    'delta': float(s.get('delta', 0.0) or 0.0),
+                })
+
+    # Anchor end point for clearer replay completion.
+    if status == 'Expired' and not pd.isna(exit_dt):
+        rows.append({
+            'timestamp': exit_dt,
+            'pnl': float(trade_row.get('P&L', 0.0) or 0.0),
+            'theta': 0.0,
+            'delta': 0.0,
+        })
+    else:
+        rows.append({
+            'timestamp': pd.Timestamp.now(),
+            'pnl': float(trade_row.get('P&L', 0.0) or 0.0),
+            'theta': float(trade_row.get('Theta', 0.0) or 0.0),
+            'delta': float(trade_row.get('Delta', 0.0) or 0.0),
+        })
+
+    lifecycle = pd.DataFrame(rows, columns=cols).dropna(subset=['timestamp'])
+    if lifecycle.empty:
+        return lifecycle
+    lifecycle = lifecycle.sort_values('timestamp')
+    lifecycle = lifecycle.drop_duplicates(subset=['timestamp'], keep='last').reset_index(drop=True)
+    return lifecycle
+
+
 birdseye_df = build_strategy_birdseye(df)
 strategy_list = birdseye_df['Strategy'].tolist()
 if 'selected_strategy' not in st.session_state:
@@ -2220,68 +2281,168 @@ with tab_strategy:
         s3.metric("Closed", len(strat_closed))
         s4.metric("Net P&L", f"${strat_df['P&L'].sum():,.0f}")
         s5.metric("Open Greeks", f"Δ {strat_active['Delta'].sum():,.2f} | Θ {strat_active['Theta'].sum():,.2f}")
+        st_open, st_closed, st_lifecycle = st.tabs([" Open Positions", " Closed Trades", " Lifecycle Replay"])
 
-        v1, v2 = st.columns(2)
-        with v1:
-            if not strat_df.empty:
-                fig_scatter = px.scatter(
-                    strat_df,
+        with st_open:
+            st.markdown("##### Open Positions (Action View)")
+            if strat_active.empty:
+                st.info("No open positions in this strategy.")
+            else:
+                ladder_results = strat_active.apply(lambda row: calculate_decision_ladder(row, dynamic_benchmarks), axis=1)
+                strat_active = strat_active.copy()
+                strat_active['Action'] = [x[0] for x in ladder_results]
+                strat_active['Urgency Score'] = [x[1] for x in ladder_results]
+                strat_active['Reason'] = [x[2] for x in ladder_results]
+                strat_active['Juice Val'] = [x[3] for x in ladder_results]
+                strat_active['Juice Type'] = [x[4] for x in ladder_results]
+                strat_active = strat_active.sort_values('Urgency Score', ascending=False)
+
+                fig_open = px.scatter(
+                    strat_active,
                     x='Days Held',
                     y='P&L',
-                    color='Status',
+                    color='Urgency Score',
                     size='Debit',
-                    hover_data=['Name', 'Theta', 'Delta', 'Gamma', 'Vega'],
-                    title=f"{selected_strategy}: Trade Distribution"
+                    hover_data=['Name', 'Action', 'Reason', 'Theta', 'Delta', 'Gamma', 'Vega'],
+                    color_continuous_scale='RdYlGn_r',
+                    title=f"{selected_strategy}: Open Position Risk Map"
                 )
-                fig_scatter.add_hline(y=0, line_dash='dash', line_color='#94a3b8', opacity=0.6)
-                fig_scatter = apply_chart_theme(fig_scatter)
-                st.plotly_chart(fig_scatter, use_container_width=True)
+                fig_open.add_hline(y=0, line_dash='dash', line_color='#94a3b8', opacity=0.6)
+                fig_open = apply_chart_theme(fig_open)
+                st.plotly_chart(fig_open, use_container_width=True)
 
-        with v2:
-            if not strat_closed.empty:
-                eq = strat_closed.dropna(subset=['Exit Date']).sort_values('Exit Date').copy()
-                eq['Cumulative Realized'] = eq['P&L'].cumsum()
-                fig_eq = px.line(
-                    eq,
-                    x='Exit Date',
-                    y='Cumulative Realized',
-                    markers=True,
-                    title=f"{selected_strategy}: Realized Equity"
+                open_cols = [
+                    'Name', 'Action', 'Urgency Score', 'Reason', 'Status',
+                    'Entry Date', 'Days Held', 'P&L', 'Debit', 'ROI',
+                    'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'lot_size', 'Link'
+                ]
+                open_view = strat_active[open_cols].copy()
+                open_view['Entry Date'] = pd.to_datetime(open_view['Entry Date']).dt.date
+                st.dataframe(
+                    open_view,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        'Urgency Score': st.column_config.ProgressColumn('Urgency', min_value=0, max_value=100, format='%d'),
+                        'P&L': st.column_config.NumberColumn('P&L', format='$%0.0f'),
+                        'Debit': st.column_config.NumberColumn('Debit', format='$%0.0f'),
+                        'ROI': st.column_config.NumberColumn('ROI', format='%.2f%%'),
+                        'Theta': st.column_config.NumberColumn('Theta', format='%.2f'),
+                        'Delta': st.column_config.NumberColumn('Delta', format='%.2f'),
+                        'Gamma': st.column_config.NumberColumn('Gamma', format='%.3f'),
+                        'Vega': st.column_config.NumberColumn('Vega', format='%.2f'),
+                        'IV': st.column_config.NumberColumn('IV', format='%.3f'),
+                        'Link': st.column_config.LinkColumn('OptionStrat', display_text='Open')
+                    }
                 )
-                fig_eq = apply_chart_theme(fig_eq)
-                st.plotly_chart(fig_eq, use_container_width=True)
-            else:
+
+        with st_closed:
+            st.markdown("##### Closed Trades (Strategy Analytics)")
+            if strat_closed.empty:
                 st.info("No closed trades in this strategy yet.")
+            else:
+                win_rate = (strat_closed['P&L'] > 0).mean() * 100
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Closed Count", len(strat_closed))
+                c2.metric("Win Rate", f"{win_rate:.1f}%")
+                c3.metric("Realized P&L", f"${strat_closed['P&L'].sum():,.0f}")
+                c4.metric("Avg Hold", f"{strat_closed['Days Held'].mean():.1f}d")
 
-        st.markdown("##### Individual Trades (OptionStrat links preserved)")
-        trade_cols = [
-            'Name', 'Status', 'Entry Date', 'Exit Date', 'Days Held',
-            'lot_size', 'P&L', 'Debit', 'ROI', 'Daily Yield %', 'Ann. ROI',
-            'Theta', 'Delta', 'Gamma', 'Vega', 'IV',
-            'Put P&L', 'Call P&L', 'Grade', 'Reason', 'Notes', 'Tags', 'Parent ID', 'Link'
-        ]
-        show_df = strat_df[trade_cols].copy()
-        show_df['Entry Date'] = pd.to_datetime(show_df['Entry Date']).dt.date
-        show_df['Exit Date'] = pd.to_datetime(show_df['Exit Date']).dt.date
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    eq = strat_closed.dropna(subset=['Exit Date']).sort_values('Exit Date').copy()
+                    eq['Cumulative Realized'] = eq['P&L'].cumsum()
+                    fig_eq = px.line(
+                        eq,
+                        x='Exit Date',
+                        y='Cumulative Realized',
+                        markers=True,
+                        title=f"{selected_strategy}: Cumulative Realized P&L"
+                    )
+                    fig_eq = apply_chart_theme(fig_eq)
+                    st.plotly_chart(fig_eq, use_container_width=True)
+                with cc2:
+                    fig_hist = px.histogram(
+                        strat_closed,
+                        x='P&L',
+                        nbins=24,
+                        title=f"{selected_strategy}: Closed Trade P&L Distribution"
+                    )
+                    fig_hist = apply_chart_theme(fig_hist)
+                    st.plotly_chart(fig_hist, use_container_width=True)
 
-        st.dataframe(
-            show_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                'P&L': st.column_config.NumberColumn('P&L', format='$%0.0f'),
-                'Debit': st.column_config.NumberColumn('Debit', format='$%0.0f'),
-                'ROI': st.column_config.NumberColumn('ROI', format='%.2f%%'),
-                'Daily Yield %': st.column_config.NumberColumn('Daily Yield', format='%.2f%%'),
-                'Ann. ROI': st.column_config.NumberColumn('Ann. ROI', format='%.1f%%'),
-                'Theta': st.column_config.NumberColumn('Theta', format='%.2f'),
-                'Delta': st.column_config.NumberColumn('Delta', format='%.2f'),
-                'Gamma': st.column_config.NumberColumn('Gamma', format='%.3f'),
-                'Vega': st.column_config.NumberColumn('Vega', format='%.2f'),
-                'IV': st.column_config.NumberColumn('IV', format='%.3f'),
-                'Link': st.column_config.LinkColumn('OptionStrat', display_text='Open')
-            }
-        )
+                closed_cols = [
+                    'Name', 'Entry Date', 'Exit Date', 'Days Held', 'P&L', 'Debit',
+                    'ROI', 'Daily Yield %', 'Ann. ROI', 'Put P&L', 'Call P&L',
+                    'Theta', 'Delta', 'Gamma', 'Vega', 'IV', 'Link'
+                ]
+                closed_view = strat_closed[closed_cols].copy().sort_values('Exit Date', ascending=False)
+                closed_view['Entry Date'] = pd.to_datetime(closed_view['Entry Date']).dt.date
+                closed_view['Exit Date'] = pd.to_datetime(closed_view['Exit Date']).dt.date
+                st.dataframe(
+                    closed_view,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        'P&L': st.column_config.NumberColumn('P&L', format='$%0.0f'),
+                        'Debit': st.column_config.NumberColumn('Debit', format='$%0.0f'),
+                        'ROI': st.column_config.NumberColumn('ROI', format='%.2f%%'),
+                        'Daily Yield %': st.column_config.NumberColumn('Daily Yield', format='%.2f%%'),
+                        'Ann. ROI': st.column_config.NumberColumn('Ann. ROI', format='%.1f%%'),
+                        'Theta': st.column_config.NumberColumn('Theta', format='%.2f'),
+                        'Delta': st.column_config.NumberColumn('Delta', format='%.2f'),
+                        'Gamma': st.column_config.NumberColumn('Gamma', format='%.3f'),
+                        'Vega': st.column_config.NumberColumn('Vega', format='%.2f'),
+                        'IV': st.column_config.NumberColumn('IV', format='%.3f'),
+                        'Link': st.column_config.LinkColumn('OptionStrat', display_text='Open')
+                    }
+                )
+
+        with st_lifecycle:
+            st.markdown("##### Trade Lifecycle Replay (PnL, Theta, Delta)")
+            if strat_df.empty:
+                st.info("No trades available for lifecycle replay.")
+            else:
+                snaps = load_snapshots()
+                replay_df = strat_df.copy().sort_values('Entry Date', ascending=False)
+                replay_df['replay_label'] = replay_df.apply(
+                    lambda r: f"{r['Name']} | {r['Status']} | {pd.to_datetime(r['Entry Date']).date()}",
+                    axis=1
+                )
+                replay_label = st.selectbox("Select trade", replay_df['replay_label'].tolist(), key="replay_trade_selector")
+                trade_row = replay_df[replay_df['replay_label'] == replay_label].iloc[0]
+
+                lifecycle = build_trade_lifecycle_series(trade_row, snaps)
+                if lifecycle.empty:
+                    st.info("No lifecycle data found for this trade.")
+                else:
+                    lifecycle = lifecycle.reset_index(drop=True)
+                    idx = st.slider("Replay step", min_value=0, max_value=len(lifecycle) - 1, value=0, step=1)
+                    cur = lifecycle.iloc[idx]
+
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Timestamp", pd.to_datetime(cur['timestamp']).strftime('%Y-%m-%d'))
+                    m2.metric("PnL", f"${cur['pnl']:,.0f}")
+                    m3.metric("Theta", f"{cur['theta']:,.2f}")
+                    m4.metric("Delta", f"{cur['delta']:,.2f}")
+
+                    fig_replay = go.Figure()
+                    fig_replay.add_trace(go.Scatter(x=lifecycle['timestamp'], y=lifecycle['pnl'], mode='lines+markers', name='PnL', yaxis='y1', line=dict(color='#10b981')))
+                    fig_replay.add_trace(go.Scatter(x=lifecycle['timestamp'], y=lifecycle['theta'], mode='lines+markers', name='Theta', yaxis='y2', line=dict(color='#38bdf8')))
+                    fig_replay.add_trace(go.Scatter(x=lifecycle['timestamp'], y=lifecycle['delta'], mode='lines+markers', name='Delta', yaxis='y3', line=dict(color='#f59e0b')))
+
+                    ts = pd.to_datetime(cur['timestamp'])
+                    fig_replay.add_vline(x=ts, line_dash='dash', line_color='#c7d2fe', opacity=0.8)
+                    fig_replay.update_layout(
+                        title=f"{selected_strategy}: Lifecycle Replay",
+                        xaxis=dict(title='Timestamp'),
+                        yaxis=dict(title='PnL', side='left'),
+                        yaxis2=dict(title='Theta', overlaying='y', side='right', showgrid=False),
+                        yaxis3=dict(title='Delta', overlaying='y', side='right', position=0.92, showgrid=False),
+                        legend=dict(orientation='h')
+                    )
+                    fig_replay = apply_chart_theme(fig_replay)
+                    st.plotly_chart(fig_replay, use_container_width=True)
 
 with tab_analytics:
     if df.empty or expired_df.empty:
@@ -2394,4 +2555,4 @@ with tab_config:
     finally:
         conn.close()
 
-    st.caption("Allantis Trade Guardian v151.0")
+    st.caption("BVS Trade Guardian v151.1")
