@@ -21,6 +21,7 @@ def initialize_session_state():
         'velocity_stats': {},
         'mae_stats': {},
         'last_cloud_sync': None,
+        'group_universe_excluded': [],
         'show_conflict': False,
         'show_pull_conflict': False
     }
@@ -1589,6 +1590,71 @@ def calculate_max_drawdown(trades_df, initial_capital):
     current_dd = drawdown.iloc[-1]
     return {'Max Drawdown %': max_dd * 100, 'Current DD %': current_dd * 100}
 
+def build_open_risk_snapshot(active_df):
+    if active_df is None or active_df.empty:
+        return {'pnl': 0.0, 'delta': 0.0, 'theta': 0.0, 'gamma': 0.0, 'vega': 0.0, 'count': 0}
+    return {
+        'pnl': float(active_df['P&L'].sum()),
+        'delta': float(active_df['Delta'].sum()),
+        'theta': float(active_df['Theta'].sum()),
+        'gamma': float(active_df['Gamma'].sum()),
+        'vega': float(active_df['Vega'].sum()),
+        'count': int(len(active_df))
+    }
+
+def build_risk_limits(open_risk):
+    abs_delta = abs(float(open_risk.get('delta', 0.0)) or 0.0)
+    abs_theta = abs(float(open_risk.get('theta', 0.0)) or 0.0)
+    abs_gamma = abs(float(open_risk.get('gamma', 0.0)) or 0.0)
+    abs_vega = abs(float(open_risk.get('vega', 0.0)) or 0.0)
+    abs_open_pnl = abs(float(open_risk.get('pnl', 0.0)) or 0.0)
+    position_count = int(open_risk.get('count', 0) or 0)
+
+    delta_limit = max(100, int(np.ceil(abs_delta * 1.35 / 25.0) * 25))
+    theta_limit = max(25, int(np.ceil(abs_theta * 1.35 / 5.0) * 5))
+    gamma_limit = max(1, float(np.ceil(abs_gamma * 1.5 * 100) / 100))
+    vega_limit = max(50, int(np.ceil(abs_vega * 1.35 / 10.0) * 10))
+    pnl_limit = max(1000, int(np.ceil(abs_open_pnl * 1.5 / 250.0) * 250))
+    count_limit = max(10, int(np.ceil(position_count * 1.3 / 5.0) * 5))
+
+    items = [
+        {'label': 'Delta Limit', 'current': abs_delta, 'signed_current': float(open_risk.get('delta', 0.0) or 0.0), 'limit': delta_limit, 'unit': 'Δ', 'formatter': lambda v: f"{v:.2f}"},
+        {'label': 'Theta Limit', 'current': abs_theta, 'signed_current': float(open_risk.get('theta', 0.0) or 0.0), 'limit': theta_limit, 'unit': 'Θ', 'formatter': lambda v: f"{v:.2f}"},
+        {'label': 'Gamma Limit', 'current': abs_gamma, 'signed_current': float(open_risk.get('gamma', 0.0) or 0.0), 'limit': gamma_limit, 'unit': 'Γ', 'formatter': lambda v: f"{v:.3f}"},
+        {'label': 'Vega Limit', 'current': abs_vega, 'signed_current': float(open_risk.get('vega', 0.0) or 0.0), 'limit': vega_limit, 'unit': 'V', 'formatter': lambda v: f"{v:.2f}"},
+        {'label': 'Open PnL Limit', 'current': abs_open_pnl, 'signed_current': float(open_risk.get('pnl', 0.0) or 0.0), 'limit': pnl_limit, 'unit': '$', 'formatter': lambda v: f"${v:,.0f}"},
+        {'label': 'Open Position Limit', 'current': float(position_count), 'signed_current': float(position_count), 'limit': count_limit, 'unit': '#', 'formatter': lambda v: f"{int(round(v))}"}
+    ]
+
+    for item in items:
+        item['ratio'] = item['current'] / item['limit'] if item['limit'] else 0.0
+        if item['ratio'] >= 0.9:
+            item['status'] = 'Near limit'
+        elif item['ratio'] >= 0.7:
+            item['status'] = 'Watch'
+        else:
+            item['status'] = 'Comfortable'
+    return items
+
+def build_equity_drawdown_curve(expired_df, initial_capital):
+    if expired_df is None or expired_df.empty or initial_capital <= 0:
+        return pd.DataFrame()
+
+    curve_df = expired_df.dropna(subset=['Exit Date']).copy()
+    if curve_df.empty:
+        return pd.DataFrame()
+
+    curve_df['Exit Date'] = pd.to_datetime(curve_df['Exit Date']).dt.date
+    daily_pnl = curve_df.groupby('Exit Date')['P&L'].sum().sort_index().reset_index()
+    daily_pnl['Equity'] = initial_capital + daily_pnl['P&L'].cumsum()
+    daily_pnl['Running Max'] = daily_pnl['Equity'].cummax()
+    daily_pnl['Drawdown %'] = np.where(
+        daily_pnl['Running Max'] > 0,
+        ((daily_pnl['Equity'] - daily_pnl['Running Max']) / daily_pnl['Running Max']) * 100,
+        0.0
+    )
+    return daily_pnl[['Exit Date', 'Equity', 'Drawdown %']]
+
 def rolling_correlation_matrix(snaps, window_days=30):
     if snaps.empty: return None
     strat_daily = snaps.pivot_table(index='snapshot_date', columns='strategy', values='pnl', aggfunc='sum')
@@ -1755,8 +1821,6 @@ with st.sidebar.expander("2.  WORK (Sync Files)", expanded=True):
             st.cache_data.clear()
             st.success("Sync Complete!")
             auto_sync_if_connected()
-
-render_group_universe_control(ui_df)
 
 st.sidebar.markdown(" *finally...*")
 with st.sidebar.expander("3.  SHUTDOWN (Local Backup)", expanded=False):
@@ -1991,6 +2055,40 @@ with tab_dash:
             score_neutral = max(0, 100 - (total_delta_pct * 20))
             score_div = allocation_score
 
+            st.markdown("##### Group Universe Control")
+            st.caption("Exclude experimental groups from calculations while keeping source uploads intact.")
+            group_options = get_group_universe_options(ui_df)
+            current_excluded = [g for g in st.session_state.get('group_universe_excluded', []) if g in group_options]
+            if group_options:
+                g_btn1, g_btn2 = st.columns(2)
+                with g_btn1:
+                    if st.button("Include Everything", key="dash_group_include_all"):
+                        st.session_state['group_universe_excluded'] = []
+                        st.rerun()
+                with g_btn2:
+                    if st.button("Exclude Test Groups", key="dash_group_exclude_test"):
+                        st.session_state['group_universe_excluded'] = [g for g in group_options if is_test_group(g)]
+                        st.rerun()
+
+                selected_excluded = st.multiselect(
+                    "Exclude groups from calculations",
+                    options=group_options,
+                    default=current_excluded,
+                    key="dash_group_universe_selector"
+                )
+                st.session_state['group_universe_excluded'] = selected_excluded
+                excluded_set = set(selected_excluded)
+                universe_count = int((~get_trade_group_series(ui_df).isin(excluded_set)).sum())
+                g_stat1, g_stat2, g_stat3 = st.columns(3)
+                with g_stat1:
+                    st.metric("Included Groups", len(group_options) - len(excluded_set))
+                with g_stat2:
+                    st.metric("Excluded Groups", len(excluded_set))
+                with g_stat3:
+                    st.metric("Active Calculation Universe", f"{universe_count} trades")
+            else:
+                st.info("Upload both active and closed workbooks to manage group filters.")
+
             dash_c1, dash_c2 = st.columns([1.8, 1.2])
             
             with dash_c1:
@@ -2040,6 +2138,47 @@ with tab_dash:
                     paper_bgcolor='rgba(0,0,0,0)', font=dict(color="#94a3b8", family="Inter")
                 )
                 st.plotly_chart(fig_radar, use_container_width=True)
+
+            st.markdown("##### Portfolio Risk Limits")
+            st.caption("Live guardrails showing how close the open portfolio is to practical exposure thresholds.")
+            open_risk = build_open_risk_snapshot(active_df)
+            risk_limits = build_risk_limits(open_risk)
+            if risk_limits:
+                for start in range(0, len(risk_limits), 3):
+                    row_items = risk_limits[start:start + 3]
+                    cols = st.columns(len(row_items))
+                    for col, item in zip(cols, row_items):
+                        with col:
+                            st.markdown(f"**{item['label']}**")
+                            current_display = item['formatter'](item['signed_current'])
+                            limit_display = item['formatter'](item['limit'])
+                            st.metric("Current", current_display, help=f"Limit: {limit_display}")
+                            st.progress(min(float(item['ratio']), 1.0))
+                            st.caption(f"{item['status']} | Limit {limit_display}")
+
+            st.markdown("##### Equity Drawdown")
+            st.caption("Realized equity curve from closed trades with peak-to-trough drawdown tracking.")
+            drawdown_curve = build_equity_drawdown_curve(expired_df, total_cap)
+            if not drawdown_curve.empty:
+                dd_col1, dd_col2 = st.columns(2)
+                dd_metrics = calculate_max_drawdown(expired_df, total_cap)
+                with dd_col1:
+                    st.metric("Max Drawdown", f"{dd_metrics['Max Drawdown %']:.1f}%")
+                with dd_col2:
+                    st.metric("Current Drawdown", f"{dd_metrics['Current DD %']:.1f}%")
+
+                fig_drawdown = px.area(
+                    drawdown_curve,
+                    x='Exit Date',
+                    y='Drawdown %',
+                    title="Equity Drawdown"
+                )
+                fig_drawdown.add_hline(y=0, line_dash="dash", line_color="#94a3b8", opacity=0.7)
+                fig_drawdown.update_layout(yaxis_title="Drawdown %")
+                fig_drawdown = apply_chart_theme(fig_drawdown)
+                st.plotly_chart(fig_drawdown, use_container_width=True)
+            else:
+                st.info("Need closed trades to build the equity drawdown curve.")
             
             st.divider()
             st.subheader("🗺️ Position Heat Map")
