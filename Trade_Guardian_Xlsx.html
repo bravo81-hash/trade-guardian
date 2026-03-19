@@ -655,6 +655,84 @@
     scroll-behavior: auto !important;
   }
 }
+
+
+/* ===== IBKR CALCULATOR TAB ===== */
+.tg-ibkr-shell { display:flex; flex-direction:column; gap:1.5rem; }
+.tg-ibkr-badges { display:flex; flex-wrap:wrap; gap:0.6rem; }
+.tg-ibkr-badge {
+  display:inline-flex; align-items:center; gap:0.4rem; padding:0.42rem 0.75rem;
+  border-radius:9999px; font-size:11px; font-weight:700; letter-spacing:0.02em;
+  border:1px solid rgba(99,102,241,0.16); background:rgba(99,102,241,0.08); color:var(--tg-accent-strong);
+}
+.dark .tg-ibkr-badge { background:rgba(99,102,241,0.14); color:#c7d2fe; border-color:rgba(129,140,248,0.28); }
+.tg-ibkr-grid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(320px,0.9fr); gap:1.5rem; }
+.tg-ibkr-card {
+  border-radius:1.4rem; border:1px solid var(--tg-border); background:linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.95));
+  box-shadow:var(--tg-shadow); padding:1.35rem;
+}
+.dark .tg-ibkr-card { background:linear-gradient(180deg, rgba(30,41,59,0.98), rgba(15,23,42,0.94)); border-color:rgba(51,65,85,0.82); }
+.tg-ibkr-title { font-size:var(--tg-font-title-lg); line-height:var(--tg-leading-heading); font-weight:800; letter-spacing:-0.02em; }
+.tg-ibkr-copy { color:var(--tg-muted); font-size:var(--tg-font-body); line-height:var(--tg-leading-body); max-width:68rem; }
+.tg-ibkr-form { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0.95rem; }
+.tg-ibkr-field { display:flex; flex-direction:column; gap:0.45rem; min-width:0; }
+.tg-ibkr-field.full { grid-column:1 / -1; }
+.tg-ibkr-label { font-size:var(--tg-font-label); font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:var(--tg-muted); }
+.tg-ibkr-input, .tg-ibkr-select {
+  width:100%; min-height:2.9rem; border-radius:0.95rem; border:1px solid var(--tg-border);
+  background:rgba(248,250,252,0.72); color:var(--tg-text); padding:0.82rem 0.95rem; font-size:var(--tg-font-body); line-height:1.3;
+}
+.dark .tg-ibkr-input, .dark .tg-ibkr-select { background:rgba(15,23,42,0.55); border-color:rgba(51,65,85,0.85); }
+.tg-ibkr-input:focus, .tg-ibkr-select:focus { border-color:var(--tg-accent); box-shadow:0 0 0 3px rgba(99,102,241,0.12); outline:none; }
+.tg-ibkr-hint, .tg-ibkr-footnote { color:var(--tg-muted); font-size:12px; line-height:1.55; }
+.tg-ibkr-actions, .tg-ibkr-preview-actions { display:flex; flex-wrap:wrap; gap:0.7rem; margin-top:1.1rem; }
+.tg-ibkr-btn {
+  display:inline-flex; align-items:center; justify-content:center; gap:0.45rem; min-height:2.7rem; padding:0.72rem 1rem; border-radius:0.95rem;
+  font-size:0.9rem; font-weight:700; border:1px solid transparent; cursor:pointer;
+}
+.tg-ibkr-btn.primary { background:var(--tg-accent); color:white; }
+.tg-ibkr-btn.primary:hover { background:#4f46e5; transform:translateY(-1px); }
+.tg-ibkr-btn.secondary { background:rgba(255,255,255,0.6); border-color:var(--tg-border); color:var(--tg-text); }
+.dark .tg-ibkr-btn.secondary { background:rgba(15,23,42,0.45); }
+.tg-ibkr-btn.secondary:hover { border-color:rgba(99,102,241,0.28); transform:translateY(-1px); }
+.tg-ibkr-warning { display:none; margin-top:1rem; padding:0.85rem 0.95rem; border-radius:1rem; border:1px solid rgba(244,63,94,0.22); background:rgba(244,63,94,0.08); color:#be123c; font-size:13px; line-height:1.5; }
+.dark .tg-ibkr-warning { color:#fecdd3; }
+.tg-ibkr-stats { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0.8rem; }
+.tg-ibkr-stat { border-radius:1rem; border:1px solid var(--tg-border); background:rgba(248,250,252,0.72); padding:0.95rem; }
+.dark .tg-ibkr-stat { background:rgba(15,23,42,0.5); border-color:rgba(51,65,85,0.82); }
+.tg-ibkr-stat-label { font-size:11px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:var(--tg-muted); }
+.tg-ibkr-stat-value { margin-top:0.35rem; font-size:1.45rem; font-weight:800; line-height:1.1; word-break:break-word; }
+.tg-ibkr-good { color:var(--tg-positive); }
+.tg-ibkr-bad { color:var(--tg-negative); }
+.tg-ibkr-mono { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.tg-ibkr-order-stack { display:grid; gap:0.9rem; margin-top:1rem; }
+.tg-ibkr-order {
+  border-radius:1.1rem; padding:1rem; border:1px solid var(--tg-border); background:rgba(248,250,252,0.72);
+}
+.dark .tg-ibkr-order { background:rgba(15,23,42,0.52); border-color:rgba(51,65,85,0.82); }
+.tg-ibkr-order.target { background:rgba(16,185,129,0.08); border-color:rgba(16,185,129,0.22); }
+.dark .tg-ibkr-order.target { background:rgba(16,185,129,0.12); }
+.tg-ibkr-order.stop { background:rgba(244,63,94,0.08); border-color:rgba(244,63,94,0.22); }
+.dark .tg-ibkr-order.stop { background:rgba(244,63,94,0.12); }
+.tg-ibkr-order-top { display:flex; align-items:center; justify-content:space-between; gap:0.7rem; flex-wrap:wrap; }
+.tg-ibkr-order-title, .tg-ibkr-preview-label { font-size:11px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:var(--tg-muted); }
+.tg-ibkr-order-price { margin-top:0.75rem; font-size:2.4rem; line-height:1; font-weight:900; letter-spacing:0.01em; }
+.tg-ibkr-order-sub { margin-top:0.5rem; font-size:12px; color:var(--tg-muted); line-height:1.5; }
+.tg-ibkr-preview { margin-top:0.8rem; border-radius:0.95rem; border:1px dashed rgba(148,163,184,0.32); background:rgba(255,255,255,0.45); padding:0.8rem; }
+.dark .tg-ibkr-preview { background:rgba(15,23,42,0.42); }
+.tg-ibkr-preview-value { margin-top:0.35rem; font-size:1.02rem; font-weight:800; line-height:1.35; word-break:break-word; }
+.tg-ibkr-table-wrap { overflow-x:auto; margin-top:1rem; }
+.tg-ibkr-table { width:100%; border-collapse:separate; border-spacing:0; min-width:760px; }
+.tg-ibkr-table thead th { font-size:10px; letter-spacing:0.12em; font-weight:800; text-transform:uppercase; color:var(--tg-muted); padding:0.8rem 0.7rem; text-align:left; }
+.tg-ibkr-table tbody td { padding:0.8rem 0.7rem; border-top:1px solid var(--tg-border); font-size:0.9rem; }
+.tg-ibkr-table tbody tr:hover { background:rgba(99,102,241,0.05); }
+.dark .tg-ibkr-table tbody tr:hover { background:rgba(99,102,241,0.12); }
+@media (max-width: 1100px) { .tg-ibkr-grid { grid-template-columns:1fr; } }
+@media (max-width: 768px) {
+  .tg-ibkr-form, .tg-ibkr-stats { grid-template-columns:1fr; }
+  .tg-ibkr-order-price { font-size:2.05rem; }
+}
+
 </style>
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-200 transition-colors duration-300 min-h-screen overflow-hidden antialiased">
@@ -725,6 +803,10 @@
           </button>
           <button onclick="navigate('trades')" id="nav-trades" data-main-nav="trades" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
             <i data-lucide="layers" class="mr-2 h-4 w-4"></i><span class="nav-text">Grouped Trades</span>
+          </button>
+
+          <button onclick="navigate('ibkr-calculator')" id="nav-ibkr-calculator" data-main-nav="ibkr-calculator" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+            <i data-lucide="calculator" class="mr-2 h-4 w-4"></i><span class="nav-text">IBKR Calculator</span>
           </button>
         </nav>
       </aside>
@@ -1344,6 +1426,170 @@
           </div>
           <div id="journal-editor" class="overflow-x-auto"></div>
           <p id="journal-status" class="text-sm text-slate-500 dark:text-slate-400 mt-3 copy-note">Pull journal rows from DB to begin editing.</p>
+        </div>
+      </div>
+
+
+
+      <div id="view-ibkr-calculator" class="hidden fade-in space-y-6 pb-20 max-w-7xl">
+        <div class="tg-ibkr-shell">
+          <div class="flex flex-col gap-3">
+            <div class="micro-pill w-max"><i data-lucide="calculator" class="h-3.5 w-3.5"></i> Combo order planner</div>
+            <div>
+              <h2 class="tg-ibkr-title">IBKR Combo Closing Price Calculator</h2>
+              <p class="tg-ibkr-copy mt-3">Built for multi-leg combo orders like spreads, butterflies, calendars, broken-wing butterflies, and iron condors. Inputs are at the whole-position level, commissions are calculated using total legs traded, and the closing output is the per-lot net combo price to use in IBKR.</p>
+            </div>
+            <div class="tg-ibkr-badges">
+              <span class="tg-ibkr-badge"><i data-lucide="git-branch" class="h-3.5 w-3.5"></i> Multi-leg aware</span>
+              <span class="tg-ibkr-badge"><i data-lucide="receipt" class="h-3.5 w-3.5"></i> Realistic commissions</span>
+              <span class="tg-ibkr-badge"><i data-lucide="target" class="h-3.5 w-3.5"></i> Target & stop from max risk</span>
+              <span class="tg-ibkr-badge"><i data-lucide="copy" class="h-3.5 w-3.5"></i> Copy-ready IBKR order preview</span>
+            </div>
+          </div>
+
+          <div class="tg-ibkr-grid">
+            <section class="tg-ibkr-card">
+              <div class="flex items-center justify-between gap-3 mb-5 flex-wrap">
+                <h3 class="text-base font-extrabold tracking-tight text-slate-800 dark:text-slate-100">Position Inputs</h3>
+                <span class="text-xs font-semibold text-slate-500 dark:text-slate-400">Net combo debit / credit model</span>
+              </div>
+              <div class="tg-ibkr-form">
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-ticker">Ticker</label>
+                  <select id="tg-ibkr-ticker" class="tg-ibkr-select">
+                    <option value="SPX">SPX</option>
+                    <option value="RUT">RUT</option>
+                    <option value="SPY">SPY</option>
+                    <option value="ES">ES</option>
+                    <option value="CUSTOM">Custom</option>
+                  </select>
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-structure">Structure</label>
+                  <select id="tg-ibkr-structure" class="tg-ibkr-select">
+                    <option value="custom">Custom</option>
+                    <option value="vertical">Vertical / Credit Spread</option>
+                    <option value="butterfly">Butterfly</option>
+                    <option value="bwb">Broken-Wing Butterfly</option>
+                    <option value="calendar">Calendar / Diagonal</option>
+                    <option value="ironCondor">Iron Condor</option>
+                  </select>
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-lots">Number of Lots</label>
+                  <input id="tg-ibkr-lots" class="tg-ibkr-input" type="number" min="1" step="1" value="4" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-legs-per-lot">Legs per 1 Lot</label>
+                  <input id="tg-ibkr-legs-per-lot" class="tg-ibkr-input" type="number" min="1" step="1" value="4" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-multiplier">Contract Multiplier</label>
+                  <input id="tg-ibkr-multiplier" class="tg-ibkr-input" type="number" min="0.01" step="0.01" value="100" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-entry-type">Entry Type</label>
+                  <select id="tg-ibkr-entry-type" class="tg-ibkr-select">
+                    <option value="debit">Debit paid</option>
+                    <option value="credit">Credit received</option>
+                  </select>
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-entry-total">Entry Amount for Whole Position</label>
+                  <input id="tg-ibkr-entry-total" class="tg-ibkr-input" type="number" step="0.01" value="0" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-max-loss">Max Risk / Max Loss for Whole Position</label>
+                  <input id="tg-ibkr-max-loss" class="tg-ibkr-input" type="number" min="0" step="0.01" value="4000" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-profit-pct">Profit Target (% of max risk)</label>
+                  <input id="tg-ibkr-profit-pct" class="tg-ibkr-input" type="number" min="0" step="0.01" value="5" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-stop-pct">Stop Loss (% of max risk)</label>
+                  <input id="tg-ibkr-stop-pct" class="tg-ibkr-input" type="number" min="0" step="0.01" value="10" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-commission">Commission per Leg per Side</label>
+                  <input id="tg-ibkr-commission" class="tg-ibkr-input" type="number" min="0" step="0.01" value="1.71" />
+                </div>
+                <div class="tg-ibkr-field">
+                  <label class="tg-ibkr-label" for="tg-ibkr-tick-size">Price Tick Size</label>
+                  <input id="tg-ibkr-tick-size" class="tg-ibkr-input" type="number" min="0" step="0.001" value="0.05" />
+                </div>
+                <div class="tg-ibkr-field full">
+                  <label class="tg-ibkr-label" for="tg-ibkr-notes">Notes</label>
+                  <input id="tg-ibkr-notes" class="tg-ibkr-input" type="text" placeholder="Example: 4-lot BWB, $0.00 debit, 16 total legs" />
+                  <p class="tg-ibkr-hint mt-2">Commission logic: <strong>lots × legs per lot × commission per leg per side × 2</strong>. SPX defaults to <strong>$1.71</strong> per leg per side so the displayed prices remain conservative against your observed IBKR charges.</p>
+                </div>
+              </div>
+              <div class="tg-ibkr-actions">
+                <button id="tg-ibkr-calc-btn" type="button" class="tg-ibkr-btn primary"><i data-lucide="sparkles" class="h-4 w-4"></i> Calculate</button>
+                <button id="tg-ibkr-reset-btn" type="button" class="tg-ibkr-btn secondary">Reset</button>
+                <button id="tg-ibkr-example-btn" type="button" class="tg-ibkr-btn secondary">Load your example</button>
+              </div>
+              <div id="tg-ibkr-warning" class="tg-ibkr-warning"></div>
+            </section>
+
+            <section class="tg-ibkr-card">
+              <h3 class="text-base font-extrabold tracking-tight text-slate-800 dark:text-slate-100">Summary & IBKR Order Prices</h3>
+              <div class="tg-ibkr-stats mt-5">
+                <div class="tg-ibkr-stat"><div class="tg-ibkr-stat-label">Total legs in position</div><div class="tg-ibkr-stat-value tg-ibkr-mono" id="tg-ibkr-total-legs">-</div></div>
+                <div class="tg-ibkr-stat"><div class="tg-ibkr-stat-label">Round-trip commission</div><div class="tg-ibkr-stat-value tg-ibkr-mono" id="tg-ibkr-roundtrip">-</div></div>
+                <div class="tg-ibkr-stat"><div class="tg-ibkr-stat-label">Profit target P&amp;L</div><div class="tg-ibkr-stat-value tg-ibkr-good tg-ibkr-mono" id="tg-ibkr-profit-whole">-</div></div>
+                <div class="tg-ibkr-stat"><div class="tg-ibkr-stat-label">Profit target P&amp;L / lot</div><div class="tg-ibkr-stat-value tg-ibkr-good tg-ibkr-mono" id="tg-ibkr-profit-lot">-</div></div>
+                <div class="tg-ibkr-stat"><div class="tg-ibkr-stat-label">Stop loss P&amp;L</div><div class="tg-ibkr-stat-value tg-ibkr-bad tg-ibkr-mono" id="tg-ibkr-stop-whole">-</div></div>
+                <div class="tg-ibkr-stat"><div class="tg-ibkr-stat-label">Stop loss P&amp;L / lot</div><div class="tg-ibkr-stat-value tg-ibkr-bad tg-ibkr-mono" id="tg-ibkr-stop-lot">-</div></div>
+              </div>
+
+              <div class="tg-ibkr-order-stack">
+                <div class="tg-ibkr-order target">
+                  <div class="tg-ibkr-order-top">
+                    <div class="tg-ibkr-order-title">IBKR target close (per lot) — <span id="tg-ibkr-target-direction">DEBIT</span></div>
+                    <button id="tg-ibkr-copy-target" type="button" class="tg-ibkr-btn secondary text-xs">Copy</button>
+                  </div>
+                  <div class="tg-ibkr-order-price tg-ibkr-mono tg-ibkr-good" id="tg-ibkr-target-price">-</div>
+                  <div class="tg-ibkr-order-sub" id="tg-ibkr-target-sub">Rounded conservatively so the target still covers full round-trip commissions.</div>
+                  <div class="tg-ibkr-preview">
+                    <div class="tg-ibkr-preview-label">IBKR order preview</div>
+                    <div class="tg-ibkr-preview-value tg-ibkr-mono" id="tg-ibkr-target-preview">-</div>
+                    <div class="tg-ibkr-preview-actions">
+                      <button id="tg-ibkr-copy-target-preview" type="button" class="tg-ibkr-btn secondary text-xs">Copy preview</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="tg-ibkr-order stop">
+                  <div class="tg-ibkr-order-top">
+                    <div class="tg-ibkr-order-title">IBKR stop close (per lot) — <span id="tg-ibkr-stop-direction">DEBIT</span></div>
+                    <button id="tg-ibkr-copy-stop" type="button" class="tg-ibkr-btn secondary text-xs">Copy</button>
+                  </div>
+                  <div class="tg-ibkr-order-price tg-ibkr-mono tg-ibkr-bad" id="tg-ibkr-stop-price">-</div>
+                  <div class="tg-ibkr-order-sub" id="tg-ibkr-stop-sub">Rounded conservatively so the stop does not exceed the planned loss after full round-trip commissions.</div>
+                  <div class="tg-ibkr-preview">
+                    <div class="tg-ibkr-preview-label">IBKR order preview</div>
+                    <div class="tg-ibkr-preview-value tg-ibkr-mono" id="tg-ibkr-stop-preview">-</div>
+                    <div class="tg-ibkr-preview-actions">
+                      <button id="tg-ibkr-copy-stop-preview" type="button" class="tg-ibkr-btn secondary text-xs">Copy preview</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tg-ibkr-table-wrap">
+                <table class="tg-ibkr-table">
+                  <thead>
+                    <tr><th>Metric</th><th>Whole Position</th><th>Per Lot</th></tr>
+                  </thead>
+                  <tbody id="tg-ibkr-details-body">
+                    <tr><td>Entry value</td><td>-</td><td>-</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p class="tg-ibkr-footnote mt-4" id="tg-ibkr-footnote">The close price is the combo price per lot for your IBKR net combo order.</p>
+            </section>
+          </div>
         </div>
       </div>
 
@@ -3051,13 +3297,14 @@ loadPersistedSettings();
       document.querySelectorAll('#content-area > div').forEach(el => el.classList.add('hidden'));
       const viewEl = document.getElementById(`view-${view}`);
       if (viewEl) viewEl.classList.remove('hidden');
-      const titles = { upload: 'Load Workbooks', dashboard: 'Workbook Dashboard', strategies: 'Strategy Hub', trades: 'Grouped Trades', 'strategy-detail': 'Strategy Analysis', 'trade-detail': 'Trade Snapshot' };
+      const titles = { upload: 'Load Workbooks', dashboard: 'Workbook Dashboard', strategies: 'Strategy Hub', trades: 'Grouped Trades', 'ibkr-calculator': 'IBKR Calculator', 'strategy-detail': 'Strategy Analysis', 'trade-detail': 'Trade Snapshot' };
       document.getElementById('page-title').textContent = titles[view] || 'Trade Guardian XLSX';
       if (view === 'dashboard') setDashboardSubtab(currentDashboardSubtab);
       try {
         if (view === 'dashboard') renderDashboardCharts();
         if (view === 'strategies') renderStrategiesHub();
         if (view === 'trades') renderGroupedTrades();
+        if (view === 'ibkr-calculator') tgIbkrCalculate();
         if (view === 'strategy-detail' && id != null) loadStrategyDetail(id);
         if (view === 'trade-detail' && id != null) loadTradeDetail(id, parentContext);
       } catch (err) {
@@ -4169,5 +4416,248 @@ loadPersistedSettings();
   apply();
 })();
 </script>
+
+<script>
+  const tgIbkrCommissionPresets = {
+    SPX: 1.71,
+    RUT: 1.80,
+    SPY: 1.00,
+    ES: 1.50,
+    CUSTOM: 1.50
+  };
+
+  const tgIbkrPresets = {
+    SPX: { multiplier: 100, tickSize: 0.05 },
+    RUT: { multiplier: 100, tickSize: 0.05 },
+    SPY: { multiplier: 100, tickSize: 0.01 },
+    ES: { multiplier: 50, tickSize: 0.25 }
+  };
+
+  const tgIbkrStructureLegs = {
+    custom: 4,
+    vertical: 2,
+    butterfly: 3,
+    bwb: 4,
+    calendar: 2,
+    ironCondor: 4
+  };
+
+  const tgIbkr = (id) => document.getElementById(id);
+
+  function tgIbkrFmtMoney(n) {
+    if (!isFinite(n)) return '-';
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(n);
+  }
+
+  function tgIbkrFmtNum(n, d = 2) {
+    if (!isFinite(n)) return '-';
+    return Number(n).toFixed(d);
+  }
+
+  function tgIbkrRoundConservative(value, tick, entryType) {
+    if (!isFinite(value)) return NaN;
+    if (!isFinite(tick) || tick <= 0) return value;
+    const scaled = value / tick;
+    return entryType === 'debit' ? Math.ceil(scaled) * tick : Math.floor(scaled) * tick;
+  }
+
+  function tgIbkrSetWarning(message) {
+    const el = tgIbkr('tg-ibkr-warning');
+    if (!el) return;
+    if (!message) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    el.style.display = 'block';
+    el.textContent = message;
+  }
+
+  function tgIbkrApplyTickerPreset() {
+    const tickerEl = tgIbkr('tg-ibkr-ticker');
+    if (!tickerEl) return;
+    const ticker = tickerEl.value;
+    const preset = tgIbkrPresets[ticker];
+    if (preset) {
+      tgIbkr('tg-ibkr-multiplier').value = preset.multiplier;
+      tgIbkr('tg-ibkr-tick-size').value = preset.tickSize;
+    }
+    if (tgIbkrCommissionPresets[ticker]) {
+      tgIbkr('tg-ibkr-commission').value = tgIbkrCommissionPresets[ticker].toFixed(2);
+    }
+  }
+
+  function tgIbkrApplyStructurePreset() {
+    const structureEl = tgIbkr('tg-ibkr-structure');
+    if (!structureEl) return;
+    const structure = structureEl.value;
+    if (tgIbkrStructureLegs[structure]) {
+      tgIbkr('tg-ibkr-legs-per-lot').value = tgIbkrStructureLegs[structure];
+    }
+  }
+
+  function tgIbkrCalculate() {
+    if (!tgIbkr('tg-ibkr-ticker')) return;
+    tgIbkrSetWarning('');
+    const ticker = tgIbkr('tg-ibkr-ticker').value;
+    const structure = tgIbkr('tg-ibkr-structure').value;
+    const lots = parseFloat(tgIbkr('tg-ibkr-lots').value);
+    const legsPerLot = parseFloat(tgIbkr('tg-ibkr-legs-per-lot').value);
+    const multiplier = parseFloat(tgIbkr('tg-ibkr-multiplier').value);
+    const entryType = tgIbkr('tg-ibkr-entry-type').value;
+    const positionEntryTotal = parseFloat(tgIbkr('tg-ibkr-entry-total').value);
+    const maxLoss = parseFloat(tgIbkr('tg-ibkr-max-loss').value);
+    const profitPct = parseFloat(tgIbkr('tg-ibkr-profit-pct').value);
+    const stopPct = parseFloat(tgIbkr('tg-ibkr-stop-pct').value);
+    const commissionPerLegPerSide = parseFloat(tgIbkr('tg-ibkr-commission').value);
+    const tickSize = parseFloat(tgIbkr('tg-ibkr-tick-size').value);
+
+    if (!isFinite(lots) || lots <= 0 || !isFinite(legsPerLot) || legsPerLot <= 0 || !isFinite(multiplier) || multiplier <= 0 ||
+        !isFinite(positionEntryTotal) || positionEntryTotal < 0 || !isFinite(maxLoss) || maxLoss < 0 ||
+        !isFinite(profitPct) || profitPct < 0 || !isFinite(stopPct) || stopPct < 0 || !isFinite(commissionPerLegPerSide) || commissionPerLegPerSide < 0) {
+      tgIbkrSetWarning('Please enter valid non-negative numbers. Lots, legs per lot, and multiplier must be greater than zero.');
+      return;
+    }
+
+    const totalLegs = lots * legsPerLot;
+    const totalCommissionPerSide = totalLegs * commissionPerLegPerSide;
+    const totalRoundTripCommission = totalCommissionPerSide * 2;
+    const roundTripCommissionPerLot = totalRoundTripCommission / lots;
+    const entryPerLotValue = positionEntryTotal / lots;
+    const entryPricePerLot = entryPerLotValue / multiplier;
+    const profitWhole = maxLoss * (profitPct / 100);
+    const stopWhole = -(maxLoss * (stopPct / 100));
+    const profitPerLot = profitWhole / lots;
+    const stopPerLot = stopWhole / lots;
+
+    let profitCloseValueWhole;
+    let stopCloseValueWhole;
+    if (entryType === 'debit') {
+      profitCloseValueWhole = positionEntryTotal + totalRoundTripCommission + profitWhole;
+      stopCloseValueWhole = positionEntryTotal + totalRoundTripCommission + stopWhole;
+    } else {
+      profitCloseValueWhole = positionEntryTotal - totalRoundTripCommission - profitWhole;
+      stopCloseValueWhole = positionEntryTotal - totalRoundTripCommission - stopWhole;
+    }
+
+    const profitCloseValuePerLot = profitCloseValueWhole / lots;
+    const stopCloseValuePerLot = stopCloseValueWhole / lots;
+    const rawProfitClosePricePerLot = profitCloseValuePerLot / multiplier;
+    const rawStopClosePricePerLot = stopCloseValuePerLot / multiplier;
+    const profitClosePricePerLot = tgIbkrRoundConservative(rawProfitClosePricePerLot, tickSize, entryType);
+    const stopClosePricePerLot = tgIbkrRoundConservative(rawStopClosePricePerLot, tickSize, entryType);
+
+    tgIbkr('tg-ibkr-total-legs').textContent = tgIbkrFmtNum(totalLegs, 0);
+    tgIbkr('tg-ibkr-roundtrip').textContent = tgIbkrFmtMoney(totalRoundTripCommission);
+    tgIbkr('tg-ibkr-profit-whole').textContent = tgIbkrFmtMoney(profitWhole);
+    tgIbkr('tg-ibkr-profit-lot').textContent = tgIbkrFmtMoney(profitPerLot);
+    tgIbkr('tg-ibkr-stop-whole').textContent = tgIbkrFmtMoney(stopWhole);
+    tgIbkr('tg-ibkr-stop-lot').textContent = tgIbkrFmtMoney(stopPerLot);
+    tgIbkr('tg-ibkr-target-price').textContent = tgIbkrFmtNum(profitClosePricePerLot, 2);
+    tgIbkr('tg-ibkr-stop-price').textContent = tgIbkrFmtNum(stopClosePricePerLot, 2);
+
+    const closeDirection = entryType === 'debit' ? 'CREDIT' : 'DEBIT';
+    const ibkrAction = entryType === 'debit' ? 'SELL' : 'BUY';
+    tgIbkr('tg-ibkr-target-direction').textContent = closeDirection;
+    tgIbkr('tg-ibkr-stop-direction').textContent = closeDirection;
+    tgIbkr('tg-ibkr-target-sub').textContent = `${closeDirection} order. ${entryType === 'debit' ? 'Rounded up' : 'Rounded down'} to tick ${tgIbkrFmtNum(tickSize, 3)} so the target still covers full round-trip commissions.`;
+    tgIbkr('tg-ibkr-stop-sub').textContent = `${closeDirection} order. ${entryType === 'debit' ? 'Rounded up' : 'Rounded down'} to tick ${tgIbkrFmtNum(tickSize, 3)} so the stop stays inside your planned risk after full round-trip commissions.`;
+    tgIbkr('tg-ibkr-target-preview').textContent = `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} ${tgIbkrFmtNum(profitClosePricePerLot, 2)}`;
+    tgIbkr('tg-ibkr-stop-preview').textContent = `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} ${tgIbkrFmtNum(stopClosePricePerLot, 2)}`;
+
+    tgIbkr('tg-ibkr-details-body').innerHTML = `
+      <tr><td>Entry value</td><td>${tgIbkrFmtMoney(positionEntryTotal)}</td><td>${tgIbkrFmtMoney(entryPerLotValue)}</td></tr>
+      <tr><td>Entry combo price</td><td>${tgIbkrFmtMoney(positionEntryTotal)}</td><td>${tgIbkrFmtNum(entryPricePerLot, 2)}</td></tr>
+      <tr><td>Total legs</td><td>${tgIbkrFmtNum(totalLegs, 0)}</td><td>${tgIbkrFmtNum(legsPerLot, 0)}</td></tr>
+      <tr><td>Commission per side</td><td>${tgIbkrFmtMoney(totalCommissionPerSide)}</td><td>${tgIbkrFmtMoney(totalCommissionPerSide / lots)}</td></tr>
+      <tr><td>Round-trip commission</td><td>${tgIbkrFmtMoney(totalRoundTripCommission)}</td><td>${tgIbkrFmtMoney(roundTripCommissionPerLot)}</td></tr>
+      <tr><td>Profit target P&amp;L</td><td>${tgIbkrFmtMoney(profitWhole)}</td><td>${tgIbkrFmtMoney(profitPerLot)}</td></tr>
+      <tr><td>Stop loss P&amp;L</td><td>${tgIbkrFmtMoney(stopWhole)}</td><td>${tgIbkrFmtMoney(stopPerLot)}</td></tr>
+      <tr><td>Target close value needed</td><td>${tgIbkrFmtMoney(profitCloseValueWhole)}</td><td>${tgIbkrFmtMoney(profitCloseValuePerLot)}</td></tr>
+      <tr><td>Stop close value needed</td><td>${tgIbkrFmtMoney(stopCloseValueWhole)}</td><td>${tgIbkrFmtMoney(stopCloseValuePerLot)}</td></tr>
+      <tr><td>Target close price per lot</td><td>${tgIbkrFmtMoney(profitCloseValueWhole)}</td><td>${tgIbkrFmtNum(profitClosePricePerLot, 2)}</td></tr>
+      <tr><td>Stop close price per lot</td><td>${tgIbkrFmtMoney(stopCloseValueWhole)}</td><td>${tgIbkrFmtNum(stopClosePricePerLot, 2)}</td></tr>
+      <tr><td>Raw target price before rounding</td><td>${tgIbkrFmtMoney(profitCloseValueWhole)}</td><td>${tgIbkrFmtNum(rawProfitClosePricePerLot, 4)}</td></tr>
+      <tr><td>Raw stop price before rounding</td><td>${tgIbkrFmtMoney(stopCloseValueWhole)}</td><td>${tgIbkrFmtNum(rawStopClosePricePerLot, 4)}</td></tr>`;
+
+    tgIbkr('tg-ibkr-footnote').innerHTML = `<strong>${ticker}</strong> | <strong>${structure}</strong> | ${entryType === 'debit' ? 'Debit' : 'Credit'} | ${lots} lot(s) | ${legsPerLot} legs per lot | ${tgIbkrFmtNum(totalLegs, 0)} total legs.<br>Commission formula: total legs × commission per leg per side × 2 = ${tgIbkrFmtMoney(totalRoundTripCommission)} round trip.<br>The displayed close prices are <strong>combo prices per lot</strong> for IBKR net debit/credit combo orders.<br>Rounding is <strong>conservative</strong>: debit trades round up, credit trades round down, so the displayed order price still covers the full round-trip commissions and target/stop plan.`;
+
+    if (rawProfitClosePricePerLot < 0 || rawStopClosePricePerLot < 0) {
+      tgIbkrSetWarning('One of the calculated close prices is negative. That usually means the requested target or stop is not feasible with the entered entry value, risk, and commission assumptions.');
+    }
+  }
+
+  function tgIbkrLoadExample() {
+    tgIbkr('tg-ibkr-ticker').value = 'SPX';
+    tgIbkr('tg-ibkr-structure').value = 'bwb';
+    tgIbkr('tg-ibkr-lots').value = 4;
+    tgIbkr('tg-ibkr-legs-per-lot').value = 4;
+    tgIbkr('tg-ibkr-multiplier').value = 100;
+    tgIbkr('tg-ibkr-entry-type').value = 'debit';
+    tgIbkr('tg-ibkr-entry-total').value = 0;
+    tgIbkr('tg-ibkr-max-loss').value = 4000;
+    tgIbkr('tg-ibkr-profit-pct').value = 5;
+    tgIbkr('tg-ibkr-stop-pct').value = 10;
+    tgIbkr('tg-ibkr-commission').value = 1.71;
+    tgIbkr('tg-ibkr-tick-size').value = 0.05;
+    tgIbkr('tg-ibkr-notes').value = '4-lot BWB, $0.00 debit, 16 total legs';
+    tgIbkrCalculate();
+  }
+
+  function tgIbkrResetForm() {
+    tgIbkr('tg-ibkr-ticker').value = 'SPX';
+    tgIbkr('tg-ibkr-structure').value = 'custom';
+    tgIbkr('tg-ibkr-lots').value = 1;
+    tgIbkr('tg-ibkr-legs-per-lot').value = 4;
+    tgIbkr('tg-ibkr-multiplier').value = 100;
+    tgIbkr('tg-ibkr-entry-type').value = 'debit';
+    tgIbkr('tg-ibkr-entry-total').value = 0;
+    tgIbkr('tg-ibkr-max-loss').value = 1000;
+    tgIbkr('tg-ibkr-profit-pct').value = 5;
+    tgIbkr('tg-ibkr-stop-pct').value = 10;
+    tgIbkr('tg-ibkr-commission').value = 1.71;
+    tgIbkr('tg-ibkr-tick-size').value = 0.05;
+    tgIbkr('tg-ibkr-notes').value = '';
+    tgIbkrSetWarning('');
+    tgIbkrCalculate();
+  }
+
+  async function tgIbkrCopyText(buttonId, valueId, resetLabel) {
+    const button = tgIbkr(buttonId);
+    try {
+      await navigator.clipboard.writeText(tgIbkr(valueId).textContent);
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = resetLabel; }, 1200);
+    } catch {
+      button.textContent = 'Copy failed';
+      setTimeout(() => { button.textContent = resetLabel; }, 1200);
+    }
+  }
+
+  if (tgIbkr('tg-ibkr-ticker')) {
+    tgIbkr('tg-ibkr-ticker').addEventListener('change', () => { tgIbkrApplyTickerPreset(); tgIbkrCalculate(); });
+    tgIbkr('tg-ibkr-structure').addEventListener('change', () => { tgIbkrApplyStructurePreset(); tgIbkrCalculate(); });
+    tgIbkr('tg-ibkr-calc-btn').addEventListener('click', tgIbkrCalculate);
+    tgIbkr('tg-ibkr-reset-btn').addEventListener('click', tgIbkrResetForm);
+    tgIbkr('tg-ibkr-example-btn').addEventListener('click', tgIbkrLoadExample);
+    tgIbkr('tg-ibkr-copy-target').addEventListener('click', () => tgIbkrCopyText('tg-ibkr-copy-target', 'tg-ibkr-target-price', 'Copy'));
+    tgIbkr('tg-ibkr-copy-stop').addEventListener('click', () => tgIbkrCopyText('tg-ibkr-copy-stop', 'tg-ibkr-stop-price', 'Copy'));
+    tgIbkr('tg-ibkr-copy-target-preview').addEventListener('click', () => tgIbkrCopyText('tg-ibkr-copy-target-preview', 'tg-ibkr-target-preview', 'Copy preview'));
+    tgIbkr('tg-ibkr-copy-stop-preview').addEventListener('click', () => tgIbkrCopyText('tg-ibkr-copy-stop-preview', 'tg-ibkr-stop-preview', 'Copy preview'));
+    ['tg-ibkr-lots','tg-ibkr-legs-per-lot','tg-ibkr-multiplier','tg-ibkr-entry-type','tg-ibkr-entry-total','tg-ibkr-max-loss','tg-ibkr-profit-pct','tg-ibkr-stop-pct','tg-ibkr-commission','tg-ibkr-tick-size']
+      .forEach((id) => {
+        tgIbkr(id).addEventListener('input', tgIbkrCalculate);
+        tgIbkr(id).addEventListener('change', tgIbkrCalculate);
+      });
+    tgIbkrApplyTickerPreset();
+    tgIbkrCalculate();
+  }
+</script>
+
 </body>
 </html>
