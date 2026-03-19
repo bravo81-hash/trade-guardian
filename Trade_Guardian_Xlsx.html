@@ -802,7 +802,7 @@
             <i data-lucide="briefcase" class="mr-2 h-4 w-4"></i><span class="nav-text">Strategies</span>
           </button>
           <button onclick="navigate('trades')" id="nav-trades" data-main-nav="trades" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors hidden">
-            <i data-lucide="layers" class="mr-2 h-4 w-4"></i><span class="nav-text">Grouped Trades</span>
+            <i data-lucide="layers" class="mr-2 h-4 w-4"></i><span class="nav-text">Trade Operations</span>
           </button>
 
           <button onclick="navigate('ibkr-calculator')" id="nav-ibkr-calculator" data-main-nav="ibkr-calculator" class="flex items-center px-4 py-2.5 text-sm font-medium rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
@@ -1061,7 +1061,7 @@
             <div class="relative h-[240px] w-full"><canvas id="chart-global-composition"></canvas></div>
           </div>
           <div class="glass-card rounded-2xl p-6">
-            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="radar" class="mr-2 h-5 w-5 text-indigo-500"></i> Open Greek Mix</h3>
+            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="radar" class="mr-2 h-5 w-5 text-indigo-500"></i> Ticker Greek Mix</h3>
             <div class="relative h-[240px] w-full"><canvas id="chart-global-open-greek-mix"></canvas></div>
           </div>
         </div>
@@ -1088,7 +1088,7 @@
               <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
                 <div>
                   <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="split" class="mr-2 h-5 w-5 text-indigo-500"></i> Profit Source Split</h3>
-                  <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Closed-trade profit contribution from puts and calls, grouped by strategy.</p>
+                  <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Closed-trade profit contribution from puts, calls, and any unsplit remainder, grouped by strategy.</p>
                 </div>
               </div>
               <div class="relative h-[320px] w-full"><canvas id="chart-analytics-profit-source"></canvas></div>
@@ -1145,8 +1145,8 @@
         <div class="pro-card p-6">
           <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-5">
             <div>
-              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="layout-grid" class="mr-2 h-5 w-5 text-indigo-500"></i> Portfolio Risk Heatmap</h3>
-              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Heatmap view of strategy-level Delta, Theta, Gamma, and Vega exposure using the latest open workbook snapshot.</p>
+              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="layout-grid" class="mr-2 h-5 w-5 text-indigo-500"></i> Ticker Risk Heatmap</h3>
+              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Heatmap view of ticker-level Delta, Theta, Gamma, and Vega exposure using the latest open workbook snapshot.</p>
             </div>
             <div class="micro-pill"><i data-lucide="shield-check" class="h-3.5 w-3.5"></i> Live from active workbook</div>
           </div>
@@ -1190,8 +1190,8 @@
           </div>
         </div>
 
-        <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div class="pro-card p-6 xl:col-span-2">
+        <div class="grid grid-cols-1 gap-6">
+          <div class="pro-card p-6">
             <div class="flex items-center justify-between gap-3 mb-4">
               <div>
                 <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="calendar-range" class="mr-2 h-5 w-5 text-indigo-500"></i> Expiry Ladder Risk Chart</h3>
@@ -1314,10 +1314,6 @@
             <div id="quant-account-split" class="overflow-x-auto"></div>
           </div>
 
-          <div class="pro-card p-6">
-            <h3 class="font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center"><i data-lucide="git-merge" class="mr-2 h-5 w-5 text-indigo-500"></i> Roll Campaign Snapshot</h3>
-            <div id="quant-roll-campaigns" class="overflow-x-auto"></div>
-          </div>
         </div>
       </div>
 
@@ -1329,23 +1325,6 @@
           </div>
         </div>
         <div id="strategies-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6"></div>
-        <div class="pro-card p-6">
-          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
-            <div>
-              <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="sliders-horizontal" class="mr-2 h-5 w-5 text-indigo-500"></i> Strategy Configuration Manager</h3>
-              <p class="text-sm text-slate-500 dark:text-slate-400 mt-1 copy-note">Maintain strategy identifiers and target benchmarks used by sync classification and quant models.</p>
-            </div>
-            <div class="flex flex-wrap gap-2">
-              <button id="stratcfg-refresh" type="button" class="micro-pill">Refresh</button>
-              <button id="stratcfg-add-row" type="button" class="micro-pill">Add Row</button>
-              <button id="stratcfg-save" type="button" class="micro-pill">Save</button>
-              <button id="stratcfg-reprocess" type="button" class="micro-pill">Reprocess Other</button>
-              <button id="stratcfg-reset" type="button" class="micro-pill">Reset Defaults</button>
-            </div>
-          </div>
-          <div id="strategy-config-editor" class="overflow-x-auto"></div>
-          <p id="strategy-config-status" class="text-sm text-slate-500 dark:text-slate-400 mt-3 copy-note">Pull strategy configuration from DB to begin editing.</p>
-        </div>
       </div>
 
       <div id="view-strategy-detail" class="hidden fade-in space-y-6 pb-20">
@@ -1407,10 +1386,10 @@
       <div id="view-trades" class="hidden fade-in space-y-6 pb-20">
         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-end border-b border-slate-200 dark:border-slate-800 pb-4 mb-6">
           <div>
-            <h2 class="text-2xl font-bold text-slate-800 dark:text-white">All Trades</h2>
-            <p class="text-slate-500 dark:text-slate-400 mt-1 copy-note">Grouped by strategy and status.</p>
+            <h2 class="text-2xl font-bold text-slate-800 dark:text-white">Trade Operations</h2>
+            <p class="text-slate-500 dark:text-slate-400 mt-1 copy-note">Audit trades, surface urgent open positions, and keep the Active Journal clean.</p>
           </div>
-          <input type="text" id="trade-search" placeholder="Search symbol..." class="mt-4 sm:mt-0 px-4 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-850 focus:ring-2 focus:ring-indigo-500 w-full sm:w-64">
+          <input type="text" id="trade-search" placeholder="Search symbol, strategy, notes..." class="mt-4 sm:mt-0 px-4 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-850 focus:ring-2 focus:ring-indigo-500 w-full sm:w-64">
         </div>
         <div id="grouped-trades-container" class="space-y-8 pb-10"></div>
         <div class="pro-card p-6">
@@ -1496,7 +1475,7 @@
                 </div>
                 <div class="tg-ibkr-field">
                   <label class="tg-ibkr-label" for="tg-ibkr-entry-total">Entry Amount for Whole Position</label>
-                  <input id="tg-ibkr-entry-total" class="tg-ibkr-input" type="number" step="0.01" value="0" />
+                  <input id="tg-ibkr-entry-total" class="tg-ibkr-input" type="number" step="0.01" value="1000" />
                 </div>
                 <div class="tg-ibkr-field">
                   <label class="tg-ibkr-label" for="tg-ibkr-max-loss">Max Risk / Max Loss for Whole Position</label>
@@ -1520,7 +1499,7 @@
                 </div>
                 <div class="tg-ibkr-field full">
                   <label class="tg-ibkr-label" for="tg-ibkr-notes">Notes</label>
-                  <input id="tg-ibkr-notes" class="tg-ibkr-input" type="text" placeholder="Example: 4-lot BWB, $0.00 debit, 16 total legs" />
+                  <input id="tg-ibkr-notes" class="tg-ibkr-input" type="text" placeholder="Example: 4-lot BWB, 16 total legs" />
                   <p class="tg-ibkr-hint mt-2">Commission logic: <strong>lots × legs per lot × commission per leg per side × 2</strong>. SPX defaults to <strong>$1.71</strong> per leg per side so the displayed prices remain conservative against your observed IBKR charges.</p>
                 </div>
               </div>
@@ -1659,7 +1638,6 @@
       files: { active: null, expired: null },
       availableGroups: [],
       filters: { excludedGroups: new Set() },
-      strategyConfigRows: [],
       journalRows: [],
       journalStrategyOptions: [],
       cloud: { connected: false, lastSync: null, lastDriveOk: null, lastMessage: '' },
@@ -1962,17 +1940,6 @@ loadPersistedSettings();
       return data;
     }
 
-    function setStrategyConfigStatus(text, tone = 'neutral') {
-      const el = document.getElementById('strategy-config-status');
-      if (!el) return;
-      el.textContent = text;
-      el.classList.remove('text-slate-500', 'text-rose-500', 'text-emerald-500', 'text-amber-500', 'dark:text-slate-400');
-      if (tone === 'ok') el.classList.add('text-emerald-500');
-      else if (tone === 'error') el.classList.add('text-rose-500');
-      else if (tone === 'warn') el.classList.add('text-amber-500');
-      else el.classList.add('text-slate-500', 'dark:text-slate-400');
-    }
-
     function setJournalStatus(text, tone = 'neutral') {
       const el = document.getElementById('journal-status');
       if (!el) return;
@@ -1982,91 +1949,6 @@ loadPersistedSettings();
       else if (tone === 'error') el.classList.add('text-rose-500');
       else if (tone === 'warn') el.classList.add('text-amber-500');
       else el.classList.add('text-slate-500', 'dark:text-slate-400');
-    }
-
-    function renderStrategyConfigEditor() {
-      const el = document.getElementById('strategy-config-editor');
-      if (!el) return;
-      const rows = appData.strategyConfigRows || [];
-      if (!rows.length) {
-        el.innerHTML = '<p class="text-sm text-slate-500">No strategy rows found. Use Add Row or Reset Defaults.</p>';
-        return;
-      }
-      el.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-2 py-2">Name</th><th class="px-2 py-2">Identifier</th><th class="px-2 py-2 text-right">Target PnL</th><th class="px-2 py-2 text-right">Target Days</th><th class="px-2 py-2 text-right">Min Stability</th><th class="px-2 py-2 text-right">Typical Debit</th><th class="px-2 py-2">Description</th><th class="px-2 py-2 text-right">Delete</th></tr></thead><tbody>${rows.map((r, i) => `<tr class="border-b border-slate-100 dark:border-slate-800/60" data-sc-row="${i}"><td class="px-2 py-2"><input data-f="name" value="${escapeHtml(r.name || '')}" class="w-full px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="identifier" value="${escapeHtml(r.identifier || '')}" class="w-full px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2"><input data-f="target_pnl" type="number" step="1" value="${Number(r.target_pnl || 0)}" class="w-28 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="target_days" type="number" step="1" value="${Number(r.target_days || 0)}" class="w-24 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="min_stability" type="number" step="0.01" value="${Number(r.min_stability || 0)}" class="w-24 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="typical_debit" type="number" step="1" value="${Number(r.typical_debit || 0)}" class="w-28 ml-auto block px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"></td><td class="px-2 py-2"><input data-f="description" value="${escapeHtml(r.description || '')}" class="w-full px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"></td><td class="px-2 py-2 text-right"><button type="button" data-sc-del="${i}" class="text-rose-500 text-xs font-semibold">Remove</button></td></tr>`).join('')}</tbody></table>`;
-    }
-
-    function collectStrategyConfigRowsFromDom() {
-      const rows = [];
-      document.querySelectorAll('#strategy-config-editor tbody tr[data-sc-row]').forEach(tr => {
-        const getVal = f => {
-          const inp = tr.querySelector(`[data-f="${f}"]`);
-          return inp ? inp.value : '';
-        };
-        const name = String(getVal('name') || '').trim();
-        if (!name) return;
-        rows.push({
-          name,
-          identifier: String(getVal('identifier') || '').trim(),
-          target_pnl: Number(getVal('target_pnl')) || 0,
-          target_days: Number(getVal('target_days')) || 0,
-          min_stability: Number(getVal('min_stability')) || 0,
-          typical_debit: Number(getVal('typical_debit')) || 0,
-          description: String(getVal('description') || '').trim()
-        });
-      });
-      return rows;
-    }
-
-    async function loadStrategyConfigEditor() {
-      const el = document.getElementById('strategy-config-editor');
-      if (!el) return;
-      setStrategyConfigStatus('Loading strategy config...');
-      try {
-        const data = await apiFetchJson('/api/strategy-config', { method: 'GET' });
-        appData.strategyConfigRows = Array.isArray(data.rows) ? data.rows : [];
-        renderStrategyConfigEditor();
-        setStrategyConfigStatus(`Loaded ${appData.strategyConfigRows.length} strategy rows.`, 'ok');
-      } catch (err) {
-        setStrategyConfigStatus(`Failed to load strategy config: ${err.message}`, 'error');
-      }
-    }
-
-    async function saveStrategyConfigEditor() {
-      const rows = collectStrategyConfigRowsFromDom();
-      if (!rows.length) {
-        setStrategyConfigStatus('Add at least one strategy row before saving.', 'warn');
-        return;
-      }
-      setStrategyConfigStatus('Saving strategy config...');
-      try {
-        await apiFetchJson('/api/strategy-config/save', { method: 'POST', body: JSON.stringify({ rows }) });
-        appData.strategyConfigRows = rows;
-        renderStrategyConfigEditor();
-        setStrategyConfigStatus(`Saved ${rows.length} strategy rows.`, 'ok');
-      } catch (err) {
-        setStrategyConfigStatus(`Save failed: ${err.message}`, 'error');
-      }
-    }
-
-    async function resetStrategyConfigDefaults() {
-      setStrategyConfigStatus('Resetting defaults...');
-      try {
-        await apiFetchJson('/api/strategy-config/reset', { method: 'POST', body: JSON.stringify({}) });
-        await loadStrategyConfigEditor();
-        setStrategyConfigStatus('Reset to default strategies.', 'ok');
-      } catch (err) {
-        setStrategyConfigStatus(`Reset failed: ${err.message}`, 'error');
-      }
-    }
-
-    async function reprocessOtherTradesNow() {
-      setStrategyConfigStatus("Reprocessing 'Other' trades...");
-      try {
-        const data = await apiFetchJson('/api/strategy-config/reprocess-other', { method: 'POST', body: JSON.stringify({}) });
-        setStrategyConfigStatus(`Reprocessed ${Number(data.updated_count || 0)} trades.`, 'ok');
-      } catch (err) {
-        setStrategyConfigStatus(`Reprocess failed: ${err.message}`, 'error');
-      }
     }
 
     function renderJournalEditor() {
@@ -2208,6 +2090,136 @@ loadPersistedSettings();
       const d = normalizeDateValue(value);
       if (!d) return value || '—';
       return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    function extractTickerFromName(name) {
+      try {
+        const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+        if (!parts.length) return 'UNKNOWN';
+        const ticker = parts[0].replace(/^\.+/, '').toUpperCase();
+        if (!ticker) return 'UNKNOWN';
+        if (['M200', '130', '160', 'IRON', 'VERTICAL', 'SMSF', 'OTHER', 'UNCATEGORIZED'].includes(ticker)) {
+          return 'UNKNOWN';
+        }
+        return ticker;
+      } catch (err) {
+        return 'UNKNOWN';
+      }
+    }
+
+    function getTradeTicker(trade) {
+      const raw = trade?.raw || {};
+      const explicit = [
+        trade?.ticker,
+        trade?.underlying,
+        raw.ticker,
+        raw.underlying,
+        raw.underlying_symbol,
+        raw.underlier,
+        raw.symbol
+      ].find(v => String(v || '').trim());
+      if (explicit) return String(explicit).trim().toUpperCase();
+
+      const candidates = [
+        trade?.sym,
+        trade?.name,
+        trade?.group,
+        trade?.legs?.[0]?.name,
+        trade?.legs?.[0]?.raw?.name
+      ];
+      for (const candidate of candidates) {
+        const ticker = extractTickerFromName(candidate);
+        if (ticker !== 'UNKNOWN') return ticker;
+      }
+      return 'UNKNOWN';
+    }
+
+    function getTradeExcursionHigh(trade) {
+      const raw = trade?.raw || {};
+      const highCandidates = [
+        parseNumber(raw.high),
+        parseNumber(trade?.high),
+        parseNumber(raw.max_profit)
+      ];
+      const high = highCandidates.find(v => Number.isFinite(v) && v > 0);
+      return Number.isFinite(high) && high > 0 ? high : null;
+    }
+
+    function getTradeExcursionLow(trade) {
+      const raw = trade?.raw || {};
+      const lowCandidates = [
+        parseNumber(raw.low),
+        parseNumber(trade?.low),
+        -Math.abs(parseNumber(raw.max_loss))
+      ];
+      const low = lowCandidates.find(v => Number.isFinite(v) && v < 0);
+      return Number.isFinite(low) && low < 0 ? low : null;
+    }
+
+    function buildDailyEquitySeries(closedTrades) {
+      const byDate = {};
+      closedTrades.forEach(t => {
+        const d = toIsoDate(t.closeDate || t.expiration || t.openDate);
+        if (!d) return;
+        byDate[d] = (byDate[d] || 0) + (Number(t.pnl) || 0);
+      });
+      const dates = Object.keys(byDate).sort((a, b) => compareDateValues(a, b));
+      let cumulative = 0;
+      let peak = Number.NEGATIVE_INFINITY;
+      return dates.map(date => {
+        cumulative += Number(byDate[date] || 0);
+        peak = Math.max(peak, cumulative);
+        return {
+          date,
+          dailyPnl: Number(byDate[date] || 0),
+          equity: cumulative,
+          drawdown: Number.isFinite(peak) ? cumulative - peak : 0
+        };
+      });
+    }
+
+    function buildTickerGreekBuckets(openTrades) {
+      const buckets = {};
+      openTrades.forEach(t => {
+        const ticker = getTradeTicker(t);
+        if (!buckets[ticker]) {
+          buckets[ticker] = { ticker, count: 0, pnl: 0, delta: 0, theta: 0, gamma: 0, vega: 0 };
+        }
+        const bucket = buckets[ticker];
+        bucket.count += 1;
+        bucket.pnl += Number(t.pnl) || 0;
+        bucket.delta += Number(t.delta) || 0;
+        bucket.theta += Number(t.theta) || 0;
+        bucket.gamma += Number(t.gamma) || 0;
+        bucket.vega += Number(t.vega) || 0;
+      });
+      return Object.values(buckets).sort((a, b) => {
+        const bScore = Math.abs(b.delta) + Math.abs(b.theta) + Math.abs(b.gamma) + Math.abs(b.vega);
+        const aScore = Math.abs(a.delta) + Math.abs(a.theta) + Math.abs(a.gamma) + Math.abs(a.vega);
+        if (bScore !== aScore) return bScore - aScore;
+        if (b.count !== a.count) return b.count - a.count;
+        return a.ticker.localeCompare(b.ticker);
+      });
+    }
+
+    function buildProfitSourceBuckets(closedTrades) {
+      const buckets = {};
+      closedTrades.forEach(t => {
+        const source = String(t.strat || 'Other').trim() || 'Other';
+        if (!buckets[source]) buckets[source] = { put: 0, call: 0, other: 0 };
+        const put = Number(t.putPnl) || 0;
+        const call = Number(t.callPnl) || 0;
+        const total = Number(t.pnl) || 0;
+        buckets[source].put += put;
+        buckets[source].call += call;
+        const remainder = total - (put + call);
+        if (Math.abs(remainder) > 0.01) {
+          buckets[source].other += remainder;
+        } else if (!put && !call && total !== 0) {
+          buckets[source].other += total;
+        }
+      });
+      return buckets;
     }
 
     function monthFromDate(value) {
@@ -2398,8 +2410,8 @@ loadPersistedSettings();
             lotSize: Math.max(1, parseNumber(row.quantity || row.qty || row.contracts || row.lot_size || 1) || 1),
             openDate: openDateIso || '',
             expiration: expiryIso || '',
-            maxGain: Math.max(parseNumber(row.high), parseNumber(row.max_profit), parseNumber(row.total_return), 0),
-            maxDrawdown: Math.min(parseNumber(row.low), -Math.abs(parseNumber(row.max_loss)), parseNumber(row.total_return), 0),
+            maxGain: Math.max(parseNumber(row.high), parseNumber(row.max_profit), 0),
+            maxDrawdown: Math.min(parseNumber(row.low), -Math.abs(parseNumber(row.max_loss)), 0),
             netDebitCredit: parseNumber(row.net_debit_credit),
             chance: parseNumber(row.chance),
             maxLoss: parseNumber(row.max_loss),
@@ -2424,6 +2436,7 @@ loadPersistedSettings();
             openMonth: monthFromDate(openDateIso || row.created_at),
             closeMonth: status === 'CLOSED' ? monthFromDate(expiryIso || openDateIso || row.created_at) : 'Unknown'
           };
+          currentTrade.ticker = getTradeTicker(currentTrade);
           trades.push(currentTrade);
         } else if (currentTrade) {
           currentTrade.legs.push({
@@ -2617,14 +2630,14 @@ loadPersistedSettings();
       closed.forEach(t => {
         const reasons = [];
         const daysHeld = getTradeDaysHeld(t);
-        const maxGain = Number(t.maxGain) || 0;
-        const maxDrawdown = Number(t.maxDrawdown) || 0;
+        const maxGain = getTradeExcursionHigh(t) || 0;
+        const maxDrawdown = getTradeExcursionLow(t) || 0;
         const pnl = Number(t.pnl) || 0;
         if (maxGain > 0 && pnl < maxGain * 0.65) { categories['Profit Give-back'] += 1; reasons.push(`Gave back ${fmtMoney(maxGain - pnl)} from peak ${fmtMoney(maxGain)}`); }
         if (pnl < 0 && daysHeld >= overHoldCut) { categories['Held Loser Too Long'] += 1; reasons.push(`Held ${daysHeld} days, above ${Math.round(overHoldCut)}-day threshold for losers`); }
         if (pnl < 0 && Math.abs(pnl - maxDrawdown) <= Math.max(25, Math.abs(maxDrawdown) * 0.15)) { categories['Closed Near Worst'] += 1; reasons.push(`Exit was close to worst excursion at ${fmtMoney(maxDrawdown)}`); }
         if (maxGain > 0 && Math.abs(maxDrawdown) > maxGain * 1.5) { categories['Poor Reward/Risk'] += 1; reasons.push(`Adverse excursion ${fmtMoney(maxDrawdown)} outweighed favorable excursion ${fmtMoney(maxGain)}`); }
-        if (reasons.length) flagged.push({ id: t.id, sym: t.sym, strat: t.strat, pnl, daysHeld, reasons, severity: reasons.length * 10 + Math.abs(Math.min(0, pnl)) / 100 });
+        if (reasons.length) flagged.push({ id: t.id, sym: t.sym, ticker: getTradeTicker(t), strat: t.strat, pnl, daysHeld, reasons, severity: reasons.length * 10 + Math.abs(Math.min(0, pnl)) / 100 });
       });
 
       flagged.sort((a, b) => b.severity - a.severity);
@@ -2767,13 +2780,13 @@ loadPersistedSettings();
       });
       Object.entries(byStrat).forEach(([strat, arr]) => {
         const winners = arr.filter(t => Number(t.pnl) > 0);
+        const allDays = arr.map(t => Math.max(1, getTradeDaysHeld(t)));
+        const allYields = arr.map(t => ((Number(t.pnl) || 0) / Math.max(1, getTradeRisk(t)) / Math.max(1, getTradeDaysHeld(t))) * 100);
         const winnerPnls = winners.map(t => Number(t.pnl) || 0);
-        const winnerDays = winners.map(t => Math.max(1, getTradeDaysHeld(t)));
-        const yields = winners.map(t => ((Number(t.pnl) || 0) / Math.max(1, getTradeRisk(t)) / Math.max(1, getTradeDaysHeld(t))) * 100);
         out[strat] = {
           pnl: winnerPnls.length ? winnerPnls.reduce((a, b) => a + b, 0) / winnerPnls.length : 500,
-          dit: winnerDays.length ? winnerDays.reduce((a, b) => a + b, 0) / winnerDays.length : 40,
-          yield: yields.length ? yields.reduce((a, b) => a + b, 0) / yields.length : 0
+          dit: allDays.length ? quantile(allDays, 0.5) : 40,
+          yield: allYields.length ? allYields.reduce((a, b) => a + b, 0) / allYields.length : 0
         };
       });
       return out;
@@ -2786,12 +2799,11 @@ loadPersistedSettings();
       const theta = Number(trade.theta) || 0;
       const stability = computeTradeStability(trade);
       const thetaEff = computeThetaEfficiency(trade, days);
-      const lotSize = inferLotSizeFromTrade(trade);
       const debit = getTradeRisk(trade);
       const bench = benchmarks[strat] || { pnl: 500, dit: 40 };
       const histAvgPnl = Number(bench.pnl) || 500;
       const histAvgDays = Math.max(1, Number(bench.dit) || 40);
-      const targetProfit = histAvgPnl * regimeMult * lotSize;
+      const targetProfit = histAvgPnl * regimeMult;
 
       let score = 50;
       let action = 'HOLD';
@@ -2824,9 +2836,9 @@ loadPersistedSettings();
         if (debit > 0 && (leftInTank / debit) < 0.05) {
           score += 40;
           reason = 'Squeezed Dry';
-        } else if (leftInTank < (100 * lotSize)) {
+        } else if (leftInTank < 100) {
           score += 35;
-          reason = `Empty Tank (<$${100 * lotSize})`;
+          reason = 'Empty Tank (<$100)';
         }
       }
 
@@ -2842,7 +2854,7 @@ loadPersistedSettings();
       const staleThreshold = histAvgDays * 1.25;
       if (strat === '130/160') {
         const limit130 = Math.min(staleThreshold, 30);
-        if (days > limit130 && pnl < (100 * lotSize)) {
+        if (days > limit130 && pnl < 100) {
           return { trade, action: 'KILL', score: 95, reason: `Stale (> ${limit130.toFixed(0)}d)`, juiceVal, juiceType, targetProfit, days, thetaEff, stability };
         } else if (days > (limit130 * 0.8)) {
           score += 20;
@@ -3123,28 +3135,6 @@ loadPersistedSettings();
       return { pnl: totalPnl, sharpe, cagr, maxDd };
     }
 
-    function buildRollCampaignSummary(trades) {
-      const rolled = trades.filter(t => String(t.parentId || '').trim() !== '');
-      if (!rolled.length) return [];
-      const byParent = {};
-      rolled.forEach(t => {
-        const pid = String(t.parentId || '').trim();
-        if (!byParent[pid]) byParent[pid] = [];
-        byParent[pid].push(t);
-      });
-      return Object.entries(byParent).map(([pid, arr]) => {
-        const totalPnl = arr.reduce((s, t) => s + (Number(t.pnl) || 0), 0);
-        const totalDays = arr.reduce((s, t) => s + Math.max(1, getTradeDaysHeld(t)), 0);
-        return {
-          parentId: pid,
-          legs: arr.length,
-          totalPnl,
-          totalDays,
-          avgPnlPerLeg: totalPnl / Math.max(1, arr.length)
-        };
-      }).sort((a, b) => b.totalPnl - a.totalPnl);
-    }
-
     function renderQuantOps() {
       const queueEl = document.getElementById('quant-priority-queue');
       if (!queueEl) return;
@@ -3165,7 +3155,6 @@ loadPersistedSettings();
       const riskProfiles = buildMaeVelocityProfiles(closedTrades);
       const harvestRows = buildHarvestWindowStats(closedTrades);
       const corr = buildRealizedCorrelationMatrix(closedTrades);
-      const rollCampaigns = buildRollCampaignSummary(allTrades);
 
       const varEl = document.getElementById('quant-var');
       const varSubEl = document.getElementById('quant-var-sub');
@@ -3259,12 +3248,6 @@ loadPersistedSettings();
         accEl.innerHTML = `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Segment</th><th class="px-3 py-2 text-right">Closed Trades</th><th class="px-3 py-2 text-right">Banked PnL</th><th class="px-3 py-2 text-right">CAGR</th><th class="px-3 py-2 text-right">Sharpe</th><th class="px-3 py-2 text-right">Max DD</th></tr></thead><tbody>${row('Total', closedTrades, totalM)}${row('Prime', closedPrime, primeM)}${row('SMSF', closedSmsf, smsfM)}</tbody></table>`;
       }
 
-      const rollEl = document.getElementById('quant-roll-campaigns');
-      if (rollEl) {
-        rollEl.innerHTML = rollCampaigns.length
-          ? `<table class="w-full text-sm text-left"><thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider"><tr><th class="px-3 py-2">Parent ID</th><th class="px-3 py-2 text-right">Legs</th><th class="px-3 py-2 text-right">Total PnL</th><th class="px-3 py-2 text-right">Total Days</th><th class="px-3 py-2 text-right">Avg PnL / Leg</th></tr></thead><tbody>${rollCampaigns.map(r => `<tr class="border-b border-slate-100 dark:border-slate-800/60"><td class="px-3 py-2 font-medium">${r.parentId}</td><td class="px-3 py-2 text-right">${r.legs}</td><td class="px-3 py-2 text-right ${clrMoney(r.totalPnl)}">${fmtMoney(r.totalPnl)}</td><td class="px-3 py-2 text-right">${r.totalDays}</td><td class="px-3 py-2 text-right ${clrMoney(r.avgPnlPerLeg)}">${fmtMoney(r.avgPnlPerLeg)}</td></tr>`).join('')}</tbody></table>`
-          : '<p class="text-sm text-slate-500">No roll campaigns detected. Populate the Parent ID field in your workbook exports to enable this view.</p>';
-      }
     }
 
     function setDashboardSubtab(tab) {
@@ -3297,7 +3280,7 @@ loadPersistedSettings();
       document.querySelectorAll('#content-area > div').forEach(el => el.classList.add('hidden'));
       const viewEl = document.getElementById(`view-${view}`);
       if (viewEl) viewEl.classList.remove('hidden');
-      const titles = { upload: 'Load Workbooks', dashboard: 'Workbook Dashboard', strategies: 'Strategy Hub', trades: 'Grouped Trades', 'ibkr-calculator': 'IBKR Calculator', 'strategy-detail': 'Strategy Analysis', 'trade-detail': 'Trade Snapshot' };
+      const titles = { upload: 'Load Workbooks', dashboard: 'Workbook Dashboard', strategies: 'Strategy Hub', trades: 'Trade Operations', 'ibkr-calculator': 'IBKR Calculator', 'strategy-detail': 'Strategy Analysis', 'trade-detail': 'Trade Snapshot' };
       document.getElementById('page-title').textContent = titles[view] || 'Trade Guardian XLSX';
       if (view === 'dashboard') setDashboardSubtab(currentDashboardSubtab);
       try {
@@ -3479,19 +3462,19 @@ loadPersistedSettings();
       ].map(item => `<div class="stat-pill"><p class="text-[10px] uppercase tracking-[0.12em] font-bold text-slate-400 mb-1">${item.label}</p><p class="text-sm font-semibold ${item.tone}">${item.value}</p></div>`).join('');
 
       const c = getColors();
-      let cum = 0;
-      const eqData = closedTrades.map(t => { cum += t.pnl; return { x: t.closeDate || t.expiration || t.openDate, y: cum, symbol: t.sym }; });
+      const dailyEquity = buildDailyEquitySeries(closedTrades);
+      const eqLabels = dailyEquity.map(p => p.date);
+      const eqValues = dailyEquity.map(p => p.equity);
+      const drawdownValues = dailyEquity.map(p => p.drawdown);
 
       drawOrReplace('gEq', 'chart-global-equity', 'line', {
-        labels: eqData.map(d => d.x),
-        datasets: [{ label: 'Cumulative Realized', data: eqData.map(d => d.y), borderColor: c.indigoLine, borderWidth: 2, tension: 0.2, pointRadius: 0, fill: true, backgroundColor: (ctx) => { const grad = ctx.chart.ctx.createLinearGradient(0,0,0,300); grad.addColorStop(0, 'rgba(99, 102, 241, 0.3)'); grad.addColorStop(1, 'rgba(99, 102, 241, 0)'); return grad; } }]
+        labels: eqLabels,
+        datasets: [{ label: 'Cumulative Realized', data: eqValues, borderColor: c.indigoLine, borderWidth: 2, tension: 0.2, pointRadius: 0, fill: true, backgroundColor: (ctx) => { const grad = ctx.chart.ctx.createLinearGradient(0,0,0,300); grad.addColorStop(0, 'rgba(99, 102, 241, 0.3)'); grad.addColorStop(1, 'rgba(99, 102, 241, 0)'); return grad; } }]
       }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 8 } }, y: { grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } } } });
 
-      const drawdownSeries = []; let peak = Number.NEGATIVE_INFINITY;
-      eqData.forEach(p => { peak = Math.max(peak, p.y); drawdownSeries.push(p.y - peak); });
       drawOrReplace('gDd', 'chart-global-drawdown', 'line', {
-        labels: eqData.map(d => d.x),
-        datasets: [{ label: 'Drawdown', data: drawdownSeries, borderColor: c.redBorder, backgroundColor: c.redFill, fill: true, tension: 0.25, pointRadius: 0, borderWidth: 2 }]
+        labels: eqLabels,
+        datasets: [{ label: 'Drawdown', data: drawdownValues, borderColor: c.redBorder, backgroundColor: c.redFill, fill: true, tension: 0.25, pointRadius: 0, borderWidth: 2 }]
       }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 8 } }, y: { grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } } } });
 
       drawOrReplace('gWl', 'chart-global-winloss', 'doughnut', {
@@ -3513,10 +3496,17 @@ loadPersistedSettings();
         ]
       }, { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, usePointStyle: true } } }, scales: { x: { stacked: true, grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } }, y: { stacked: true, grid: { display: false }, ticks: { color: c.text } } } });
 
-      drawOrReplace('gOpenMix', 'chart-global-open-greek-mix', 'radar', {
-        labels: ['Delta', 'Theta', 'Gamma', 'Vega'],
-        datasets: [{ label: 'Open Portfolio', data: [Math.abs(g.openRisk.delta), Math.abs(g.openRisk.theta), Math.abs(g.openRisk.gamma), Math.abs(g.openRisk.vega)], borderColor: c.indigoLine, backgroundColor: 'rgba(99,102,241,0.15)', pointBackgroundColor: c.indigoLine, pointBorderColor: c.indigoLine, borderWidth: 2 }]
-      }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { r: { angleLines: { color: c.grid }, grid: { color: c.grid }, pointLabels: { color: c.text }, ticks: { display: false } } } });
+      const tickerGreekBuckets = buildTickerGreekBuckets(openTrades);
+      const visibleTickerGreekBuckets = tickerGreekBuckets.length ? tickerGreekBuckets.slice(0, 6) : [{ ticker: 'No Data', delta: 0, theta: 0, gamma: 0, vega: 0 }];
+      drawOrReplace('gOpenMix', 'chart-global-open-greek-mix', 'bar', {
+        labels: visibleTickerGreekBuckets.map(t => t.ticker),
+        datasets: [
+          { label: 'Delta', data: visibleTickerGreekBuckets.map(t => t.delta), backgroundColor: c.indigoLine, borderColor: c.indigoLine, borderWidth: 1, borderRadius: 4 },
+          { label: 'Theta', data: visibleTickerGreekBuckets.map(t => t.theta), backgroundColor: c.orangeLine, borderColor: c.orangeLine, borderWidth: 1, borderRadius: 4 },
+          { label: 'Gamma', data: visibleTickerGreekBuckets.map(t => t.gamma), backgroundColor: '#8b5cf6', borderColor: '#8b5cf6', borderWidth: 1, borderRadius: 4 },
+          { label: 'Vega', data: visibleTickerGreekBuckets.map(t => t.vega), backgroundColor: '#ec4899', borderColor: '#ec4899', borderWidth: 1, borderRadius: 4 }
+        ]
+      }, { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, usePointStyle: true } } }, scales: { x: { grid: { color: c.grid }, ticks: { color: c.text, callback: v => Number(v).toFixed(2) } }, y: { grid: { display: false }, ticks: { color: c.text } } } });
 
       drawOrReplace('gCluster', 'chart-dashboard-clustering', 'bubble', {
         datasets: [{
@@ -3546,25 +3536,22 @@ loadPersistedSettings();
         }
       });
 
-      const profitByStrategy = {};
-      closedTrades.forEach(t => {
-        if (!profitByStrategy[t.strat]) profitByStrategy[t.strat] = { put: 0, call: 0 };
-        profitByStrategy[t.strat].put += Number(t.putPnl) || 0;
-        profitByStrategy[t.strat].call += Number(t.callPnl) || 0;
-      });
+      const profitByStrategy = buildProfitSourceBuckets(closedTrades);
       const profitKeys = Object.keys(profitByStrategy).sort((a, b) => {
-        const av = Math.abs((profitByStrategy[a].put || 0)) + Math.abs((profitByStrategy[a].call || 0));
-        const bv = Math.abs((profitByStrategy[b].put || 0)) + Math.abs((profitByStrategy[b].call || 0));
+        const av = Math.abs((profitByStrategy[a].put || 0)) + Math.abs((profitByStrategy[a].call || 0)) + Math.abs((profitByStrategy[a].other || 0));
+        const bv = Math.abs((profitByStrategy[b].put || 0)) + Math.abs((profitByStrategy[b].call || 0)) + Math.abs((profitByStrategy[b].other || 0));
         return bv - av;
       });
       const profitLabels = profitKeys.length ? profitKeys : ['No Data'];
       const profitPutData = profitKeys.length ? profitKeys.map(k => profitByStrategy[k].put) : [0];
       const profitCallData = profitKeys.length ? profitKeys.map(k => profitByStrategy[k].call) : [0];
+      const profitOtherData = profitKeys.length ? profitKeys.map(k => profitByStrategy[k].other || 0) : [0];
       drawOrReplace('gProfitSource', 'chart-analytics-profit-source', 'bar', {
         labels: profitLabels,
         datasets: [
           { label: 'Put P&L', data: profitPutData, backgroundColor: c.redFill, borderColor: c.redBorder, borderWidth: 1, borderRadius: 6, stack: 'split' },
-          { label: 'Call P&L', data: profitCallData, backgroundColor: c.greenFill, borderColor: c.greenBorder, borderWidth: 1, borderRadius: 6, stack: 'split' }
+          { label: 'Call P&L', data: profitCallData, backgroundColor: c.greenFill, borderColor: c.greenBorder, borderWidth: 1, borderRadius: 6, stack: 'split' },
+          { label: 'Other / Unsplit', data: profitOtherData, backgroundColor: 'rgba(99,102,241,0.22)', borderColor: c.indigoLine, borderWidth: 1, borderRadius: 6, stack: 'split' }
         ]
       }, {
         indexAxis: 'y',
@@ -3718,19 +3705,20 @@ loadPersistedSettings();
       }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, usePointStyle: true } } }, scales: { x: { type: 'time', time: { unit: 'day' }, grid: { color: c.grid }, ticks: { color: c.text, maxTicksLimit: 7 } }, y: { grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } } } });
 
       const heatmap = document.getElementById('dash-risk-heatmap');
-      const openByStrategy = {};
-      appData.trades.filter(t => t.status === 'OPEN').forEach(t => {
-        if (!openByStrategy[t.strat]) openByStrategy[t.strat] = { delta: 0, theta: 0, gamma: 0, vega: 0, count: 0 };
-        openByStrategy[t.strat].delta += t.delta;
-        openByStrategy[t.strat].theta += t.theta;
-        openByStrategy[t.strat].gamma += t.gamma;
-        openByStrategy[t.strat].vega += t.vega;
-        openByStrategy[t.strat].count += 1;
+      const openByTicker = {};
+      openTrades.forEach(t => {
+        const ticker = getTradeTicker(t);
+        if (!openByTicker[ticker]) openByTicker[ticker] = { delta: 0, theta: 0, gamma: 0, vega: 0, count: 0 };
+        openByTicker[ticker].delta += Number(t.delta) || 0;
+        openByTicker[ticker].theta += Number(t.theta) || 0;
+        openByTicker[ticker].gamma += Number(t.gamma) || 0;
+        openByTicker[ticker].vega += Number(t.vega) || 0;
+        openByTicker[ticker].count += 1;
       });
-      const allAbs = Object.values(openByStrategy).flatMap(v => [Math.abs(v.delta), Math.abs(v.theta), Math.abs(v.gamma), Math.abs(v.vega)]);
+      const allAbs = Object.values(openByTicker).flatMap(v => [Math.abs(v.delta), Math.abs(v.theta), Math.abs(v.gamma), Math.abs(v.vega)]);
       const maxAbs = Math.max(1, ...allAbs);
       const heat = v => `background: linear-gradient(180deg, rgba(99,102,241,${0.08 + (Math.abs(v)/maxAbs)*0.42}), rgba(34,197,94,${0.04 + (Math.abs(v)/maxAbs)*0.18}));`;
-      heatmap.innerHTML = Object.keys(openByStrategy).length ? Object.entries(openByStrategy).map(([name, vals]) => `<div class="heatmap-cell" style="${heat(vals.delta + vals.theta + vals.gamma + vals.vega)}"><div><p class="font-semibold text-slate-800 dark:text-slate-100">${name}</p><p class="text-xs text-slate-500 mt-1">${vals.count} open positions</p></div><div class="grid grid-cols-2 gap-2 text-xs"><div><span class="text-slate-400">Δ</span> <span class="font-bold text-cyan-500">${vals.delta.toFixed(2)}</span></div><div><span class="text-slate-400">Θ</span> <span class="font-bold text-orange-500">${vals.theta.toFixed(2)}</span></div><div><span class="text-slate-400">Γ</span> <span class="font-bold text-violet-500">${vals.gamma.toFixed(3)}</span></div><div><span class="text-slate-400">V</span> <span class="font-bold text-pink-500">${vals.vega.toFixed(2)}</span></div></div></div>`).join('') : '<p class="text-sm text-slate-500">No open-position risk to display.</p>';
+      heatmap.innerHTML = Object.keys(openByTicker).length ? Object.entries(openByTicker).map(([name, vals]) => `<div class="heatmap-cell" style="${heat(vals.delta + vals.theta + vals.gamma + vals.vega)}"><div><p class="font-semibold text-slate-800 dark:text-slate-100">${name}</p><p class="text-xs text-slate-500 mt-1">${vals.count} open positions</p></div><div class="grid grid-cols-2 gap-2 text-xs"><div><span class="text-slate-400">Δ</span> <span class="font-bold text-cyan-500">${vals.delta.toFixed(2)}</span></div><div><span class="text-slate-400">Θ</span> <span class="font-bold text-orange-500">${vals.theta.toFixed(2)}</span></div><div><span class="text-slate-400">Γ</span> <span class="font-bold text-violet-500">${vals.gamma.toFixed(3)}</span></div><div><span class="text-slate-400">V</span> <span class="font-bold text-pink-500">${vals.vega.toFixed(2)}</span></div></div></div>`).join('') : '<p class="text-sm text-slate-500">No open-position risk to display.</p>';
 
       const ivTrades = appData.trades.filter(t => Number.isFinite(Number(t.iv)) && Number(t.iv) > 0);
       const ivValues = ivTrades.map(t => Number(t.iv));
@@ -3753,9 +3741,15 @@ loadPersistedSettings();
         ]
       }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: c.text, usePointStyle: true } } }, scales: { x: { grid: { display: false }, ticks: { color: c.text } }, y: { grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } }, y1: { position: 'right', grid: { display: false }, ticks: { color: c.text, callback: v => `${Number(v).toFixed(0)}%` } } } });
 
+      const excursionPoints = closedTrades.map(t => {
+        const low = getTradeExcursionLow(t);
+        const high = getTradeExcursionHigh(t);
+        if (low == null && high == null) return null;
+        return { x: low ?? 0, y: high ?? 0, symbol: t.sym, ticker: getTradeTicker(t), pnl: t.pnl };
+      }).filter(Boolean);
       drawOrReplace('gEx', 'chart-global-excursion', 'scatter', {
-        datasets: [{ label: 'Trades', data: appData.trades.map(t => ({ x: Number(t.maxDrawdown) || 0, y: Number(t.maxGain) || 0, symbol: t.sym, pnl: t.pnl })), pointRadius: 5, pointHoverRadius: 7, pointBackgroundColor: appData.trades.map(t => Number(t.pnl) >= 0 ? c.greenBorder : c.redBorder), pointBorderWidth: 0 }]
-      }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: item => `${item.raw.symbol}: MAE ${fmtMoney(item.raw.x)}, MFE ${fmtMoney(item.raw.y)}, Final ${fmtMoney(item.raw.pnl)}` } } }, scales: { x: { title: { display: true, text: 'MAE / Max Drawdown', color: c.text }, grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } }, y: { title: { display: true, text: 'MFE / Max Gain', color: c.text }, grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } } } });
+        datasets: [{ label: 'Trades', data: excursionPoints, pointRadius: 5, pointHoverRadius: 7, pointBackgroundColor: excursionPoints.map(t => Number(t.pnl) >= 0 ? c.greenBorder : c.redBorder), pointBorderWidth: 0 }]
+      }, { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: item => `${item.raw.symbol || item.raw.ticker || 'Trade'}: MAE ${fmtMoney(item.raw.x)}, MFE ${fmtMoney(item.raw.y)}, Final ${fmtMoney(item.raw.pnl)}` } } }, scales: { x: { title: { display: true, text: 'MAE / Max Drawdown', color: c.text }, grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } }, y: { title: { display: true, text: 'MFE / Max Gain', color: c.text }, grid: { color: c.grid }, ticks: { color: c.text, callback: v => '$' + Number(v).toLocaleString() } } } });
 
       const mistakeAnalytics = buildMistakeAnalytics(appData.trades);
       const mistakeLabels = Object.keys(mistakeAnalytics.categories);
@@ -3863,7 +3857,6 @@ loadPersistedSettings();
         card.innerHTML = `<div class="mb-4 pointer-events-none"><div class="flex justify-between items-start mb-2"><h3 class="font-bold text-lg text-slate-800 dark:text-white truncate pr-2">${s.name}</h3><div class="flex space-x-1">${s.openCount > 0 ? `<span class="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 rounded-full">${s.openCount} OPEN</span>` : ''}</div></div><p class="text-sm text-slate-500">${s.closedCount} Closed • ${winPct} Win Rate</p></div><div class="flex justify-between items-end pt-4 border-t border-slate-100 dark:border-slate-800/50 pointer-events-none"><div><p class="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Realized</p><p class="font-bold ${clrMoney(s.realized)}">${fmtMoney(s.realized)}</p></div><div class="text-right"><p class="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Unrealized</p><p class="font-bold ${clrMoney(s.unrealized)}">${fmtMoney(s.unrealized)}</p></div></div>`;
         grid.appendChild(card);
       });
-      loadStrategyConfigEditor();
       lucide.createIcons();
     }
 
@@ -4057,50 +4050,127 @@ loadPersistedSettings();
 
     function renderGroupedTrades() {
       const container = document.getElementById('grouped-trades-container');
-      container.innerHTML = '';
-      const sortedStrats = Object.values(appData.strategies).sort((a, b) => a.name.localeCompare(b.name));
-      sortedStrats.forEach(s => {
-        const openT = s.trades.filter(t => t.status === 'OPEN');
-        const closedT = s.trades.filter(t => t.status === 'CLOSED');
-        if (!openT.length && !closedT.length) return;
-        const grp = document.createElement('div');
-        grp.className = 'glass-card rounded-2xl overflow-hidden strat-group';
-        grp.dataset.strat = s.name.toLowerCase();
-        const header = document.createElement('button');
-        header.type = 'button';
-        header.className = 'w-full px-6 py-4 bg-slate-100 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700 flex justify-between items-center cursor-pointer text-left';
-        header.dataset.navView = 'strategy-detail';
-        header.dataset.navId = s.name;
-        header.innerHTML = `<div class="pointer-events-none font-bold text-lg flex items-center hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"><i data-lucide="briefcase" class="mr-2 h-5 w-5 text-indigo-500"></i> ${s.name}</div><div class="pointer-events-none text-sm font-medium text-slate-500">Net: <span class="${clrMoney(s.realized + s.unrealized)}">${fmtMoney(s.realized + s.unrealized)}</span></div>`;
-        grp.appendChild(header);
-        const listWrap = document.createElement('div');
-        listWrap.className = 'p-0';
-        const buildRows = (trades, badgeHtml) => trades.forEach(t => {
-          const optionLink = renderOptionStratLink(t.link, 'OptionStrat');
-          const row = document.createElement('div');
-          row.className = 'trade-row w-full flex justify-between items-center px-6 py-3 border-b border-slate-100 dark:border-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-800/30 cursor-pointer transition-colors text-left';
-          row.dataset.navView = 'trade-detail'; row.dataset.navId = t.id; row.dataset.navParent = 'grouped';
-          row.innerHTML = `<div class="flex items-center space-x-4 w-2/3"><div class="w-20 hidden sm:block pointer-events-none">${badgeHtml}</div><div class="font-medium text-slate-800 dark:text-slate-200 truncate sym-text pointer-events-none">${t.sym}</div><div class="text-xs text-slate-400 hidden md:block pointer-events-none">${formatDisplayDate(t.openDate)}</div><div class="text-xs">${optionLink}</div></div><div class="pointer-events-none font-bold text-right ${clrMoney(t.pnl)}">${fmtMoney(t.pnl)}</div>`;
-          listWrap.appendChild(row);
-        });
-        if (openT.length) buildRows(openT, `<span class="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 rounded">OPEN</span>`);
-        if (closedT.length) buildRows(closedT, `<span class="px-2 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 rounded">CLOSED</span>`);
-        grp.appendChild(listWrap);
-        container.appendChild(grp);
-      });
+      if (!container) return;
+
+      const allTrades = appData.trades.slice().sort((a, b) => compareDateValues(a.openDate, b.openDate));
+      const openTrades = allTrades.filter(t => t.status === 'OPEN');
+      const closedTrades = allTrades.filter(t => t.status === 'CLOSED');
+      const benchmarks = buildDynamicBenchmarksFromClosed(closedTrades);
+      const attention = openTrades
+        .map(t => ({ trade: t, ladder: calculateDecisionLadder(t, benchmarks, 1) }))
+        .sort((a, b) => b.ladder.score - a.ladder.score)
+        .filter(item => item.ladder.score >= 70 || !String(item.trade.link || '').trim() || !String(item.trade.notes || '').trim());
+      const hygieneCount = allTrades.filter(t => !String(t.link || '').trim() || !String(t.strat || '').trim() || !String(t.notes || '').trim()).length;
+      const missingLinks = allTrades.filter(t => !String(t.link || '').trim()).length;
+      const statusSummary = [
+        { label: 'Total Trades', value: String(allTrades.length), tone: 'text-slate-800 dark:text-white' },
+        { label: 'Open', value: String(openTrades.length), tone: 'text-amber-600 dark:text-amber-400' },
+        { label: 'Closed', value: String(closedTrades.length), tone: 'text-slate-600 dark:text-slate-300' },
+        { label: 'Missing Link', value: String(missingLinks), tone: missingLinks > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400' }
+      ];
+
+      const attentionCards = attention.length
+        ? attention.slice(0, 8).map(item => {
+            const t = item.trade;
+            const linkText = String(t.link || '').trim() ? 'Linked' : 'No link';
+            return `<button type="button" class="scenario-card text-left clickable-card" data-trade-op-card="1" data-search="${escapeHtml(`${t.sym} ${t.strat} ${t.status} ${t.notes || ''} ${t.tags || ''} ${t.openDate || ''}`.toLowerCase())}" data-nav-view="trade-detail" data-nav-id="${escapeHtml(t.id || '')}" data-nav-parent="operations">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="font-semibold text-slate-800 dark:text-slate-100">${escapeHtml(t.sym || 'Trade')}</p>
+                  <p class="text-xs text-slate-500 mt-1">${escapeHtml(t.strat || 'Unassigned')} • ${escapeHtml(t.status || '')} • ${formatDisplayDate(t.openDate)}</p>
+                </div>
+                <div class="text-right">
+                  <p class="text-sm font-bold ${item.ladder.score >= 90 ? 'text-rose-500' : item.ladder.score >= 70 ? 'text-amber-500' : 'text-emerald-500'}">${item.ladder.score.toFixed(0)}</p>
+                  <p class="text-[10px] uppercase tracking-[0.14em] text-slate-400">Urgency</p>
+                </div>
+              </div>
+              <p class="text-sm text-slate-600 dark:text-slate-300 mt-3">${escapeHtml(item.ladder.action)}: ${escapeHtml(item.ladder.reason)}</p>
+              <p class="text-xs text-slate-400 mt-2">${linkText}${String(t.notes || '').trim() ? ' • Notes present' : ' • Missing notes'}</p>
+            </button>`;
+          }).join('')
+        : '<p class="text-sm text-slate-500">No urgent open trades found. Use this tab to audit and maintain the workbook trade log.</p>';
+
+      const tradeRows = allTrades.map(t => {
+        const risk = getTradeRisk(t);
+        const days = getTradeDaysHeld(t);
+        const searchText = `${t.sym} ${t.strat} ${t.status} ${t.notes || ''} ${t.tags || ''} ${t.parentId || ''} ${t.openDate || ''} ${t.expiration || ''}`.toLowerCase();
+        return `<tr class="border-b border-slate-100 dark:border-slate-800/60" data-trade-op-row="1" data-search="${escapeHtml(searchText)}">
+          <td class="px-3 py-2">
+            <button type="button" class="font-semibold text-slate-800 dark:text-slate-100 hover:text-indigo-500" data-nav-view="trade-detail" data-nav-id="${escapeHtml(t.id || '')}" data-nav-parent="operations">${escapeHtml(t.sym || 'Trade')}</button>
+          </td>
+          <td class="px-3 py-2">${escapeHtml(t.strat || 'Unassigned')}</td>
+          <td class="px-3 py-2">${escapeHtml(t.status || '')}</td>
+          <td class="px-3 py-2">${formatDisplayDate(t.openDate)}</td>
+          <td class="px-3 py-2 text-right">${days}</td>
+          <td class="px-3 py-2 text-right ${clrMoney(t.pnl)}">${fmtMoney(t.pnl)}</td>
+          <td class="px-3 py-2 text-right">${fmtMoney(risk)}</td>
+          <td class="px-3 py-2">${renderOptionStratLink(t.link, 'Open')}</td>
+          <td class="px-3 py-2">${escapeHtml(String(t.notes || '').trim() || '—')}</td>
+        </tr>`;
+      }).join('');
+
+      container.innerHTML = `
+        <div class="space-y-6">
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            ${statusSummary.map(item => `<div class="stat-pill"><p class="text-[10px] uppercase tracking-[0.12em] font-bold text-slate-400 mb-1">${item.label}</p><p class="text-sm font-semibold ${item.tone}">${item.value}</p></div>`).join('')}
+          </div>
+
+          <div class="pro-card p-6">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+              <div>
+                <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="list-checks" class="mr-2 h-5 w-5 text-indigo-500"></i> Trade Attention Queue</h3>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Open trades with high urgency or incomplete workbook metadata. This is the actionable view missing from the strategy tab.</p>
+              </div>
+              <div class="micro-pill"><i data-lucide="alarm-clock" class="h-3.5 w-3.5"></i> ${attention.length} flagged</div>
+            </div>
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              ${attentionCards}
+            </div>
+          </div>
+
+          <div class="pro-card p-6">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+              <div>
+                <h3 class="font-bold text-slate-800 dark:text-slate-100 flex items-center"><i data-lucide="table-2" class="mr-2 h-5 w-5 text-indigo-500"></i> Trade Index</h3>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">All workbook trades in one searchable list, with direct access to detail pages and journal fields.</p>
+              </div>
+              <div class="micro-pill"><i data-lucide="search" class="h-3.5 w-3.5"></i> Searchable audit trail</div>
+            </div>
+            <div class="tg-ibkr-table-wrap">
+              <table class="w-full text-sm text-left">
+                <thead class="text-[10px] text-slate-500 bg-slate-50/80 dark:bg-slate-800/80 uppercase tracking-wider">
+                  <tr>
+                    <th class="px-3 py-2">Trade</th>
+                    <th class="px-3 py-2">Strategy</th>
+                    <th class="px-3 py-2">Status</th>
+                    <th class="px-3 py-2">Opened</th>
+                    <th class="px-3 py-2 text-right">Days</th>
+                    <th class="px-3 py-2 text-right">PnL</th>
+                    <th class="px-3 py-2 text-right">Risk</th>
+                    <th class="px-3 py-2">Link</th>
+                    <th class="px-3 py-2">Notes</th>
+                  </tr>
+                </thead>
+                <tbody>${tradeRows || '<tr><td colspan="9" class="px-3 py-4 text-sm text-slate-500">No trades found.</td></tr>'}</tbody>
+              </table>
+            </div>
+            ${hygieneCount > 0 ? `<p class="text-xs text-slate-500 dark:text-slate-400 mt-3">Workbook hygiene items flagged: ${hygieneCount}. Use the journal below to backfill strategy, tags, notes, and parent links.</p>` : ''}
+          </div>
+        </div>`;
       loadJournalEditor();
       lucide.createIcons();
     }
 
     function buildTradeDiagnostics(trade) {
-      const maxPnl = Math.max(Number(trade.maxGain) || 0, Number(trade.pnl) || 0, 0);
-      const minPnl = Math.min(Number(trade.maxDrawdown) || 0, Number(trade.pnl) || 0, 0);
+      const tradeTicker = getTradeTicker(trade);
+      const maxPnl = getTradeExcursionHigh(trade);
+      const minPnl = getTradeExcursionLow(trade);
       const profitGiveback = maxPnl > 0 ? maxPnl - (Number(trade.pnl) || 0) : 0;
       const endedPositive = Number(trade.pnl) > 0;
       return [
-        { title: 'Excursion Quality', icon: 'line-chart', body: maxPnl > 0 && profitGiveback > maxPnl * 0.35 ? `Peak workbook profit was ${fmtMoney(maxPnl)} but final result is ${fmtMoney(trade.pnl)}. That implies ${fmtMoney(profitGiveback)} of profit give-back.` : `The trade retained most of its favorable excursion. Peak profit ${fmtMoney(maxPnl)}, final result ${fmtMoney(trade.pnl)}.` },
-        { title: 'Adverse Excursion', icon: 'shield-alert', body: minPnl < 0 ? `Worst recorded excursion was ${fmtMoney(minPnl)}. Compare this with the final result to decide whether the exit improved meaningfully.` : 'This trade never went materially underwater in the workbook snapshot fields.' },
-        { title: 'Greek Posture', icon: 'activity', body: `Current workbook Greeks are Δ ${trade.delta.toFixed(3)}, Θ ${trade.theta.toFixed(3)}, Γ ${trade.gamma.toFixed(4)}, V ${trade.vega.toFixed(3)}.` },
+        { title: 'Excursion Quality', icon: 'line-chart', body: maxPnl != null && profitGiveback > maxPnl * 0.35 ? `Peak workbook profit was ${fmtMoney(maxPnl)} but final result is ${fmtMoney(trade.pnl)}. That implies ${fmtMoney(profitGiveback)} of profit give-back.` : (maxPnl != null ? `The trade retained most of its favorable excursion. Peak profit ${fmtMoney(maxPnl)}, final result ${fmtMoney(trade.pnl)}.` : 'No explicit favorable excursion was stored in the workbook snapshot.') },
+        { title: 'Adverse Excursion', icon: 'shield-alert', body: minPnl != null ? `Worst recorded excursion was ${fmtMoney(minPnl)}. Compare this with the final result to decide whether the exit improved meaningfully.` : 'No explicit adverse excursion was stored in the workbook snapshot.' },
+        { title: 'Greek Posture', icon: 'activity', body: `Ticker ${tradeTicker} is showing Δ ${Number(trade.delta || 0).toFixed(3)}, Θ ${Number(trade.theta || 0).toFixed(3)}, Γ ${Number(trade.gamma || 0).toFixed(4)}, V ${Number(trade.vega || 0).toFixed(3)}.` },
         { title: 'Outcome Read', icon: endedPositive ? 'badge-dollar-sign' : 'triangle-alert', body: endedPositive ? `Currently profitable at ${fmtMoney(trade.pnl)}.${profitGiveback > 0 ? ' Consider whether profit-protection rules could have preserved more of the move.' : ''}` : `Currently at ${fmtMoney(trade.pnl)}. Compare this against Max Loss ${fmtMoney(trade.maxLoss)} and excursion data for risk discipline.` }
       ];
     }
@@ -4109,9 +4179,9 @@ loadPersistedSettings();
       const t = appData.trades.find(x => x.id === id);
       if (!t) return;
       const backBtn = document.getElementById('td-back-btn');
-      if (parentContext === 'grouped') {
+      if (parentContext === 'operations' || parentContext === 'grouped') {
         backBtn.onclick = () => navigate('trades');
-        backBtn.innerHTML = `<i data-lucide="arrow-left" class="mr-1.5 h-4 w-4"></i> Back to All Trades`;
+        backBtn.innerHTML = `<i data-lucide="arrow-left" class="mr-1.5 h-4 w-4"></i> Back to Trade Operations`;
       } else {
         backBtn.onclick = () => navigate('strategy-detail', t.strat);
         backBtn.innerHTML = `<i data-lucide="arrow-left" class="mr-1.5 h-4 w-4"></i> Back to Strategy`;
@@ -4138,19 +4208,26 @@ loadPersistedSettings();
       const statEl = document.getElementById('td-status-badge');
       statEl.textContent = t.status;
       statEl.className = `inline-block px-3 py-1 text-xs font-bold rounded-full mb-3 tracking-wider uppercase shadow-sm ${t.status === 'OPEN' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 border border-amber-200 dark:border-amber-800' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`;
-      document.getElementById('td-min-pnl').textContent = `MIN: ${fmtMoney(t.maxDrawdown)}`;
-      document.getElementById('td-max-pnl').textContent = `MAX: ${fmtMoney(t.maxGain)}`;
+      const tdMin = getTradeExcursionLow(t);
+      const tdMax = getTradeExcursionHigh(t);
+      document.getElementById('td-min-pnl').textContent = `MIN: ${tdMin == null ? '—' : fmtMoney(tdMin)}`;
+      document.getElementById('td-max-pnl').textContent = `MAX: ${tdMax == null ? '—' : fmtMoney(tdMax)}`;
 
-      let minV = Math.min(0, t.maxDrawdown, t.pnl);
-      let maxV = Math.max(0, t.maxGain, t.pnl);
-      let rng = maxV - minV; if (rng === 0) rng = 1;
-      let zPct = ((0 - minV) / rng) * 100;
-      let mDrawPct = ((t.maxDrawdown - minV) / rng) * 100;
-      let mGainPct = ((t.maxGain - minV) / rng) * 100;
-      let currPct = ((t.pnl - minV) / rng) * 100;
-      document.getElementById('td-excursion-bar').innerHTML = `<div class="excursion-bar"><div class="excursion-zero" style="left:${zPct}%"></div><div class="excursion-range-red" style="left:${mDrawPct}%; width:${Math.max(0, zPct - mDrawPct)}%"></div><div class="excursion-range-green" style="left:${zPct}%; width:${Math.max(0, mGainPct - zPct)}%"></div><div class="excursion-marker" style="left:${currPct}%"></div></div>`;
+      if (tdMin == null && tdMax == null) {
+        document.getElementById('td-excursion-bar').innerHTML = '<p class="text-xs text-slate-500 mt-2">No explicit excursion data in workbook snapshot.</p>';
+      } else {
+        let minV = Math.min(0, tdMin ?? 0, Number(t.pnl) || 0);
+        let maxV = Math.max(0, tdMax ?? 0, Number(t.pnl) || 0);
+        let rng = maxV - minV; if (rng === 0) rng = 1;
+        let zPct = ((0 - minV) / rng) * 100;
+        let mDrawPct = (((tdMin ?? 0) - minV) / rng) * 100;
+        let mGainPct = (((tdMax ?? 0) - minV) / rng) * 100;
+        let currPct = (((Number(t.pnl) || 0) - minV) / rng) * 100;
+        document.getElementById('td-excursion-bar').innerHTML = `<div class="excursion-bar"><div class="excursion-zero" style="left:${zPct}%"></div><div class="excursion-range-red" style="left:${mDrawPct}%; width:${Math.max(0, zPct - mDrawPct)}%"></div><div class="excursion-range-green" style="left:${zPct}%; width:${Math.max(0, mGainPct - zPct)}%"></div><div class="excursion-marker" style="left:${currPct}%"></div></div>`;
+      }
 
       document.getElementById('td-stats-strip').innerHTML = [
+        { label: 'Ticker', value: getTradeTicker(t) },
         { label: 'Created', value: formatDisplayDate(t.openDate) },
         { label: 'Expiration', value: formatDisplayDate(t.expiration) },
         { label: 'Net Debit/Credit', value: fmtMoney(t.netDebitCredit) },
@@ -4223,17 +4300,6 @@ loadPersistedSettings();
         if (current && current.view === 'dashboard') renderDashboardCharts();
         return;
       }
-      const deleteConfigBtn = e.target.closest('[data-sc-del]');
-      if (deleteConfigBtn) {
-        e.preventDefault();
-        const idx = Number(deleteConfigBtn.getAttribute('data-sc-del'));
-        if (Number.isInteger(idx) && idx >= 0 && idx < appData.strategyConfigRows.length) {
-          appData.strategyConfigRows.splice(idx, 1);
-          renderStrategyConfigEditor();
-          setStrategyConfigStatus('Strategy row removed. Click Save to persist changes.', 'warn');
-        }
-        return;
-      }
       if (e.target.id === 'groups-include-all') {
         appData.filters.excludedGroups = new Set();
         applyGroupFilters();
@@ -4256,18 +4322,9 @@ loadPersistedSettings();
 
     document.getElementById('trade-search').addEventListener('input', e => {
       const term = e.target.value.toLowerCase();
-      document.querySelectorAll('.strat-group').forEach(grp => {
-        let match = false;
-        if (grp.dataset.strat.includes(term)) match = true;
-        grp.querySelectorAll('.trade-row').forEach(row => {
-          if (row.querySelector('.sym-text').textContent.toLowerCase().includes(term) || term === '') {
-            row.style.display = 'flex';
-            match = true;
-          } else {
-            row.style.display = 'none';
-          }
-        });
-        grp.style.display = match ? 'block' : 'none';
+      document.querySelectorAll('[data-trade-op-row], [data-trade-op-card]').forEach(el => {
+        const hay = String(el.dataset.search || '').toLowerCase();
+        el.style.display = !term || hay.includes(term) ? '' : 'none';
       });
     });
 
@@ -4302,32 +4359,6 @@ loadPersistedSettings();
 
     document.getElementById('sync-now-btn').addEventListener('click', () => {
       syncWorkbookToCloud(false);
-    });
-
-    document.getElementById('stratcfg-refresh').addEventListener('click', () => {
-      loadStrategyConfigEditor();
-    });
-    document.getElementById('stratcfg-add-row').addEventListener('click', () => {
-      appData.strategyConfigRows.push({
-        name: '',
-        identifier: '',
-        target_pnl: 0,
-        target_days: 0,
-        min_stability: 0.8,
-        typical_debit: 5000,
-        description: ''
-      });
-      renderStrategyConfigEditor();
-      setStrategyConfigStatus('Added a blank strategy row. Fill values and click Save.', 'warn');
-    });
-    document.getElementById('stratcfg-save').addEventListener('click', () => {
-      saveStrategyConfigEditor();
-    });
-    document.getElementById('stratcfg-reprocess').addEventListener('click', () => {
-      reprocessOtherTradesNow();
-    });
-    document.getElementById('stratcfg-reset').addEventListener('click', () => {
-      resetStrategyConfigDefaults();
     });
 
     document.getElementById('journal-refresh').addEventListener('click', () => {
@@ -4466,6 +4497,32 @@ loadPersistedSettings();
     return entryType === 'debit' ? Math.ceil(scaled) * tick : Math.floor(scaled) * tick;
   }
 
+  function tgIbkrSetButtonState(buttonId, disabled, title) {
+    const btn = tgIbkr(buttonId);
+    if (!btn) return;
+    btn.disabled = !!disabled;
+    btn.classList.toggle('opacity-50', !!disabled);
+    btn.classList.toggle('cursor-not-allowed', !!disabled);
+    if (title) btn.title = title;
+  }
+
+  function tgIbkrComputeCloseOutcome(closePricePerLot, lots, multiplier, entryType, positionEntryTotal, totalRoundTripCommission) {
+    if (!isFinite(closePricePerLot) || closePricePerLot < 0) return null;
+    const closeValueWhole = closePricePerLot * multiplier * lots;
+    const pnlWhole = entryType === 'debit'
+      ? closeValueWhole - positionEntryTotal - totalRoundTripCommission
+      : positionEntryTotal - closeValueWhole - totalRoundTripCommission;
+    return {
+      closeValueWhole,
+      pnlWhole,
+      pnlPerLot: pnlWhole / lots
+    };
+  }
+
+  function tgIbkrFormatOrderPrice(value) {
+    return isFinite(value) && value >= 0 ? tgIbkrFmtNum(value, 2) : 'N/A';
+  }
+
   function tgIbkrSetWarning(message) {
     const el = tgIbkr('tg-ibkr-warning');
     if (!el) return;
@@ -4517,10 +4574,10 @@ loadPersistedSettings();
     const commissionPerLegPerSide = parseFloat(tgIbkr('tg-ibkr-commission').value);
     const tickSize = parseFloat(tgIbkr('tg-ibkr-tick-size').value);
 
-    if (!isFinite(lots) || lots <= 0 || !isFinite(legsPerLot) || legsPerLot <= 0 || !isFinite(multiplier) || multiplier <= 0 ||
+    if (!isFinite(lots) || lots <= 0 || !Number.isInteger(lots) || !isFinite(legsPerLot) || legsPerLot <= 0 || !Number.isInteger(legsPerLot) || !isFinite(multiplier) || multiplier <= 0 ||
         !isFinite(positionEntryTotal) || positionEntryTotal < 0 || !isFinite(maxLoss) || maxLoss < 0 ||
         !isFinite(profitPct) || profitPct < 0 || !isFinite(stopPct) || stopPct < 0 || !isFinite(commissionPerLegPerSide) || commissionPerLegPerSide < 0) {
-      tgIbkrSetWarning('Please enter valid non-negative numbers. Lots, legs per lot, and multiplier must be greater than zero.');
+      tgIbkrSetWarning('Please enter valid non-negative numbers. Lots and legs per lot must be whole numbers greater than zero, and multiplier must be greater than zero.');
       return;
     }
 
@@ -4549,8 +4606,16 @@ loadPersistedSettings();
     const stopCloseValuePerLot = stopCloseValueWhole / lots;
     const rawProfitClosePricePerLot = profitCloseValuePerLot / multiplier;
     const rawStopClosePricePerLot = stopCloseValuePerLot / multiplier;
-    const profitClosePricePerLot = tgIbkrRoundConservative(rawProfitClosePricePerLot, tickSize, entryType);
-    const stopClosePricePerLot = tgIbkrRoundConservative(rawStopClosePricePerLot, tickSize, entryType);
+    const profitClosePricePerLot = rawProfitClosePricePerLot >= 0
+      ? tgIbkrRoundConservative(rawProfitClosePricePerLot, tickSize, entryType)
+      : NaN;
+    const stopClosePricePerLot = rawStopClosePricePerLot >= 0
+      ? tgIbkrRoundConservative(rawStopClosePricePerLot, tickSize, entryType)
+      : NaN;
+    const profitOutcome = tgIbkrComputeCloseOutcome(profitClosePricePerLot, lots, multiplier, entryType, positionEntryTotal, totalRoundTripCommission);
+    const stopOutcome = tgIbkrComputeCloseOutcome(stopClosePricePerLot, lots, multiplier, entryType, positionEntryTotal, totalRoundTripCommission);
+    const hasValidTarget = !!profitOutcome;
+    const hasValidStop = !!stopOutcome;
 
     tgIbkr('tg-ibkr-total-legs').textContent = tgIbkrFmtNum(totalLegs, 0);
     tgIbkr('tg-ibkr-roundtrip').textContent = tgIbkrFmtMoney(totalRoundTripCommission);
@@ -4558,17 +4623,46 @@ loadPersistedSettings();
     tgIbkr('tg-ibkr-profit-lot').textContent = tgIbkrFmtMoney(profitPerLot);
     tgIbkr('tg-ibkr-stop-whole').textContent = tgIbkrFmtMoney(stopWhole);
     tgIbkr('tg-ibkr-stop-lot').textContent = tgIbkrFmtMoney(stopPerLot);
-    tgIbkr('tg-ibkr-target-price').textContent = tgIbkrFmtNum(profitClosePricePerLot, 2);
-    tgIbkr('tg-ibkr-stop-price').textContent = tgIbkrFmtNum(stopClosePricePerLot, 2);
+    tgIbkr('tg-ibkr-target-price').textContent = tgIbkrFormatOrderPrice(profitClosePricePerLot);
+    tgIbkr('tg-ibkr-stop-price').textContent = tgIbkrFormatOrderPrice(stopClosePricePerLot);
+
+    tgIbkrSetButtonState(
+      'tg-ibkr-copy-target',
+      !hasValidTarget,
+      hasValidTarget ? 'Copy target price' : 'Target close price is negative and cannot be copied'
+    );
+    tgIbkrSetButtonState(
+      'tg-ibkr-copy-stop',
+      !hasValidStop,
+      hasValidStop ? 'Copy stop price' : 'Stop close price is negative and cannot be copied'
+    );
+    tgIbkrSetButtonState(
+      'tg-ibkr-copy-target-preview',
+      !hasValidTarget,
+      hasValidTarget ? 'Copy target preview' : 'Target close preview is not valid'
+    );
+    tgIbkrSetButtonState(
+      'tg-ibkr-copy-stop-preview',
+      !hasValidStop,
+      hasValidStop ? 'Copy stop preview' : 'Stop close preview is not valid'
+    );
 
     const closeDirection = entryType === 'debit' ? 'CREDIT' : 'DEBIT';
     const ibkrAction = entryType === 'debit' ? 'SELL' : 'BUY';
     tgIbkr('tg-ibkr-target-direction').textContent = closeDirection;
     tgIbkr('tg-ibkr-stop-direction').textContent = closeDirection;
-    tgIbkr('tg-ibkr-target-sub').textContent = `${closeDirection} order. ${entryType === 'debit' ? 'Rounded up' : 'Rounded down'} to tick ${tgIbkrFmtNum(tickSize, 3)} so the target still covers full round-trip commissions.`;
-    tgIbkr('tg-ibkr-stop-sub').textContent = `${closeDirection} order. ${entryType === 'debit' ? 'Rounded up' : 'Rounded down'} to tick ${tgIbkrFmtNum(tickSize, 3)} so the stop stays inside your planned risk after full round-trip commissions.`;
-    tgIbkr('tg-ibkr-target-preview').textContent = `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} ${tgIbkrFmtNum(profitClosePricePerLot, 2)}`;
-    tgIbkr('tg-ibkr-stop-preview').textContent = `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} ${tgIbkrFmtNum(stopClosePricePerLot, 2)}`;
+    tgIbkr('tg-ibkr-target-sub').textContent = hasValidTarget
+      ? `${closeDirection} order. ${entryType === 'debit' ? 'Rounded up' : 'Rounded down'} to tick ${tgIbkrFmtNum(tickSize, 3)} so the target still covers full round-trip commissions.`
+      : `No valid ${closeDirection.toLowerCase()} target exists with these inputs. Increase entry value or reduce risk/commissions.`;
+    tgIbkr('tg-ibkr-stop-sub').textContent = hasValidStop
+      ? `${closeDirection} order. ${entryType === 'debit' ? 'Rounded up' : 'Rounded down'} to tick ${tgIbkrFmtNum(tickSize, 3)} so the stop stays inside your planned risk after full round-trip commissions.`
+      : `No valid ${closeDirection.toLowerCase()} stop exists with these inputs. Increase entry value or reduce stop %/commissions.`;
+    tgIbkr('tg-ibkr-target-preview').textContent = hasValidTarget
+      ? `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} ${tgIbkrFmtNum(profitClosePricePerLot, 2)}`
+      : `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} N/A`;
+    tgIbkr('tg-ibkr-stop-preview').textContent = hasValidStop
+      ? `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} ${tgIbkrFmtNum(stopClosePricePerLot, 2)}`
+      : `${ibkrAction} ${tgIbkrFmtNum(lots, 0)} @ ${closeDirection} N/A`;
 
     tgIbkr('tg-ibkr-details-body').innerHTML = `
       <tr><td>Entry value</td><td>${tgIbkrFmtMoney(positionEntryTotal)}</td><td>${tgIbkrFmtMoney(entryPerLotValue)}</td></tr>
@@ -4583,12 +4677,18 @@ loadPersistedSettings();
       <tr><td>Target close price per lot</td><td>${tgIbkrFmtMoney(profitCloseValueWhole)}</td><td>${tgIbkrFmtNum(profitClosePricePerLot, 2)}</td></tr>
       <tr><td>Stop close price per lot</td><td>${tgIbkrFmtMoney(stopCloseValueWhole)}</td><td>${tgIbkrFmtNum(stopClosePricePerLot, 2)}</td></tr>
       <tr><td>Raw target price before rounding</td><td>${tgIbkrFmtMoney(profitCloseValueWhole)}</td><td>${tgIbkrFmtNum(rawProfitClosePricePerLot, 4)}</td></tr>
-      <tr><td>Raw stop price before rounding</td><td>${tgIbkrFmtMoney(stopCloseValueWhole)}</td><td>${tgIbkrFmtNum(rawStopClosePricePerLot, 4)}</td></tr>`;
+      <tr><td>Raw stop price before rounding</td><td>${tgIbkrFmtMoney(stopCloseValueWhole)}</td><td>${tgIbkrFmtNum(rawStopClosePricePerLot, 4)}</td></tr>
+      <tr><td>Effective target P&amp;L after rounding</td><td>${hasValidTarget ? tgIbkrFmtMoney(profitOutcome.pnlWhole) : 'N/A'}</td><td>${hasValidTarget ? tgIbkrFmtMoney(profitOutcome.pnlPerLot) : 'N/A'}</td></tr>
+      <tr><td>Effective stop P&amp;L after rounding</td><td>${hasValidStop ? tgIbkrFmtMoney(stopOutcome.pnlWhole) : 'N/A'}</td><td>${hasValidStop ? tgIbkrFmtMoney(stopOutcome.pnlPerLot) : 'N/A'}</td></tr>`;
 
-    tgIbkr('tg-ibkr-footnote').innerHTML = `<strong>${ticker}</strong> | <strong>${structure}</strong> | ${entryType === 'debit' ? 'Debit' : 'Credit'} | ${lots} lot(s) | ${legsPerLot} legs per lot | ${tgIbkrFmtNum(totalLegs, 0)} total legs.<br>Commission formula: total legs × commission per leg per side × 2 = ${tgIbkrFmtMoney(totalRoundTripCommission)} round trip.<br>The displayed close prices are <strong>combo prices per lot</strong> for IBKR net debit/credit combo orders.<br>Rounding is <strong>conservative</strong>: debit trades round up, credit trades round down, so the displayed order price still covers the full round-trip commissions and target/stop plan.`;
+    tgIbkr('tg-ibkr-footnote').innerHTML = `<strong>${ticker}</strong> | <strong>${structure}</strong> | ${entryType === 'debit' ? 'Debit' : 'Credit'} | ${lots} lot(s) | ${legsPerLot} legs per lot | ${tgIbkrFmtNum(totalLegs, 0)} total legs.<br>Commission formula: total legs × commission per leg per side × 2 = ${tgIbkrFmtMoney(totalRoundTripCommission)} round trip.<br>The displayed close prices are <strong>combo prices per lot</strong> for IBKR net debit/credit combo orders.<br>Rounding is <strong>conservative</strong>: debit trades round up, credit trades round down, so the displayed order price still covers the full round-trip commissions and target/stop plan.<br>${!hasValidTarget || !hasValidStop ? 'If an order price is shown as N/A, the requested target or stop cannot be expressed as a valid positive combo price under the current assumptions.' : ''}`;
 
-    if (rawProfitClosePricePerLot < 0 || rawStopClosePricePerLot < 0) {
-      tgIbkrSetWarning('One of the calculated close prices is negative. That usually means the requested target or stop is not feasible with the entered entry value, risk, and commission assumptions.');
+    if (!hasValidTarget || !hasValidStop) {
+      const missing = [
+        !hasValidTarget ? 'target' : null,
+        !hasValidStop ? 'stop' : null
+      ].filter(Boolean).join(' and ');
+      tgIbkrSetWarning(`The ${missing} close price is negative under these assumptions, so the calculator cannot produce a valid IBKR combo order for it. Increase entry value or reduce risk/commission assumptions.`);
     }
   }
 
@@ -4599,13 +4699,13 @@ loadPersistedSettings();
     tgIbkr('tg-ibkr-legs-per-lot').value = 4;
     tgIbkr('tg-ibkr-multiplier').value = 100;
     tgIbkr('tg-ibkr-entry-type').value = 'debit';
-    tgIbkr('tg-ibkr-entry-total').value = 0;
+    tgIbkr('tg-ibkr-entry-total').value = 1000;
     tgIbkr('tg-ibkr-max-loss').value = 4000;
     tgIbkr('tg-ibkr-profit-pct').value = 5;
     tgIbkr('tg-ibkr-stop-pct').value = 10;
     tgIbkr('tg-ibkr-commission').value = 1.71;
     tgIbkr('tg-ibkr-tick-size').value = 0.05;
-    tgIbkr('tg-ibkr-notes').value = '4-lot BWB, $0.00 debit, 16 total legs';
+    tgIbkr('tg-ibkr-notes').value = '4-lot BWB example, 16 total legs';
     tgIbkrCalculate();
   }
 
@@ -4616,7 +4716,7 @@ loadPersistedSettings();
     tgIbkr('tg-ibkr-legs-per-lot').value = 4;
     tgIbkr('tg-ibkr-multiplier').value = 100;
     tgIbkr('tg-ibkr-entry-type').value = 'debit';
-    tgIbkr('tg-ibkr-entry-total').value = 0;
+    tgIbkr('tg-ibkr-entry-total').value = 1000;
     tgIbkr('tg-ibkr-max-loss').value = 1000;
     tgIbkr('tg-ibkr-profit-pct').value = 5;
     tgIbkr('tg-ibkr-stop-pct').value = 10;
