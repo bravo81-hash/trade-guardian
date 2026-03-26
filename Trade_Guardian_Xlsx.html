@@ -953,7 +953,7 @@
     .ibkr-table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 660px;
+      min-width: 560px;
     }
 
     .ibkr-table th,
@@ -1002,6 +1002,10 @@
       border-color: rgba(56, 189, 248, 0.78);
       box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.42), 0 14px 28px -20px rgba(56, 189, 248, 0.5);
       transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+
+    #ibkr-planner-card {
+      grid-column: 1 / -1;
     }
 
     .segmented-control {
@@ -1236,6 +1240,7 @@
                 <button class="seg-btn" data-pack="equity" type="button">Equity</button>
                 <button class="seg-btn" data-pack="behavior" type="button">Behavior</button>
                 <button class="seg-btn" data-pack="edge" type="button">Edge</button>
+                <button class="seg-btn" data-pack="ibkr" type="button">IBKR</button>
               </div>
             </div>
 
@@ -1312,7 +1317,7 @@
                 <h4>Harvest Window Bands (Winners P25 / P50 / P75)</h4>
                 <div class="chart-wrap"><canvas id="chart-edge-harvest"></canvas></div>
               </div>
-              <div class="chart-card" data-pack="edge" id="ibkr-planner-card">
+              <div class="chart-card" data-pack="ibkr" id="ibkr-planner-card">
                 <h4>IBKR Combo Closing Planner</h4>
                 <div class="ibkr-shell">
                   <div>
@@ -2290,7 +2295,7 @@
       syncIbkrFromTrade(trade);
       hideTradeModal();
       setPane("risk-pane");
-      appState.riskPack = "edge";
+      appState.riskPack = "ibkr";
       applyRiskPackVisibility();
       focusIbkrPlannerCard();
     }
@@ -2453,6 +2458,8 @@
       document.querySelectorAll("#risk-pane .chart-card[data-pack]").forEach(card => {
         card.classList.toggle("pack-hidden", card.getAttribute("data-pack") !== selected);
       });
+      const heatmap = document.getElementById("risk-heatmap");
+      if (heatmap) heatmap.classList.toggle("hidden", selected === "ibkr");
       setTimeout(() => {
         Object.values(appState.charts).forEach(chart => chart && chart.resize && chart.resize());
       }, 120);
