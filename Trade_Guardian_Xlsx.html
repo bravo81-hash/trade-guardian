@@ -1982,12 +1982,12 @@
       CUSTOM: { multiplier: 100, rtCommissionContract: 1.5, tickSize: 0.05 }
     };
 
-    function ibkrRoundConservative(pricePerLot, tickSize, entryType) {
+    function ibkrRoundConservative(pricePerLot, tickSize, orderType) {
       if (!Number.isFinite(pricePerLot)) return NaN;
       const tick = Number(tickSize);
       if (!Number.isFinite(tick) || tick <= 0) return pricePerLot;
       const scaled = pricePerLot / tick;
-      return entryType === "debit"
+      return String(orderType || "").toUpperCase() === "DEBIT"
         ? Math.ceil(scaled) * tick
         : Math.floor(scaled) * tick;
     }
@@ -2022,43 +2022,44 @@
       }
 
       const entryType = entryCashFlow < 0 ? "debit" : "credit";
-      const entryAbs = Math.abs(entryCashFlow);
       const totalContracts = lots * legsPerLot;
       const totalRtCommission = totalContracts * rtCommissionContract;
       const netTargetWhole = maxRisk * (profitPct / 100);
       const netStopWhole = -(maxRisk * (stopPct / 100));
+      const grossTargetWhole = netTargetWhole + totalRtCommission;
+      const grossStopWhole = netStopWhole + totalRtCommission;
 
-      const targetCloseWholeRaw = entryType === "debit"
-        ? entryAbs + totalRtCommission + netTargetWhole
-        : entryAbs - totalRtCommission - netTargetWhole;
-      const stopCloseWholeRaw = entryType === "debit"
-        ? entryAbs + totalRtCommission + netStopWhole
-        : entryAbs - totalRtCommission - netStopWhole;
+      const targetCloseWholeRaw = grossTargetWhole - entryCashFlow;
+      const stopCloseWholeRaw = grossStopWhole - entryCashFlow;
 
       function buildOutcome(rawCloseWhole) {
         if (!Number.isFinite(rawCloseWhole)) return { valid: false };
-        let closeWhole = rawCloseWhole;
-        let pricePerLot = rawCloseWhole / (lots * multiplier);
+        const orderType = rawCloseWhole >= 0 ? "CREDIT" : "DEBIT";
+        let closeWholeSigned = rawCloseWhole;
+        let closeWholeAbs = Math.abs(rawCloseWhole);
+        let pricePerLot = closeWholeAbs / (lots * multiplier);
         if (roundingMode === "conservative") {
-          pricePerLot = ibkrRoundConservative(pricePerLot, tickSize, entryType);
-          closeWhole = pricePerLot * lots * multiplier;
+          pricePerLot = ibkrRoundConservative(pricePerLot, tickSize, orderType);
+          closeWholeAbs = pricePerLot * lots * multiplier;
+          closeWholeSigned = orderType === "CREDIT" ? closeWholeAbs : -closeWholeAbs;
         }
-        if (!Number.isFinite(pricePerLot) || pricePerLot < 0 || !Number.isFinite(closeWhole)) {
+        if (!Number.isFinite(pricePerLot) || pricePerLot < 0 || !Number.isFinite(closeWholeSigned)) {
           return {
             valid: false,
             rawCloseWhole,
             pricePerLot: Number.isFinite(pricePerLot) ? pricePerLot : NaN
           };
         }
-        const grossWhole = entryType === "debit"
-          ? closeWhole - entryAbs
-          : entryAbs - closeWhole;
+        const grossWhole = closeWholeSigned + entryCashFlow;
         const netWhole = grossWhole - totalRtCommission;
         return {
           valid: true,
           rawCloseWhole,
-          closeWhole,
+          closeWhole: closeWholeSigned,
+          closeWholeAbs,
           pricePerLot,
+          orderType,
+          closeAction: orderType === "CREDIT" ? "SELL" : "BUY",
           grossWhole,
           netWhole,
           netPerLot: netWhole / lots
@@ -2067,33 +2068,30 @@
 
       const target = buildOutcome(targetCloseWholeRaw);
       const stop = buildOutcome(stopCloseWholeRaw);
-      const closeOrderType = entryType === "debit" ? "CREDIT" : "DEBIT";
-      const closeAction = entryType === "debit" ? "SELL" : "BUY";
       let warning = "";
       if (!target.valid || !stop.valid) {
         const missing = [
           !target.valid ? "target" : null,
           !stop.valid ? "stop" : null
         ].filter(Boolean).join(" and ");
-        warning = `The ${missing} close cash flow is negative under these assumptions, so a valid IBKR combo closing price cannot be produced for it.`;
+        warning = `The ${missing} outcome could not be solved from current inputs.`;
       }
 
       return {
         ok: true,
         warning,
         entryType,
-        closeOrderType,
-        closeAction,
         lots,
         legsPerLot,
         multiplier,
         maxRisk,
         entryCashFlow,
-        entryAbs,
         totalContracts,
         totalRtCommission,
         netTargetWhole,
         netStopWhole,
+        grossTargetWhole,
+        grossStopWhole,
         roundingMode,
         tickSize,
         target,
@@ -2183,14 +2181,18 @@
       setIbkrMoneyCell("ibkr-out-close-stop-whole", plan.stop.valid ? plan.stop.closeWhole : NaN);
       setIbkrTextCell("ibkr-out-price-target", plan.target.valid ? Number(plan.target.pricePerLot).toFixed(2) : "N/A");
       setIbkrTextCell("ibkr-out-price-stop", plan.stop.valid ? Number(plan.stop.pricePerLot).toFixed(2) : "N/A");
-      setIbkrTextCell("ibkr-out-order-target", plan.target.valid ? plan.closeOrderType : "N/A");
-      setIbkrTextCell("ibkr-out-order-stop", plan.stop.valid ? plan.closeOrderType : "N/A");
+      setIbkrTextCell("ibkr-out-order-target", plan.target.valid ? plan.target.orderType : "N/A");
+      setIbkrTextCell("ibkr-out-order-stop", plan.stop.valid ? plan.stop.orderType : "N/A");
 
       const targetPriceLabel = plan.target.valid ? Number(plan.target.pricePerLot).toFixed(2) : "N/A";
       const stopPriceLabel = plan.stop.valid ? Number(plan.stop.pricePerLot).toFixed(2) : "N/A";
+      const targetOrderType = plan.target.valid ? plan.target.orderType : "N/A";
+      const stopOrderType = plan.stop.valid ? plan.stop.orderType : "N/A";
+      const targetAction = plan.target.valid ? plan.target.closeAction : "—";
+      const stopAction = plan.stop.valid ? plan.stop.closeAction : "—";
       setIbkrTextCell(
         "ibkr-order-preview",
-        `${plan.entryType === "debit" ? "Debit" : "Credit"} entry | ${plan.closeAction} ${plan.lots} @ ${plan.closeOrderType} ${targetPriceLabel} | ${plan.closeAction} ${plan.lots} @ ${plan.closeOrderType} ${stopPriceLabel}`
+        `${plan.entryType === "debit" ? "Debit" : "Credit"} entry | ${targetAction} ${plan.lots} @ ${targetOrderType} ${targetPriceLabel} | ${stopAction} ${plan.lots} @ ${stopOrderType} ${stopPriceLabel}`
       );
     }
 
@@ -2203,12 +2205,37 @@
       document.getElementById("ibkr-tick-size").value = Number(preset.tickSize).toFixed(2);
     }
 
+    function parseLegSignature(symbol) {
+      const s = String(symbol || "").toUpperCase();
+      if (!s) return null;
+      const m = s.match(/(\d{6,8})([CP])(\d+(?:\.\d+)?)$/);
+      if (!m) return null;
+      const expiryCode = m[1];
+      const right = m[2];
+      const strike = Number(m[3]);
+      if (!Number.isFinite(strike)) return null;
+      return { expiryCode, right, strike };
+    }
+
+    function looksLikeFlyWithCombinedMiddle(trade) {
+      const legs = Array.isArray(trade && trade.legs) ? trade.legs : [];
+      if (legs.length !== 3) return false;
+      const sigs = legs.map(leg => parseLegSignature(leg.symbol)).filter(Boolean);
+      if (sigs.length !== 3) return false;
+      const sameExpiry = new Set(sigs.map(sig => sig.expiryCode)).size === 1;
+      const sameRight = new Set(sigs.map(sig => sig.right)).size === 1;
+      const uniqueStrikes = new Set(sigs.map(sig => sig.strike)).size === 3;
+      return sameExpiry && sameRight && uniqueStrikes;
+    }
+
     function inferLegsPerLotFromTrade(trade) {
-      const legCount = Array.isArray(trade && trade.legs) ? trade.legs.length : 0;
+      const legs = Array.isArray(trade && trade.legs) ? trade.legs : [];
+      const legCount = legs.length;
+      if (legCount === 3 && looksLikeFlyWithCombinedMiddle(trade)) return 4;
       if (legCount > 0) return legCount;
       const symbol = String(trade && trade.symbol || "").toUpperCase();
       if (symbol.includes("CONDOR") || symbol.includes("IRON")) return 4;
-      if (symbol.includes("BWB") || symbol.includes("BUTTERFLY")) return 3;
+      if (symbol.includes("BWB") || symbol.includes("BUTTERFLY")) return 4;
       if (symbol.includes("CALENDAR")) return 2;
       return 2;
     }
@@ -2272,9 +2299,9 @@
       document.getElementById("ibkr-ticker").value = "SPX";
       applyIbkrTickerPreset();
       document.getElementById("ibkr-lots").value = "4";
-      document.getElementById("ibkr-legs-per-lot").value = "2";
-      document.getElementById("ibkr-max-risk").value = "8360";
-      document.getElementById("ibkr-entry-cashflow").value = "-8360";
+      document.getElementById("ibkr-legs-per-lot").value = "4";
+      document.getElementById("ibkr-max-risk").value = "3980";
+      document.getElementById("ibkr-entry-cashflow").value = "20";
       document.getElementById("ibkr-profit-pct").value = "10";
       document.getElementById("ibkr-stop-pct").value = "10";
       document.getElementById("ibkr-rounding-mode").value = "exact";
@@ -2298,7 +2325,43 @@
 
     function runIbkrCalculatorChecks() {
       const tolerance = 1e-6;
+      const flyInference = inferLegsPerLotFromTrade({
+        symbol: "A14.APR 08 - 4 LOTS",
+        legs: [
+          { symbol: ".SPXW260408P6470" },
+          { symbol: ".SPXW260408P6530" },
+          { symbol: ".SPXW260408P6580" }
+        ]
+      });
+      console.assert(flyInference === 4, "IBKR check: 3-row fly/BWB must infer 4 contracts per lot");
+
       const screenshotCase = computeIbkrPlan({
+        lots: 4,
+        legsPerLot: 4,
+        multiplier: 100,
+        maxRisk: 3980,
+        entryCashFlow: 20,
+        profitPct: 10,
+        stopPct: 10,
+        rtCommissionContract: 3.5,
+        tickSize: 0.05,
+        roundingMode: "exact"
+      });
+      console.assert(screenshotCase.ok, "IBKR check: screenshot case should be valid");
+      console.assert(screenshotCase.totalContracts === 16, "IBKR check: total contracts should be 16");
+      console.assert(Math.abs(screenshotCase.totalRtCommission - 56) <= tolerance, "IBKR check: round-trip commissions should be $56");
+      console.assert(screenshotCase.target.valid && screenshotCase.target.orderType === "CREDIT", "IBKR check: target should close as CREDIT");
+      console.assert(screenshotCase.stop.valid && screenshotCase.stop.orderType === "DEBIT", "IBKR check: stop should close as DEBIT");
+      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.closeWhole - 434) <= tolerance, "IBKR check: target close cash flow mismatch");
+      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.closeWhole + 362) <= tolerance, "IBKR check: stop close cash flow mismatch");
+      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.netWhole - 398) <= tolerance, "IBKR check: target net PnL mismatch");
+      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.netWhole + 398) <= tolerance, "IBKR check: stop net PnL mismatch");
+      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.grossWhole - 454) <= tolerance, "IBKR check: target gross PnL mismatch");
+      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.grossWhole + 342) <= tolerance, "IBKR check: stop gross PnL mismatch");
+      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.pricePerLot - 1.085) <= tolerance, "IBKR check: target close price mismatch");
+      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.pricePerLot - 0.905) <= tolerance, "IBKR check: stop close price mismatch");
+
+      const debitCase = computeIbkrPlan({
         lots: 4,
         legsPerLot: 2,
         multiplier: 100,
@@ -2310,18 +2373,15 @@
         tickSize: 0.05,
         roundingMode: "exact"
       });
-      console.assert(screenshotCase.ok, "IBKR check: screenshot case should be valid");
-      console.assert(screenshotCase.totalContracts === 8, "IBKR check: total contracts should be 8");
-      console.assert(Math.abs(screenshotCase.totalRtCommission - 28) <= tolerance, "IBKR check: round-trip commissions should be $28");
-      console.assert(screenshotCase.closeOrderType === "CREDIT", "IBKR check: debit entry should close as CREDIT");
-      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.closeWhole - 9224) <= tolerance, "IBKR check: target close cash flow mismatch");
-      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.closeWhole - 7552) <= tolerance, "IBKR check: stop close cash flow mismatch");
-      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.netWhole - 836) <= tolerance, "IBKR check: target net PnL mismatch");
-      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.netWhole + 836) <= tolerance, "IBKR check: stop net PnL mismatch");
-      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.grossWhole - 864) <= tolerance, "IBKR check: target gross PnL mismatch");
-      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.grossWhole + 808) <= tolerance, "IBKR check: stop gross PnL mismatch");
-      console.assert(screenshotCase.target.valid && Math.abs(screenshotCase.target.pricePerLot - 23.06) <= tolerance, "IBKR check: target close price mismatch");
-      console.assert(screenshotCase.stop.valid && Math.abs(screenshotCase.stop.pricePerLot - 18.88) <= tolerance, "IBKR check: stop close price mismatch");
+      console.assert(debitCase.ok, "IBKR check: debit case should be valid");
+      console.assert(debitCase.target.valid && debitCase.target.orderType === "CREDIT", "IBKR check: debit target should close as CREDIT");
+      console.assert(debitCase.stop.valid && debitCase.stop.orderType === "CREDIT", "IBKR check: debit stop should close as CREDIT");
+      console.assert(debitCase.target.valid && Math.abs(debitCase.target.closeWhole - 9224) <= tolerance, "IBKR check: debit target close cash flow mismatch");
+      console.assert(debitCase.stop.valid && Math.abs(debitCase.stop.closeWhole - 7552) <= tolerance, "IBKR check: debit stop close cash flow mismatch");
+      console.assert(debitCase.target.valid && Math.abs(debitCase.target.netWhole - 836) <= tolerance, "IBKR check: debit target net PnL mismatch");
+      console.assert(debitCase.stop.valid && Math.abs(debitCase.stop.netWhole + 836) <= tolerance, "IBKR check: debit stop net PnL mismatch");
+      console.assert(debitCase.target.valid && Math.abs(debitCase.target.pricePerLot - 23.06) <= tolerance, "IBKR check: debit target close price mismatch");
+      console.assert(debitCase.stop.valid && Math.abs(debitCase.stop.pricePerLot - 18.88) <= tolerance, "IBKR check: debit stop close price mismatch");
 
       const creditCase = computeIbkrPlan({
         lots: 2,
@@ -2336,7 +2396,8 @@
         roundingMode: "exact"
       });
       console.assert(creditCase.ok, "IBKR check: credit case should be valid");
-      console.assert(creditCase.closeOrderType === "DEBIT", "IBKR check: credit entry should close as DEBIT");
+      console.assert(creditCase.target.valid && creditCase.target.orderType === "DEBIT", "IBKR check: credit target should close as DEBIT");
+      console.assert(creditCase.stop.valid && creditCase.stop.orderType === "DEBIT", "IBKR check: credit stop should close as DEBIT");
       console.assert(creditCase.target.valid && Math.abs(creditCase.target.netWhole - 500) <= tolerance, "IBKR check: credit target net mismatch");
       console.assert(creditCase.stop.valid && Math.abs(creditCase.stop.netWhole + 500) <= tolerance, "IBKR check: credit stop net mismatch");
     }
