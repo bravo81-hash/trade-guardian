@@ -910,6 +910,20 @@
       gap: 8px;
     }
 
+    .ibkr-source-row {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #ibkr-source-chip {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .ibkr-warning {
       margin-top: 8px;
       border: 1px solid rgba(245, 158, 11, 0.45);
@@ -982,6 +996,12 @@
 
     .ibkr-order-preview strong {
       color: var(--text);
+    }
+
+    .chart-card.ibkr-focus {
+      border-color: rgba(56, 189, 248, 0.78);
+      box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.42), 0 14px 28px -20px rgba(56, 189, 248, 0.5);
+      transition: border-color 180ms ease, box-shadow 180ms ease;
     }
 
     .segmented-control {
@@ -1292,7 +1312,7 @@
                 <h4>Harvest Window Bands (Winners P25 / P50 / P75)</h4>
                 <div class="chart-wrap"><canvas id="chart-edge-harvest"></canvas></div>
               </div>
-              <div class="chart-card" data-pack="edge">
+              <div class="chart-card" data-pack="edge" id="ibkr-planner-card">
                 <h4>IBKR Combo Closing Planner</h4>
                 <div class="ibkr-shell">
                   <div>
@@ -1304,6 +1324,7 @@
                           <option value="RUT">RUT</option>
                           <option value="SPY">SPY</option>
                           <option value="ES">ES</option>
+                          <option value="CUSTOM">CUSTOM</option>
                         </select>
                       </div>
                       <div class="field-row">
@@ -1367,6 +1388,9 @@
                         <div class="k">Multiplier</div>
                         <div class="v" id="ibkr-multiplier-view">100</div>
                       </div>
+                    </div>
+                    <div class="ibkr-source-row">
+                      <span class="chip" id="ibkr-source-chip">Manual input</span>
                     </div>
                     <div class="ibkr-warning hidden" id="ibkr-warning"></div>
                     <div class="ibkr-note">
@@ -1535,6 +1559,7 @@
         </div>
         <div class="upload-actions" style="margin-top: 0;">
           <a id="modal-optionstrat-link" class="btn btn-accent hidden" href="#" target="_blank" rel="noopener noreferrer">Open in OptionStrat</a>
+          <button class="btn" id="modal-open-ibkr-btn" type="button">Open in IBKR Planner</button>
           <button class="btn" id="modal-close-btn" type="button">Close</button>
         </div>
       </div>
@@ -1953,7 +1978,8 @@
       SPX: { multiplier: 100, rtCommissionContract: 3.5, tickSize: 0.05 },
       RUT: { multiplier: 100, rtCommissionContract: 2.0, tickSize: 0.05 },
       SPY: { multiplier: 100, rtCommissionContract: 1.3, tickSize: 0.01 },
-      ES: { multiplier: 50, rtCommissionContract: 3.0, tickSize: 0.25 }
+      ES: { multiplier: 50, rtCommissionContract: 3.0, tickSize: 0.25 },
+      CUSTOM: { multiplier: 100, rtCommissionContract: 1.5, tickSize: 0.05 }
     };
 
     function ibkrRoundConservative(pricePerLot, tickSize, entryType) {
@@ -2177,6 +2203,71 @@
       document.getElementById("ibkr-tick-size").value = Number(preset.tickSize).toFixed(2);
     }
 
+    function inferLegsPerLotFromTrade(trade) {
+      const legCount = Array.isArray(trade && trade.legs) ? trade.legs.length : 0;
+      if (legCount > 0) return legCount;
+      const symbol = String(trade && trade.symbol || "").toUpperCase();
+      if (symbol.includes("CONDOR") || symbol.includes("IRON")) return 4;
+      if (symbol.includes("BWB") || symbol.includes("BUTTERFLY")) return 3;
+      if (symbol.includes("CALENDAR")) return 2;
+      return 2;
+    }
+
+    function setIbkrSourceLabel(labelText) {
+      const sourceChip = document.getElementById("ibkr-source-chip");
+      if (!sourceChip) return;
+      sourceChip.textContent = labelText || "Manual input";
+    }
+
+    function syncIbkrFromTrade(trade) {
+      if (!trade) return;
+      const inferredTicker = String(trade.ticker || inferTradeTicker(trade) || "").toUpperCase();
+      const tickerEl = document.getElementById("ibkr-ticker");
+      const tickerOptions = new Set(Array.from(tickerEl.options).map(opt => opt.value));
+      if (inferredTicker && tickerOptions.has(inferredTicker)) {
+        tickerEl.value = inferredTicker;
+        applyIbkrTickerPreset();
+      } else {
+        tickerEl.value = "CUSTOM";
+        applyIbkrTickerPreset();
+      }
+
+      const inferredLots = Math.max(1, inferLotSizeFromSymbol(trade.symbol));
+      const inferredLegs = Math.max(1, inferLegsPerLotFromTrade(trade));
+      const inferredRisk = Math.max(0, getMaxRisk(trade));
+      const inferredCashflow = Number(trade.netDebitCredit) || 0;
+
+      document.getElementById("ibkr-lots").value = String(inferredLots);
+      document.getElementById("ibkr-legs-per-lot").value = String(inferredLegs);
+      document.getElementById("ibkr-max-risk").value = inferredRisk.toFixed(2);
+      document.getElementById("ibkr-entry-cashflow").value = inferredCashflow.toFixed(2);
+
+      const sourceLabel = `${trade.symbol} | ${inferredTicker || "CUSTOM"} | ${trade.group}`;
+      setIbkrSourceLabel(sourceLabel);
+      renderIbkrCalculator();
+    }
+
+    function focusIbkrPlannerCard() {
+      const plannerCard = document.getElementById("ibkr-planner-card");
+      if (!plannerCard) return;
+      plannerCard.scrollIntoView({ behavior: "smooth", block: "start" });
+      plannerCard.classList.add("ibkr-focus");
+      setTimeout(() => {
+        plannerCard.classList.remove("ibkr-focus");
+      }, 1300);
+    }
+
+    function openIbkrPlannerFromTradeId(tradeId) {
+      const trade = appState.trades.find(item => item.id === tradeId);
+      if (!trade) return;
+      syncIbkrFromTrade(trade);
+      hideTradeModal();
+      setPane("risk-pane");
+      appState.riskPack = "edge";
+      applyRiskPackVisibility();
+      focusIbkrPlannerCard();
+    }
+
     function loadIbkrScreenshotExample() {
       document.getElementById("ibkr-ticker").value = "SPX";
       applyIbkrTickerPreset();
@@ -2187,6 +2278,7 @@
       document.getElementById("ibkr-profit-pct").value = "10";
       document.getElementById("ibkr-stop-pct").value = "10";
       document.getElementById("ibkr-rounding-mode").value = "exact";
+      setIbkrSourceLabel("Screenshot example");
       renderIbkrCalculator();
     }
 
@@ -2200,6 +2292,7 @@
       document.getElementById("ibkr-profit-pct").value = "10";
       document.getElementById("ibkr-stop-pct").value = "10";
       document.getElementById("ibkr-rounding-mode").value = "exact";
+      setIbkrSourceLabel("Manual input");
       renderIbkrCalculator();
     }
 
@@ -4335,9 +4428,12 @@
     function renderTradeDrilldown(tradeId) {
       const trade = appState.trades.find(item => item.id === tradeId);
       if (!trade) return;
+      syncIbkrFromTrade(trade);
 
       document.getElementById("modal-title").textContent = trade.symbol;
       document.getElementById("modal-subtitle").textContent = `${trade.status} • ${trade.group} • Opened ${formatDate(trade.openDate)} • Exp ${formatDate(trade.expiration)}`;
+      const modalIbkrBtn = document.getElementById("modal-open-ibkr-btn");
+      if (modalIbkrBtn) modalIbkrBtn.setAttribute("data-trade-id", trade.id);
 
       const linkEl = document.getElementById("modal-optionstrat-link");
       if (isValidHttpLink(trade.linkUrl)) {
@@ -4959,6 +5055,7 @@
     });
 
     document.getElementById("ibkr-ticker").addEventListener("change", () => {
+      setIbkrSourceLabel("Manual input");
       applyIbkrTickerPreset();
       renderIbkrCalculator();
     });
@@ -4978,8 +5075,14 @@
     ].forEach(id => {
       const node = document.getElementById(id);
       if (!node) return;
-      node.addEventListener("input", renderIbkrCalculator);
-      node.addEventListener("change", renderIbkrCalculator);
+      node.addEventListener("input", () => {
+        setIbkrSourceLabel("Manual input");
+        renderIbkrCalculator();
+      });
+      node.addEventListener("change", () => {
+        setIbkrSourceLabel("Manual input");
+        renderIbkrCalculator();
+      });
     });
 
     document.addEventListener("click", event => {
@@ -5004,6 +5107,11 @@
     });
 
     document.getElementById("modal-close-btn").addEventListener("click", hideTradeModal);
+    document.getElementById("modal-open-ibkr-btn").addEventListener("click", event => {
+      const tradeId = event.currentTarget.getAttribute("data-trade-id");
+      if (!tradeId) return;
+      openIbkrPlannerFromTradeId(tradeId);
+    });
     document.getElementById("trade-modal-backdrop").addEventListener("click", event => {
       if (event.target.id === "trade-modal-backdrop") hideTradeModal();
     });
