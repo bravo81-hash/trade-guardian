@@ -115,6 +115,10 @@
       background: rgba(13, 20, 34, 0.55);
     }
 
+    .upload-card.full-span {
+      grid-column: 1 / -1;
+    }
+
     .upload-card h3 {
       margin: 0 0 6px;
       font-size: 1rem;
@@ -744,7 +748,7 @@
 
     .group-summary-grid {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
       gap: 8px;
       margin-bottom: 10px;
     }
@@ -857,6 +861,41 @@
 
     .edge-neighbors table {
       min-width: 720px;
+    }
+
+    .corr-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+
+    .corr-table th,
+    .corr-table td {
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+      padding: 8px 9px;
+      white-space: nowrap;
+      font-size: 0.74rem;
+      text-align: center;
+    }
+
+    .corr-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-size: 0.64rem;
+      color: var(--muted);
+      background: rgba(15, 23, 42, 0.97);
+    }
+
+    .corr-table td:first-child,
+    .corr-table th:first-child {
+      text-align: left;
+      position: sticky;
+      left: 0;
+      z-index: 2;
+      background: rgba(15, 23, 42, 0.98);
     }
 
     .ibkr-shell {
@@ -1111,22 +1150,19 @@
 
     <section class="panel section" id="upload-view">
       <div class="upload-grid">
-        <article class="upload-card">
-          <h3>Active Workbook</h3>
-          <p>Contains currently open positions.</p>
+        <article class="upload-card full-span">
+          <h3>Upload Both Workbooks Together</h3>
+          <p>Select both files at once. The app auto-maps Active/Expired by filename and falls back to selection order.</p>
           <div class="upload-actions">
-            <button class="btn btn-accent" id="pick-active-btn" type="button">Upload Active</button>
+            <button class="btn btn-accent" id="pick-both-btn" type="button">Upload Both Files</button>
+            <input type="file" id="both-file-input" accept=".xlsx,.xls,.csv" class="hidden" multiple>
             <input type="file" id="active-file-input" accept=".xlsx,.xls,.csv" class="hidden">
-            <span class="file-name" id="active-file-name">No file selected</span>
-          </div>
-        </article>
-        <article class="upload-card">
-          <h3>Expired Workbook</h3>
-          <p>Contains closed or expired positions.</p>
-          <div class="upload-actions">
-            <button class="btn btn-accent" id="pick-expired-btn" type="button">Upload Expired</button>
             <input type="file" id="expired-file-input" accept=".xlsx,.xls,.csv" class="hidden">
-            <span class="file-name" id="expired-file-name">No file selected</span>
+            <span class="chip" id="both-upload-state">Awaiting 2 files</span>
+          </div>
+          <div class="upload-actions" style="margin-top: 8px;">
+            <span class="file-name">Active: <span id="active-file-name">No file selected</span></span>
+            <span class="file-name">Expired: <span id="expired-file-name">No file selected</span></span>
           </div>
         </article>
       </div>
@@ -1201,12 +1237,37 @@
 
         <section>
           <div class="tabs">
-            <button class="tab-btn active" data-pane="risk-pane" type="button">Risk Cockpit</button>
+            <button class="tab-btn active" data-pane="group-pane" type="button">Group Tiles</button>
+            <button class="tab-btn" data-pane="risk-pane" type="button">Risk Cockpit</button>
+            <button class="tab-btn" data-pane="behavior-pane" type="button">Behavioral Lab</button>
             <button class="tab-btn" data-pane="positions-pane" type="button">Position Lens</button>
             <button class="tab-btn" data-pane="closed-pane" type="button">Closed Context</button>
+            <button class="tab-btn" data-pane="ibkr-pane" type="button">IBKR Planner</button>
           </div>
 
-          <article class="pane active" id="risk-pane">
+          <article class="pane active" id="group-pane">
+            <div class="kpi-grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+              <div class="kpi">
+                <div class="label">Open Groups</div>
+                <div class="value" id="group-open-count">0</div>
+              </div>
+              <div class="kpi">
+                <div class="label">Open Trades</div>
+                <div class="value" id="group-open-trades">0</div>
+              </div>
+              <div class="kpi">
+                <div class="label">Open Risk Proxy</div>
+                <div class="value" id="group-open-risk">$0.00</div>
+              </div>
+              <div class="kpi">
+                <div class="label">Open PnL</div>
+                <div class="value" id="group-open-pnl">$0.00</div>
+              </div>
+            </div>
+            <div class="heatmap-grid" id="risk-heatmap"></div>
+          </article>
+
+          <article class="pane" id="risk-pane">
             <div class="kpi-grid">
               <div class="kpi">
                 <div class="label">Open Positions</div>
@@ -1238,9 +1299,7 @@
               <div class="segmented-control" id="analytics-pack-toggle">
                 <button class="seg-btn active" data-pack="core" type="button">Core</button>
                 <button class="seg-btn" data-pack="equity" type="button">Equity</button>
-                <button class="seg-btn" data-pack="behavior" type="button">Behavior</button>
                 <button class="seg-btn" data-pack="edge" type="button">Edge</button>
-                <button class="seg-btn" data-pack="ibkr" type="button">IBKR</button>
               </div>
             </div>
 
@@ -1277,29 +1336,9 @@
                 <h4>Group Equity Curves (Selected Groups)</h4>
                 <div class="chart-wrap"><canvas id="chart-group-equity"></canvas></div>
               </div>
-              <div class="chart-card" data-pack="behavior">
-                <h4>DIT vs PnL Bubble (Size = Max Risk)</h4>
-                <div class="chart-wrap"><canvas id="chart-dit-pnl-bubble"></canvas></div>
-              </div>
-              <div class="chart-card" data-pack="behavior">
-                <h4>DTE Risk Wall (Stacked by Group)</h4>
-                <div class="chart-wrap"><canvas id="chart-dte-risk-wall"></canvas></div>
-              </div>
               <div class="chart-card" data-pack="equity">
                 <h4>Rolling Drawdown (Portfolio + Top Groups)</h4>
                 <div class="chart-wrap"><canvas id="chart-drawdown"></canvas></div>
-              </div>
-              <div class="chart-card" data-pack="behavior">
-                <h4>Win Rate + Expectancy by DIT Bucket</h4>
-                <div class="chart-wrap"><canvas id="chart-dit-expectancy"></canvas></div>
-              </div>
-              <div class="chart-card" data-pack="behavior">
-                <h4>Credit/Debit Mix by Group</h4>
-                <div class="chart-wrap"><canvas id="chart-credit-debit-group"></canvas></div>
-              </div>
-              <div class="chart-card" data-pack="behavior">
-                <h4>Credit/Debit Mix by Strategy</h4>
-                <div class="chart-wrap"><canvas id="chart-credit-debit-strategy"></canvas></div>
               </div>
               <div class="chart-card" data-pack="edge">
                 <h4>Strategy Edge Scorecard (Closed Trades)</h4>
@@ -1461,8 +1500,53 @@
                 <div class="edge-neighbors" id="edge-dna-neighbors"></div>
               </div>
             </div>
+          </article>
 
-            <div class="heatmap-grid" id="risk-heatmap"></div>
+          <article class="pane" id="behavior-pane">
+            <div class="kpi-grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+              <div class="kpi">
+                <div class="label">Closed Trades</div>
+                <div class="value" id="behavior-closed-count">0</div>
+              </div>
+              <div class="kpi">
+                <div class="label">Avg Exit Capture</div>
+                <div class="value" id="behavior-exit-capture">0.0%</div>
+              </div>
+              <div class="kpi">
+                <div class="label">Rolling Expectancy</div>
+                <div class="value" id="behavior-roll-expectancy">$0.00</div>
+              </div>
+              <div class="kpi">
+                <div class="label">Rolling Win Rate</div>
+                <div class="value" id="behavior-roll-winrate">0.0%</div>
+              </div>
+            </div>
+            <div class="chart-grid">
+              <div class="chart-card">
+                <h4>Exit Efficiency by Strategy (Closed Trades)</h4>
+                <div class="chart-wrap"><canvas id="chart-behavior-exit-efficiency"></canvas></div>
+              </div>
+              <div class="chart-card">
+                <h4>Holding Discipline (Winners vs Losers by DIT Bucket)</h4>
+                <div class="chart-wrap"><canvas id="chart-behavior-holding-discipline"></canvas></div>
+              </div>
+              <div class="chart-card" style="grid-column: 1 / -1;">
+                <h4>Rolling Behavior Drift (20-Trade Win Rate + Expectancy)</h4>
+                <div class="chart-wrap"><canvas id="chart-behavior-rolling-drift"></canvas></div>
+              </div>
+              <div class="chart-card">
+                <h4>Entry vs Exit Weekday Pattern</h4>
+                <div class="chart-wrap"><canvas id="chart-behavior-weekday-pattern"></canvas></div>
+              </div>
+              <div class="chart-card">
+                <h4>Entry vs Exit Week-Of-Month Pattern</h4>
+                <div class="chart-wrap"><canvas id="chart-behavior-weekofmonth-pattern"></canvas></div>
+              </div>
+              <div class="chart-card">
+                <h4>Credit/Debit Mix</h4>
+                <div class="chart-wrap"><canvas id="chart-behavior-credit-debit"></canvas></div>
+              </div>
+            </div>
           </article>
 
           <article class="pane" id="positions-pane">
@@ -1541,14 +1625,29 @@
                 <div class="chart-wrap"><canvas id="chart-closed-winloss"></canvas></div>
               </div>
               <div class="chart-card">
-                <h4>Monthly Realized PnL</h4>
+                <h4>Monthly PnL Activity (Click Month)</h4>
                 <div class="chart-wrap"><canvas id="chart-monthly-closed"></canvas></div>
               </div>
               <div class="chart-card" style="grid-column: 1 / -1;">
                 <h4>Closed Strategy Contribution</h4>
                 <div class="chart-wrap"><canvas id="chart-closed-strategy"></canvas></div>
               </div>
+              <div class="chart-card" style="grid-column: 1 / -1;">
+                <h4>Monthly Strategy Drilldown</h4>
+                <div class="upload-actions" style="margin-top: 0; justify-content: space-between;">
+                  <span class="chip" id="closed-monthly-selected-chip">No month selected</span>
+                  <select id="closed-month-selector" style="width: auto; min-width: 180px;">
+                    <option value="">Select month</option>
+                  </select>
+                  <span class="muted" style="font-size: 0.76rem;">Return % on Max Risk = (Open Unrealized + Closed Realized) / (Open Max Risk + Closed Max Risk)</span>
+                </div>
+                <div class="edge-score-wrap" id="closed-monthly-strategy-wrap" style="margin-top: 8px;"></div>
+              </div>
             </div>
+          </article>
+
+          <article class="pane" id="ibkr-pane">
+            <div class="chart-grid" id="ibkr-pane-host"></div>
           </article>
         </section>
       </div>
@@ -1703,6 +1802,7 @@
     const appState = {
       files: { active: null, expired: null },
       parseResults: { active: null, expired: null },
+      uploadNotes: [],
       warnings: [],
       trades: [],
       groups: [],
@@ -1713,7 +1813,7 @@
         search: ""
       },
       charts: {},
-      activePane: "risk-pane",
+      activePane: "group-pane",
       tableSort: {
         positions: { key: "openDate", dir: "desc" },
         groupPositions: { key: "openDate", dir: "desc" }
@@ -1723,6 +1823,9 @@
         status: "ALL"
       },
       riskPack: "core",
+      closed: {
+        selectedMonth: null
+      },
       edge: {
         selectedTradeId: null
       }
@@ -1733,8 +1836,10 @@
       uploadWarnings: document.getElementById("upload-warnings"),
       activeFileInput: document.getElementById("active-file-input"),
       expiredFileInput: document.getElementById("expired-file-input"),
+      bothFileInput: document.getElementById("both-file-input"),
       activeFileName: document.getElementById("active-file-name"),
       expiredFileName: document.getElementById("expired-file-name"),
+      bothUploadState: document.getElementById("both-upload-state"),
       buildDashboardBtn: document.getElementById("build-dashboard-btn"),
       uploadView: document.getElementById("upload-view"),
       dashboardView: document.getElementById("dashboard-view"),
@@ -1777,6 +1882,37 @@
         return 0;
       }
       return negParens ? -parsed : parsed;
+    }
+
+    function normalizeReturnPctDecimal(value) {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) return 0;
+      if (Math.abs(parsed) > 1.5) return parsed / 100;
+      return parsed;
+    }
+
+    function normalizeReturnPctDisplay(value) {
+      return normalizeReturnPctDecimal(value) * 100;
+    }
+
+    function deriveMarginUsed(status, pnl, netDebitCredit, maxLoss, returnPctDecimal) {
+      const marginFromNet = Math.abs(Number(netDebitCredit) || 0);
+      const marginFromMaxLoss = Math.abs(Number(maxLoss) || 0);
+      const pnlValue = Number(pnl) || 0;
+      const pct = Number(returnPctDecimal) || 0;
+      const marginFromPct = Math.abs(pct) > 1e-9 ? Math.abs(pnlValue / pct) : 0;
+
+      if (String(status || "").toUpperCase() === "CLOSED") {
+        if (marginFromNet > 0) return marginFromNet;
+        if (marginFromPct > 0) return marginFromPct;
+        if (marginFromMaxLoss > 0) return marginFromMaxLoss;
+        return 0;
+      }
+
+      if (marginFromMaxLoss > 0) return marginFromMaxLoss;
+      if (marginFromNet > 0) return marginFromNet;
+      if (marginFromPct > 0) return marginFromPct;
+      return 0;
     }
 
     function normalizeDateValue(value) {
@@ -1850,6 +1986,8 @@
     }
 
     function getMaxRisk(trade) {
+      const marginUsed = Math.abs(Number(trade && trade.marginUsed) || 0);
+      if (marginUsed > 0) return marginUsed;
       const absMaxLoss = Math.abs(Number(trade && trade.maxLoss) || 0);
       if (absMaxLoss > 0) return absMaxLoss;
       const proxy = Number(trade && trade.riskProxy) || 0;
@@ -1973,10 +2111,20 @@
       return "90+";
     }
 
-    function dayLabelFromTrade(trade) {
-      const date = normalizeDateValue(trade && trade.openDate);
+    function dayLabelFromDate(value) {
+      const date = normalizeDateValue(value);
       if (!date) return "Unknown";
       return date.toLocaleDateString(undefined, { weekday: "short" });
+    }
+
+    function dayLabelFromTrade(trade) {
+      return dayLabelFromDate(trade && trade.openDate);
+    }
+
+    function weekOfMonthFromDate(value) {
+      const date = normalizeDateValue(value);
+      if (!date) return 0;
+      return Math.min(5, Math.max(1, Math.ceil(date.getDate() / 7)));
     }
 
     const IBKR_TICKER_PRESETS = {
@@ -2294,9 +2442,7 @@
       if (!trade) return;
       syncIbkrFromTrade(trade);
       hideTradeModal();
-      setPane("risk-pane");
-      appState.riskPack = "ibkr";
-      applyRiskPackVisibility();
+      setPane("ibkr-pane");
       focusIbkrPlannerCard();
     }
 
@@ -2458,15 +2604,13 @@
       document.querySelectorAll("#risk-pane .chart-card[data-pack]").forEach(card => {
         card.classList.toggle("pack-hidden", card.getAttribute("data-pack") !== selected);
       });
-      const heatmap = document.getElementById("risk-heatmap");
-      if (heatmap) heatmap.classList.toggle("hidden", selected === "ibkr");
       setTimeout(() => {
         Object.values(appState.charts).forEach(chart => chart && chart.resize && chart.resize());
       }, 120);
     }
 
     function ensureChartExpandButtons() {
-      document.querySelectorAll("#risk-pane .chart-card").forEach(card => {
+      document.querySelectorAll("#dashboard-view .chart-card").forEach(card => {
         if (card.querySelector(".chart-expand-btn")) return;
         const btn = document.createElement("button");
         btn.type = "button";
@@ -2527,6 +2671,14 @@
     function monthKeyFromDate(value) {
       const iso = toIsoDate(value);
       return iso ? iso.slice(0, 7) : "Unknown";
+    }
+
+    function formatMonthKey(value) {
+      const monthKey = String(value || "").trim();
+      if (!/^\d{4}-\d{2}$/.test(monthKey)) return monthKey || "Unknown";
+      const date = new Date(`${monthKey}-01T00:00:00`);
+      if (Number.isNaN(date.getTime())) return monthKey;
+      return date.toLocaleDateString(undefined, { year: "numeric", month: "short" });
     }
 
     function isValidHttpLink(url) {
@@ -2723,6 +2875,12 @@
           }
 
           const contextLabel = `${status} ${rawName}`;
+          const pnlValue = parsePnlFromRow(row, warnings, contextLabel);
+          const netDebitCredit = parseNumber(row.net_debit_credit, warnings, `${contextLabel} Net Debit/Credit`);
+          const maxLoss = parseNumber(row.max_loss, warnings, `${contextLabel} Max Loss`);
+          const rawPct = parseNumber(row.total_return_pct || row.total_return_1 || row.total_return || 0, warnings, `${contextLabel} Total Return %`);
+          const pnlPct = normalizeReturnPctDisplay(rawPct);
+          const marginUsed = deriveMarginUsed(status, pnlValue, netDebitCredit, maxLoss, normalizeReturnPctDecimal(rawPct));
           currentTrade = {
             id: buildTradeId(row, status, index),
             status,
@@ -2732,11 +2890,11 @@
             openDate,
             expiration,
             closeDate: status === "CLOSED" ? (expiration || openDate) : null,
-            pnl: parsePnlFromRow(row, warnings, contextLabel),
-            pnlPct: parseNumber(row.total_return_pct || row.total_return_1 || 0, warnings, `${contextLabel} Total Return %`),
-            netDebitCredit: parseNumber(row.net_debit_credit, warnings, `${contextLabel} Net Debit/Credit`),
+            pnl: pnlValue,
+            pnlPct,
+            netDebitCredit,
             chance: parseNumber(row.chance, warnings, `${contextLabel} Chance`) * 100,
-            maxLoss: parseNumber(row.max_loss, warnings, `${contextLabel} Max Loss`),
+            maxLoss,
             maxProfit: parseNumber(row.max_profit, warnings, `${contextLabel} Max Profit`),
             high: parseNumber(row.high, warnings, `${contextLabel} High`),
             low: parseNumber(row.low, warnings, `${contextLabel} Low`),
@@ -2746,6 +2904,7 @@
             vega: parseNumber(row.vega, warnings, `${contextLabel} Vega`),
             rho: parseNumber(row.rho, warnings, `${contextLabel} Rho`),
             iv: parseNumber(row.iv, warnings, `${contextLabel} IV`),
+            marginUsed,
             linkUrl: String(row.link || "").trim(),
             legs: [],
             raw: row,
@@ -2879,13 +3038,52 @@
       const heatByGroup = {};
       const strategyContribution = {};
       const closedByMonth = {};
+      const openByMonth = {};
+      const monthlyStrategyMap = {};
+      const weekdayOrder = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      const entryWeekdayCounts = Object.fromEntries(weekdayOrder.map(day => [day, 0]));
+      const exitWeekdayCounts = Object.fromEntries(weekdayOrder.map(day => [day, 0]));
+      const weekOfMonthLabels = ["W1", "W2", "W3", "W4", "W5"];
+      const entryWeekOfMonthCounts = Object.fromEntries(weekOfMonthLabels.map(label => [label, 0]));
+      const exitWeekOfMonthCounts = Object.fromEntries(weekOfMonthLabels.map(label => [label, 0]));
       let closedWins = 0;
+
+      function upsertMonthlyStrategyStats(month, strategy) {
+        const monthKey = String(month || "Unknown");
+        const strategyKey = String(strategy || "Uncategorized");
+        if (!monthlyStrategyMap[monthKey]) monthlyStrategyMap[monthKey] = {};
+        if (!monthlyStrategyMap[monthKey][strategyKey]) {
+          monthlyStrategyMap[monthKey][strategyKey] = {
+            openedCount: 0,
+            openUnrealized: 0,
+            openMaxRisk: 0,
+            closedCount: 0,
+            closedRealized: 0,
+            closedMaxRisk: 0
+          };
+        }
+        return monthlyStrategyMap[monthKey][strategyKey];
+      }
 
       filteredTrades.forEach(trade => {
         const strategy = trade.strategy || trade.group || "Uncategorized";
         const group = trade.group || "Uncategorized";
-        strategyContribution[strategy] = (strategyContribution[strategy] || 0) + (Number(trade.pnl) || 0);
+        const pnlValue = Number(trade.pnl) || 0;
+
+        const entryDay = dayLabelFromDate(trade.openDate);
+        if (entryWeekdayCounts[entryDay] != null) entryWeekdayCounts[entryDay] += 1;
+        const entryWom = weekOfMonthFromDate(trade.openDate);
+        if (entryWom >= 1 && entryWom <= 5) entryWeekOfMonthCounts[`W${entryWom}`] += 1;
+
+        strategyContribution[strategy] = (strategyContribution[strategy] || 0) + pnlValue;
+        const openMonth = trade.openMonth || monthKeyFromDate(trade.openDate);
+        const openedStats = upsertMonthlyStrategyStats(openMonth, strategy);
+        openedStats.openedCount += 1;
         if (trade.status === "OPEN") {
+          openedStats.openUnrealized += pnlValue;
+          openedStats.openMaxRisk += getMaxRisk(trade);
+          openByMonth[openMonth] = (openByMonth[openMonth] || 0) + pnlValue;
+
           byStrategy[strategy] = (byStrategy[strategy] || 0) + trade.riskProxy;
           byGroup[group] = (byGroup[group] || 0) + trade.riskProxy;
           const expiry = trade.expiration || "Unknown";
@@ -2902,7 +3100,7 @@
           heatByGroup[group].gamma += Number(trade.gamma) || 0;
           heatByGroup[group].vega += Number(trade.vega) || 0;
           heatByGroup[group].risk += trade.riskProxy;
-          heatByGroup[group].pnl += Number(trade.pnl) || 0;
+          heatByGroup[group].pnl += pnlValue;
           heatByGroup[group].count += 1;
           const ticker = trade.ticker || inferTradeTicker(trade);
           if (!heatByGroup[group].byTicker[ticker]) {
@@ -2910,13 +3108,22 @@
           }
           heatByGroup[group].byTicker[ticker].delta += Number(trade.delta) || 0;
           heatByGroup[group].byTicker[ticker].theta += Number(trade.theta) || 0;
-          heatByGroup[group].byTicker[ticker].pnl += Number(trade.pnl) || 0;
+          heatByGroup[group].byTicker[ticker].pnl += pnlValue;
           heatByGroup[group].byTicker[ticker].risk += Number(trade.riskProxy) || 0;
           heatByGroup[group].byTicker[ticker].count += 1;
         } else {
           const month = trade.closeMonth || monthKeyFromDate(trade.closeDate || trade.expiration || trade.openDate);
-          closedByMonth[month] = (closedByMonth[month] || 0) + (Number(trade.pnl) || 0);
-          if ((Number(trade.pnl) || 0) > 0) closedWins += 1;
+          const closedStats = upsertMonthlyStrategyStats(month, strategy);
+          closedStats.closedCount += 1;
+          closedStats.closedRealized += pnlValue;
+          closedStats.closedMaxRisk += getMaxRisk(trade);
+          closedByMonth[month] = (closedByMonth[month] || 0) + pnlValue;
+
+          const exitDay = dayLabelFromDate(trade.closeDate || trade.expiration || trade.openDate);
+          if (exitWeekdayCounts[exitDay] != null) exitWeekdayCounts[exitDay] += 1;
+          const exitWom = weekOfMonthFromDate(trade.closeDate || trade.expiration || trade.openDate);
+          if (exitWom >= 1 && exitWom <= 5) exitWeekOfMonthCounts[`W${exitWom}`] += 1;
+          if (pnlValue > 0) closedWins += 1;
         }
       });
 
@@ -2924,7 +3131,39 @@
       const sortedGroupRisk = Object.entries(byGroup).sort((a, b) => b[1] - a[1]);
       const sortedExpiry = Object.keys(byExpiry).sort((a, b) => compareDate(a, b));
       const sortedContribution = Object.entries(strategyContribution).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
-      const monthlyKeys = Object.keys(closedByMonth).sort((a, b) => compareDate(`${a}-01`, `${b}-01`));
+      const monthlyAllKeys = Array.from(new Set([
+        ...Object.keys(openByMonth),
+        ...Object.keys(closedByMonth),
+        ...Object.keys(monthlyStrategyMap)
+      ])).sort((a, b) => compareDate(`${a}-01`, `${b}-01`));
+      const monthlyStrategyRows = Object.entries(monthlyStrategyMap)
+        .flatMap(([month, strategyMap]) => Object.entries(strategyMap).map(([strategyName, stats]) => {
+          const openUnrealized = Number(stats.openUnrealized) || 0;
+          const closedRealized = Number(stats.closedRealized) || 0;
+          const openMaxRisk = Number(stats.openMaxRisk) || 0;
+          const closedMaxRisk = Number(stats.closedMaxRisk) || 0;
+          const totalPnl = openUnrealized + closedRealized;
+          const totalMaxRisk = openMaxRisk + closedMaxRisk;
+          return {
+            month,
+            strategy: strategyName,
+            openedCount: Number(stats.openedCount) || 0,
+            openUnrealized,
+            openMaxRisk,
+            closedCount: Number(stats.closedCount) || 0,
+            closedRealized,
+            closedMaxRisk,
+            totalCount: (Number(stats.openedCount) || 0) + (Number(stats.closedCount) || 0),
+            totalPnl,
+            totalMaxRisk,
+            pnlPctOnRisk: totalMaxRisk > 0 ? (totalPnl / totalMaxRisk) * 100 : 0
+          };
+        }))
+        .sort((a, b) => {
+          const monthCmp = compareDate(`${b.month}-01`, `${a.month}-01`);
+          if (monthCmp !== 0) return monthCmp;
+          return Math.abs(b.totalMaxRisk) - Math.abs(a.totalMaxRisk);
+        });
       const equityCurves = buildEquityCurvesFromClosed(closedTrades);
 
       return {
@@ -2944,7 +3183,15 @@
         heatByGroup,
         strategyContribution: sortedContribution,
         closedByMonth,
-        monthlyKeys,
+        openByMonth,
+        monthlyKeys: monthlyAllKeys,
+        monthlyStrategyRows,
+        weekdayOrder,
+        weekOfMonthLabels,
+        entryWeekdayCounts,
+        exitWeekdayCounts,
+        entryWeekOfMonthCounts,
+        exitWeekOfMonthCounts,
         portfolioEquitySeries: equityCurves.portfolioSeries,
         groupEquitySeries: equityCurves.groupSeries,
         equityDates: equityCurves.dates
@@ -2986,6 +3233,14 @@
       });
     }
 
+    function rehomeDashboardCards() {
+      const ibkrHost = document.getElementById("ibkr-pane-host");
+      const ibkrCard = document.getElementById("ibkr-planner-card");
+      if (ibkrHost && ibkrCard && ibkrCard.parentElement !== ibkrHost) {
+        ibkrHost.appendChild(ibkrCard);
+      }
+    }
+
     function renderGroupToggles() {
       if (!appState.groups.length) {
         el.groupToggleList.innerHTML = '<div class="muted" style="font-size:0.82rem;">No groups detected yet.</div>';
@@ -3005,6 +3260,7 @@
 
     function renderHeatmap(aggregates) {
       const container = document.getElementById("risk-heatmap");
+      if (!container) return;
       const entries = Object.entries(aggregates.heatByGroup);
       if (!entries.length) {
         container.innerHTML = '<div class="heat-cell"><h5>No open risk</h5><div class="muted">No open positions under current filters.</div></div>';
@@ -3039,6 +3295,361 @@
           `;
         })
         .join("");
+    }
+
+    function renderGroupTilesPane(aggregates) {
+      const groupCount = Object.keys(aggregates.heatByGroup || {}).length;
+      const openRisk = (aggregates.byGroupRisk || []).reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
+      const openTrades = aggregates.openTrades || [];
+      const openPnl = openTrades.reduce((sum, trade) => sum + (Number(trade.pnl) || 0), 0);
+      document.getElementById("group-open-count").textContent = String(groupCount);
+      document.getElementById("group-open-trades").textContent = String(openTrades.length);
+      document.getElementById("group-open-risk").textContent = fmtMoney(openRisk);
+      const pnlEl = document.getElementById("group-open-pnl");
+      pnlEl.textContent = fmtMoney(openPnl);
+      pnlEl.className = `value ${colorMoneyClass(openPnl)}`;
+      renderHeatmap(aggregates);
+    }
+
+    function renderBehaviorLab(aggregates) {
+      const closedTrades = (aggregates.closedTrades || []).slice();
+      const exitSamples = closedTrades.map(trade => {
+        const pnl = Number(trade.pnl) || 0;
+        const favorable = pnl >= 0
+          ? Math.max(0, Number(trade.high) || 0)
+          : Math.max(0, Math.abs(Number(trade.low) || 0));
+        const capturePct = favorable > 0 ? Math.min(200, (Math.abs(pnl) / favorable) * 100) : 0;
+        return { trade, capturePct };
+      });
+      const avgCapture = exitSamples.length
+        ? exitSamples.reduce((sum, sample) => sum + sample.capturePct, 0) / exitSamples.length
+        : 0;
+
+      const exitByStrategy = {};
+      exitSamples.forEach(sample => {
+        const strategy = sample.trade.strategy || sample.trade.group || "Uncategorized";
+        if (!exitByStrategy[strategy]) exitByStrategy[strategy] = { count: 0, captureSum: 0 };
+        exitByStrategy[strategy].count += 1;
+        exitByStrategy[strategy].captureSum += sample.capturePct;
+      });
+      const exitRows = Object.entries(exitByStrategy)
+        .map(([strategy, stats]) => ({
+          strategy,
+          count: stats.count,
+          avgCapture: stats.count ? stats.captureSum / stats.count : 0
+        }))
+        .filter(row => row.count >= 2)
+        .sort((a, b) => b.count - a.count || b.avgCapture - a.avgCapture)
+        .slice(0, 12);
+
+      const holdingBuckets = ["0-7d", "8-21d", "22-45d", "46-90d", "90d+"];
+      const holdingStats = Object.fromEntries(holdingBuckets.map(bucket => [bucket, { win: 0, loss: 0 }]));
+      closedTrades.forEach(trade => {
+        const bucket = getDitBucket(getTradeDit(trade));
+        if (!holdingStats[bucket]) return;
+        if ((Number(trade.pnl) || 0) > 0) holdingStats[bucket].win += 1;
+        else if ((Number(trade.pnl) || 0) < 0) holdingStats[bucket].loss += 1;
+      });
+
+      const rollingWindow = 20;
+      const rollingLabels = [];
+      const rollingExpectancy = [];
+      const rollingWinRate = [];
+      closedTrades.forEach((trade, index) => {
+        const start = Math.max(0, index - rollingWindow + 1);
+        const windowTrades = closedTrades.slice(start, index + 1);
+        if (windowTrades.length < 5) return;
+        const pnlSum = windowTrades.reduce((sum, item) => sum + (Number(item.pnl) || 0), 0);
+        const wins = windowTrades.filter(item => (Number(item.pnl) || 0) > 0).length;
+        const expectancy = pnlSum / windowTrades.length;
+        const winRate = (wins / windowTrades.length) * 100;
+        rollingLabels.push(formatDate(trade.closeDate || trade.expiration || trade.openDate));
+        rollingExpectancy.push(expectancy);
+        rollingWinRate.push(winRate);
+      });
+
+      const latestExpectancy = rollingExpectancy.length ? rollingExpectancy[rollingExpectancy.length - 1] : 0;
+      const latestWinRate = rollingWinRate.length ? rollingWinRate[rollingWinRate.length - 1] : 0;
+      document.getElementById("behavior-closed-count").textContent = String(closedTrades.length);
+      document.getElementById("behavior-exit-capture").textContent = `${avgCapture.toFixed(1)}%`;
+      const rollExpEl = document.getElementById("behavior-roll-expectancy");
+      rollExpEl.textContent = fmtMoney(latestExpectancy);
+      rollExpEl.className = `value ${colorMoneyClass(latestExpectancy)}`;
+      document.getElementById("behavior-roll-winrate").textContent = `${latestWinRate.toFixed(1)}%`;
+
+      drawOrReplace("behaviorExitEfficiency", {
+        ctx: document.getElementById("chart-behavior-exit-efficiency").getContext("2d"),
+        type: "bar",
+        data: {
+          labels: exitRows.length ? exitRows.map(row => row.strategy) : ["No Data"],
+          datasets: [
+            {
+              label: "Avg Exit Capture %",
+              data: exitRows.length ? exitRows.map(row => row.avgCapture) : [0],
+              backgroundColor: "rgba(56,189,248,0.52)",
+              borderColor: "#38bdf8",
+              borderWidth: 1,
+              borderRadius: 6,
+              yAxisID: "y"
+            },
+            {
+              type: "line",
+              label: "Trade Count",
+              data: exitRows.length ? exitRows.map(row => row.count) : [0],
+              borderColor: "#f59e0b",
+              pointBackgroundColor: "#f59e0b",
+              pointRadius: 3,
+              tension: 0.2,
+              yAxisID: "y1"
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          onClick: (_, elements, chart) => {
+            if (!elements.length) return;
+            const strategy = chart.data.labels[elements[0].index];
+            if (!strategy) return;
+            openFirstMatchingTrade(trade => trade.status === "CLOSED" && trade.strategy === strategy);
+          },
+          plugins: { legend: { labels: { color: chartTextColor() } } },
+          scales: {
+            x: {
+              ticks: { color: chartTextColor() },
+              grid: { display: false }
+            },
+            y: {
+              position: "left",
+              ticks: { color: chartTextColor(), callback: value => `${Number(value).toFixed(0)}%` },
+              grid: { color: chartGridColor() }
+            },
+            y1: {
+              position: "right",
+              ticks: { color: chartTextColor(), precision: 0 },
+              grid: { display: false }
+            }
+          }
+        }
+      });
+
+      drawOrReplace("behaviorHoldingDiscipline", {
+        ctx: document.getElementById("chart-behavior-holding-discipline").getContext("2d"),
+        type: "bar",
+        data: {
+          labels: holdingBuckets,
+          datasets: [
+            {
+              label: "Winners",
+              data: holdingBuckets.map(bucket => (holdingStats[bucket] || {}).win || 0),
+              backgroundColor: "rgba(34,197,94,0.55)",
+              borderColor: "#22c55e",
+              borderWidth: 1,
+              borderRadius: 6,
+              stack: "holding"
+            },
+            {
+              label: "Losers",
+              data: holdingBuckets.map(bucket => (holdingStats[bucket] || {}).loss || 0),
+              backgroundColor: "rgba(244,63,94,0.55)",
+              borderColor: "#f43f5e",
+              borderWidth: 1,
+              borderRadius: 6,
+              stack: "holding"
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          onClick: (_, elements, chart) => {
+            if (!elements.length) return;
+            const bucket = chart.data.labels[elements[0].index];
+            if (!bucket) return;
+            openFirstMatchingTrade(trade => trade.status === "CLOSED" && getDitBucket(getTradeDit(trade)) === bucket);
+          },
+          plugins: { legend: { labels: { color: chartTextColor() } } },
+          scales: {
+            x: { stacked: true, ticks: { color: chartTextColor() }, grid: { display: false } },
+            y: { stacked: true, ticks: { color: chartTextColor(), precision: 0 }, grid: { color: chartGridColor() } }
+          }
+        }
+      });
+
+      drawOrReplace("behaviorRollingDrift", {
+        ctx: document.getElementById("chart-behavior-rolling-drift").getContext("2d"),
+        type: "line",
+        data: {
+          labels: rollingLabels.length ? rollingLabels : ["No Data"],
+          datasets: [
+            {
+              label: "Rolling Expectancy ($)",
+              data: rollingExpectancy.length ? rollingExpectancy : [0],
+              borderColor: "#38bdf8",
+              backgroundColor: "rgba(56,189,248,0.16)",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.2,
+              yAxisID: "y"
+            },
+            {
+              label: "Rolling Win Rate %",
+              data: rollingWinRate.length ? rollingWinRate : [0],
+              borderColor: "#f59e0b",
+              backgroundColor: "rgba(245,158,11,0.18)",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.2,
+              yAxisID: "y1"
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: chartTextColor() } } },
+          scales: {
+            x: { ticks: { color: chartTextColor() }, grid: { color: chartGridColor() } },
+            y: {
+              position: "left",
+              ticks: { color: chartTextColor(), callback: value => `$${Number(value).toLocaleString()}` },
+              grid: { color: chartGridColor() }
+            },
+            y1: {
+              position: "right",
+              min: 0,
+              max: 100,
+              ticks: { color: chartTextColor(), callback: value => `${Number(value).toFixed(0)}%` },
+              grid: { display: false }
+            }
+          }
+        }
+      });
+
+      const weekdayOrder = aggregates.weekdayOrder || ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      drawOrReplace("behaviorWeekdayPattern", {
+        ctx: document.getElementById("chart-behavior-weekday-pattern").getContext("2d"),
+        type: "bar",
+        data: {
+          labels: weekdayOrder,
+          datasets: [
+            {
+              label: "Entries",
+              data: weekdayOrder.map(day => Number((aggregates.entryWeekdayCounts || {})[day]) || 0),
+              backgroundColor: "rgba(56,189,248,0.55)",
+              borderColor: "#38bdf8",
+              borderWidth: 1
+            },
+            {
+              label: "Exits (Closed)",
+              data: weekdayOrder.map(day => Number((aggregates.exitWeekdayCounts || {})[day]) || 0),
+              backgroundColor: "rgba(245,158,11,0.55)",
+              borderColor: "#f59e0b",
+              borderWidth: 1
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: chartTextColor() } } },
+          scales: {
+            x: { ticks: { color: chartTextColor() }, grid: { display: false } },
+            y: { ticks: { color: chartTextColor(), precision: 0 }, grid: { color: chartGridColor() } }
+          }
+        }
+      });
+
+      const womLabels = aggregates.weekOfMonthLabels || ["W1", "W2", "W3", "W4", "W5"];
+      drawOrReplace("behaviorWeekOfMonthPattern", {
+        ctx: document.getElementById("chart-behavior-weekofmonth-pattern").getContext("2d"),
+        type: "bar",
+        data: {
+          labels: womLabels,
+          datasets: [
+            {
+              label: "Entries",
+              data: womLabels.map(label => Number((aggregates.entryWeekOfMonthCounts || {})[label]) || 0),
+              backgroundColor: "rgba(20,184,166,0.55)",
+              borderColor: "#14b8a6",
+              borderWidth: 1
+            },
+            {
+              label: "Exits (Closed)",
+              data: womLabels.map(label => Number((aggregates.exitWeekOfMonthCounts || {})[label]) || 0),
+              backgroundColor: "rgba(129,140,248,0.55)",
+              borderColor: "#818cf8",
+              borderWidth: 1
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: chartTextColor() } } },
+          scales: {
+            x: { ticks: { color: chartTextColor() }, grid: { display: false } },
+            y: { ticks: { color: chartTextColor(), precision: 0 }, grid: { color: chartGridColor() } }
+          }
+        }
+      });
+
+      const flowByGroup = {};
+      (aggregates.filteredTrades || []).forEach(trade => {
+        const group = trade.group || "Uncategorized";
+        const net = Number(trade.netDebitCredit) || 0;
+        if (!flowByGroup[group]) flowByGroup[group] = { credit: 0, debit: 0 };
+        if (net >= 0) flowByGroup[group].credit += net;
+        else flowByGroup[group].debit += Math.abs(net);
+      });
+      const flowEntries = Object.entries(flowByGroup)
+        .sort((a, b) => Math.max(a[1].credit, a[1].debit) - Math.max(b[1].credit, b[1].debit))
+        .slice(-12);
+      drawOrReplace("behaviorCreditDebit", {
+        ctx: document.getElementById("chart-behavior-credit-debit").getContext("2d"),
+        type: "bar",
+        data: {
+          labels: flowEntries.length ? flowEntries.map(([k]) => k) : ["No Data"],
+          datasets: [
+            {
+              label: "Credit Received",
+              data: flowEntries.length ? flowEntries.map(([, v]) => v.credit) : [0],
+              backgroundColor: "rgba(34,197,94,0.55)",
+              borderColor: "#22c55e",
+              borderWidth: 1
+            },
+            {
+              label: "Debit Paid",
+              data: flowEntries.length ? flowEntries.map(([, v]) => -v.debit) : [0],
+              backgroundColor: "rgba(244,63,94,0.55)",
+              borderColor: "#f43f5e",
+              borderWidth: 1
+            }
+          ]
+        },
+        options: {
+          indexAxis: "y",
+          responsive: true,
+          maintainAspectRatio: false,
+          onClick: (_, elements, chart) => {
+            if (!elements.length) return;
+            const group = chart.data.labels[elements[0].index];
+            if (!group) return;
+            renderGroupDrilldown(group);
+          },
+          plugins: { legend: { labels: { color: chartTextColor() } } },
+          scales: {
+            x: {
+              ticks: {
+                color: chartTextColor(),
+                callback: value => `$${Number(value).toLocaleString()}`
+              },
+              grid: { color: chartGridColor() }
+            },
+            y: { ticks: { color: chartTextColor() }, grid: { display: false } }
+          }
+        }
+      });
     }
 
     function renderPositionsTable(filteredTrades) {
@@ -3097,6 +3708,124 @@
       updateSortHeaders("positions");
     }
 
+    function renderClosedMonthlyStrategyDrilldown(aggregates, monthKey) {
+      const wrap = document.getElementById("closed-monthly-strategy-wrap");
+      const chip = document.getElementById("closed-monthly-selected-chip");
+      const selector = document.getElementById("closed-month-selector");
+      if (!wrap || !chip) return;
+
+      const months = aggregates.monthlyKeys || [];
+      if (!months.length) {
+        chip.textContent = "No month selected";
+        wrap.innerHTML = '<div class="table-empty">No monthly strategy analytics under current filters.</div>';
+        if (selector) selector.innerHTML = '<option value="">No months</option>';
+        return;
+      }
+
+      let selectedMonth = monthKey || (selector && selector.value) || (appState.closed && appState.closed.selectedMonth);
+      if (!selectedMonth || !months.includes(selectedMonth)) {
+        selectedMonth = months[months.length - 1];
+      }
+      if (!appState.closed) appState.closed = { selectedMonth: null };
+      appState.closed.selectedMonth = selectedMonth;
+      if (selector) {
+        selector.innerHTML = months
+          .map(month => `<option value="${escapeHtml(month)}">${escapeHtml(formatMonthKey(month))}</option>`)
+          .join("");
+        selector.value = selectedMonth;
+        selector.onchange = () => {
+          const nextMonth = selector.value;
+          appState.closed.selectedMonth = nextMonth;
+          renderClosedMonthlyStrategyDrilldown(aggregates, nextMonth);
+        };
+      }
+
+      const rows = (aggregates.monthlyStrategyRows || [])
+        .filter(row => row.month === selectedMonth)
+        .sort((a, b) => {
+          const riskCmp = Math.abs(b.totalMaxRisk) - Math.abs(a.totalMaxRisk);
+          if (riskCmp !== 0) return riskCmp;
+          return Math.abs(b.totalPnl) - Math.abs(a.totalPnl);
+        });
+
+      const totals = rows.reduce((acc, row) => {
+        acc.openedCount += Number(row.openedCount) || 0;
+        acc.closedCount += Number(row.closedCount) || 0;
+        acc.openUnrealized += Number(row.openUnrealized) || 0;
+        acc.closedRealized += Number(row.closedRealized) || 0;
+        acc.openMaxRisk += Number(row.openMaxRisk) || 0;
+        acc.closedMaxRisk += Number(row.closedMaxRisk) || 0;
+        return acc;
+      }, {
+        openedCount: 0,
+        closedCount: 0,
+        openUnrealized: 0,
+        closedRealized: 0,
+        openMaxRisk: 0,
+        closedMaxRisk: 0
+      });
+      const totalPnl = totals.openUnrealized + totals.closedRealized;
+      const totalRisk = totals.openMaxRisk + totals.closedMaxRisk;
+      const totalPct = totalRisk > 0 ? (totalPnl / totalRisk) * 100 : 0;
+      chip.textContent = `${formatMonthKey(selectedMonth)} • Opened ${totals.openedCount} • Closed ${totals.closedCount} • Net ${fmtMoney(totalPnl)} • Return ${Number(totalPct).toFixed(2)}%`;
+
+      if (!rows.length) {
+        wrap.innerHTML = `<div class="table-empty">No strategy rows for ${escapeHtml(formatMonthKey(selectedMonth))}.</div>`;
+        wrap.onclick = null;
+        return;
+      }
+
+      wrap.innerHTML = `
+        <table class="edge-score-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th style="text-align:right;">Opened</th>
+              <th style="text-align:right;">Open Unrealized</th>
+              <th style="text-align:right;">Open Max Risk</th>
+              <th style="text-align:right;">Closed</th>
+              <th style="text-align:right;">Closed Realized</th>
+              <th style="text-align:right;">Closed Max Risk</th>
+              <th style="text-align:right;">Net PnL</th>
+              <th style="text-align:right;">Total Max Risk</th>
+              <th style="text-align:right;">Return % on Max Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(row => `
+              <tr data-month="${escapeHtml(row.month)}" data-strategy="${escapeHtml(row.strategy)}">
+                <td>${escapeHtml(row.strategy)}</td>
+                <td style="text-align:right;">${row.openedCount}</td>
+                <td style="text-align:right;" class="${colorMoneyClass(row.openUnrealized)}">${fmtMoney(row.openUnrealized)}</td>
+                <td style="text-align:right;">${fmtMoney(row.openMaxRisk)}</td>
+                <td style="text-align:right;">${row.closedCount}</td>
+                <td style="text-align:right;" class="${colorMoneyClass(row.closedRealized)}">${fmtMoney(row.closedRealized)}</td>
+                <td style="text-align:right;">${fmtMoney(row.closedMaxRisk)}</td>
+                <td style="text-align:right;" class="${colorMoneyClass(row.totalPnl)}">${fmtMoney(row.totalPnl)}</td>
+                <td style="text-align:right;">${fmtMoney(row.totalMaxRisk)}</td>
+                <td style="text-align:right;" class="${colorMoneyClass(row.pnlPctOnRisk)}">${Number(row.pnlPctOnRisk).toFixed(2)}%</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+
+      wrap.onclick = event => {
+        const row = event.target.closest("tr[data-month][data-strategy]");
+        if (!row) return;
+        const clickedMonth = row.getAttribute("data-month");
+        const strategy = row.getAttribute("data-strategy");
+        if (!clickedMonth || !strategy) return;
+        openFirstMatchingTrade(trade => {
+          const tradeStrategy = trade.strategy || trade.group || "Uncategorized";
+          if (tradeStrategy !== strategy) return false;
+          if (trade.status === "OPEN") return trade.openMonth === clickedMonth;
+          if (trade.status === "CLOSED") return trade.closeMonth === clickedMonth;
+          return false;
+        });
+      };
+    }
+
     function renderClosedPane(aggregates) {
       document.getElementById("closed-count").textContent = String(aggregates.closedTrades.length);
       document.getElementById("closed-winners").textContent = String(aggregates.closedWins);
@@ -3135,8 +3864,11 @@
       });
 
       const monthLabels = aggregates.monthlyKeys.length ? aggregates.monthlyKeys : ["No Data"];
-      const monthData = aggregates.monthlyKeys.length
+      const monthClosedData = aggregates.monthlyKeys.length
         ? aggregates.monthlyKeys.map(key => aggregates.closedByMonth[key] || 0)
+        : [0];
+      const monthOpenData = aggregates.monthlyKeys.length
+        ? aggregates.monthlyKeys.map(key => aggregates.openByMonth[key] || 0)
         : [0];
       drawOrReplace("closedMonthly", {
         ctx: document.getElementById("chart-monthly-closed").getContext("2d"),
@@ -3145,10 +3877,18 @@
           labels: monthLabels,
           datasets: [
             {
-              label: "Monthly Realized PnL",
-              data: monthData,
-              backgroundColor: monthData.map(value => value >= 0 ? "rgba(34,197,94,0.5)" : "rgba(244,63,94,0.5)"),
-              borderColor: monthData.map(value => value >= 0 ? "#22c55e" : "#f43f5e"),
+              label: "Closed Realized PnL",
+              data: monthClosedData,
+              backgroundColor: monthClosedData.map(value => value >= 0 ? "rgba(34,197,94,0.5)" : "rgba(244,63,94,0.5)"),
+              borderColor: monthClosedData.map(value => value >= 0 ? "#22c55e" : "#f43f5e"),
+              borderWidth: 1,
+              borderRadius: 6
+            },
+            {
+              label: "Open Unrealized PnL",
+              data: monthOpenData,
+              backgroundColor: monthOpenData.map(value => value >= 0 ? "rgba(56,189,248,0.52)" : "rgba(244,63,94,0.45)"),
+              borderColor: monthOpenData.map(value => value >= 0 ? "#38bdf8" : "#f43f5e"),
               borderWidth: 1,
               borderRadius: 6
             }
@@ -3161,10 +3901,13 @@
             if (!elements.length) return;
             const idx = elements[0].index;
             const monthKey = chart.data.labels[idx];
-            openFirstMatchingTrade(trade => trade.status === "CLOSED" && trade.closeMonth === monthKey);
+            if (!monthKey || monthKey === "No Data") return;
+            if (!appState.closed) appState.closed = { selectedMonth: null };
+            appState.closed.selectedMonth = monthKey;
+            renderClosedMonthlyStrategyDrilldown(aggregates, monthKey);
           },
           plugins: {
-            legend: { display: false }
+            legend: { labels: { color: chartTextColor() } }
           },
           scales: {
             ...commonScales,
@@ -3178,6 +3921,8 @@
           }
         }
       });
+
+      renderClosedMonthlyStrategyDrilldown(aggregates, appState.closed ? appState.closed.selectedMonth : null);
 
       const closedContributionMap = {};
       aggregates.closedTrades.forEach(trade => {
@@ -3232,16 +3977,6 @@
       });
     }
 
-    function getDteBucket(dte) {
-      const days = Number(dte) || 0;
-      if (days <= 7) return "0-7d";
-      if (days <= 14) return "8-14d";
-      if (days <= 30) return "15-30d";
-      if (days <= 60) return "31-60d";
-      if (days <= 90) return "61-90d";
-      return "90d+";
-    }
-
     function getDitBucket(dit) {
       const days = Number(dit) || 0;
       if (days <= 7) return "0-7d";
@@ -3249,10 +3984,6 @@
       if (days <= 45) return "22-45d";
       if (days <= 90) return "46-90d";
       return "90d+";
-    }
-
-    function inBucketByLabel(value, label, bucketFn) {
-      return bucketFn(value) === label;
     }
 
     function buildDrawdownSeries(equitySeries) {
@@ -3709,9 +4440,6 @@
 
     function renderRiskPane(aggregates) {
       const exposure = aggregates.exposure;
-      const openTrades = aggregates.openTrades || [];
-      const closedTrades = aggregates.closedTrades || [];
-      const filteredTrades = aggregates.filteredTrades || [];
       document.getElementById("kpi-open-count").textContent = String(exposure.openCount);
       const openPnlEl = document.getElementById("kpi-open-pnl");
       openPnlEl.textContent = fmtMoney(exposure.openPnl);
@@ -4104,147 +4832,7 @@
         }
       });
 
-      const bubblePalette = ["rgba(56,189,248,0.5)", "rgba(129,140,248,0.5)", "rgba(245,158,11,0.5)", "rgba(52,211,153,0.5)", "rgba(244,114,182,0.5)", "rgba(248,113,113,0.5)", "rgba(163,230,53,0.5)"];
-      const bubbleBorder = ["#38bdf8", "#818cf8", "#f59e0b", "#34d399", "#f472b6", "#f87171", "#a3e635"];
-      const bubbleByGroup = {};
-      const maxBubbleRisk = Math.max(1, ...filteredTrades.map(trade => getMaxRisk(trade)));
-      filteredTrades.forEach(trade => {
-        const group = trade.group || "Uncategorized";
-        if (!bubbleByGroup[group]) bubbleByGroup[group] = [];
-        bubbleByGroup[group].push({
-          x: getTradeDit(trade),
-          y: Number(trade.pnl) || 0,
-          r: 5 + ((getMaxRisk(trade) / maxBubbleRisk) * 16),
-          tradeId: trade.id
-        });
-      });
-      const bubbleEntries = Object.entries(bubbleByGroup).sort((a, b) => b[1].length - a[1].length);
-      drawOrReplace("ditPnlBubble", {
-        ctx: document.getElementById("chart-dit-pnl-bubble").getContext("2d"),
-        type: "bubble",
-        data: {
-          datasets: bubbleEntries.length
-            ? bubbleEntries.map(([group, points], idx) => ({
-              label: group,
-              data: points,
-              backgroundColor: bubblePalette[idx % bubblePalette.length],
-              borderColor: bubbleBorder[idx % bubbleBorder.length],
-              borderWidth: 1.2
-            }))
-            : [{
-              label: "No Data",
-              data: [{ x: 0, y: 0, r: 5 }],
-              backgroundColor: "rgba(100,116,139,0.4)",
-              borderColor: "#64748b"
-            }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          onClick: (_, elements, chart) => {
-            if (!elements.length) return;
-            const elPoint = elements[0];
-            const point = chart.data.datasets[elPoint.datasetIndex].data[elPoint.index];
-            if (point && point.tradeId) renderTradeDrilldown(point.tradeId);
-          },
-          plugins: {
-            legend: { labels: { color: chartTextColor(), usePointStyle: true } },
-            tooltip: {
-              callbacks: {
-                label: context => {
-                  const raw = context.raw || {};
-                  return `${context.dataset.label}: DIT ${Number(raw.x || 0)}d, PnL ${fmtMoney(raw.y || 0)}, Risk ${Math.round(raw.r || 0)}`;
-                }
-              }
-            }
-          },
-          scales: {
-            x: {
-              title: { display: true, text: "DIT (days)", color: chartTextColor() },
-              ticks: { color: chartTextColor() },
-              grid: { color: chartGridColor() }
-            },
-            y: {
-              title: { display: true, text: "PnL", color: chartTextColor() },
-              ticks: {
-                color: chartTextColor(),
-                callback: value => `$${Number(value).toLocaleString()}`
-              },
-              grid: { color: chartGridColor() }
-            }
-          }
-        }
-      });
-
-      const dteBuckets = ["0-7d", "8-14d", "15-30d", "31-60d", "61-90d", "90d+"];
-      const riskWallByGroup = {};
-      openTrades.forEach(trade => {
-        const group = trade.group || "Uncategorized";
-        if (!riskWallByGroup[group]) {
-          riskWallByGroup[group] = Object.fromEntries(dteBuckets.map(bucket => [bucket, 0]));
-        }
-        const bucket = getDteBucket(getTradeDte(trade));
-        riskWallByGroup[group][bucket] += Number(trade.riskProxy) || 0;
-      });
-      const riskWallEntries = Object.entries(riskWallByGroup)
-        .sort((a, b) => {
-          const as = Object.values(a[1]).reduce((sum, v) => sum + (Number(v) || 0), 0);
-          const bs = Object.values(b[1]).reduce((sum, v) => sum + (Number(v) || 0), 0);
-          return bs - as;
-        })
-        .slice(0, 10);
-      drawOrReplace("dteRiskWall", {
-        ctx: document.getElementById("chart-dte-risk-wall").getContext("2d"),
-        type: "bar",
-        data: {
-          labels: dteBuckets,
-          datasets: riskWallEntries.length
-            ? riskWallEntries.map(([group, map], idx) => ({
-              label: group,
-              data: dteBuckets.map(bucket => Number(map[bucket]) || 0),
-              backgroundColor: bubblePalette[idx % bubblePalette.length],
-              borderColor: bubbleBorder[idx % bubbleBorder.length],
-              borderWidth: 1,
-              stack: "risk"
-            }))
-            : [{
-              label: "No Open Risk",
-              data: [0, 0, 0, 0, 0, 0],
-              backgroundColor: "rgba(100,116,139,0.5)",
-              borderColor: "#64748b",
-              stack: "risk"
-            }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          onClick: (_, elements, chart) => {
-            if (!elements.length) return;
-            const element = elements[0];
-            const bucket = chart.data.labels[element.index];
-            const group = chart.data.datasets[element.datasetIndex].label;
-            if (!bucket || !group) return;
-            openFirstMatchingTrade(trade =>
-              trade.status === "OPEN"
-              && trade.group === group
-              && inBucketByLabel(getTradeDte(trade), bucket, getDteBucket)
-            );
-          },
-          plugins: { legend: { labels: { color: chartTextColor(), boxWidth: 10 } } },
-          scales: {
-            x: { stacked: true, ticks: { color: chartTextColor() }, grid: { display: false } },
-            y: {
-              stacked: true,
-              ticks: {
-                color: chartTextColor(),
-                callback: value => `$${Number(value).toLocaleString()}`
-              },
-              grid: { color: chartGridColor() }
-            }
-          }
-        }
-      });
-
+      const drawdownPalette = ["#38bdf8", "#818cf8", "#f59e0b", "#34d399", "#f472b6", "#f87171", "#a3e635"];
       const portfolioDrawdown = buildDrawdownSeries(aggregates.portfolioEquitySeries || []);
       const drawdownGroupEntries = Object.entries(aggregates.groupEquitySeries || {})
         .map(([group, series]) => [group, buildDrawdownSeries(series)])
@@ -4272,7 +4860,7 @@
             ...drawdownGroupEntries.map(([group, series], idx) => ({
               label: `${group} DD`,
               data: series.map(point => point.y),
-              borderColor: bubbleBorder[(idx + 1) % bubbleBorder.length],
+              borderColor: drawdownPalette[(idx + 1) % drawdownPalette.length],
               borderWidth: 1.8,
               pointRadius: 0,
               tension: 0.2
@@ -4296,199 +4884,7 @@
         }
       });
 
-      const ditBuckets = ["0-7d", "8-21d", "22-45d", "46-90d", "90d+"];
-      const ditStats = Object.fromEntries(ditBuckets.map(bucket => [bucket, { count: 0, wins: 0, pnl: 0 }]));
-      closedTrades.forEach(trade => {
-        const bucket = getDitBucket(getTradeDit(trade));
-        if (!ditStats[bucket]) return;
-        ditStats[bucket].count += 1;
-        ditStats[bucket].wins += (Number(trade.pnl) || 0) > 0 ? 1 : 0;
-        ditStats[bucket].pnl += Number(trade.pnl) || 0;
-      });
-      const winRates = ditBuckets.map(bucket => {
-        const stat = ditStats[bucket];
-        return stat.count ? (stat.wins / stat.count) * 100 : 0;
-      });
-      const expectancy = ditBuckets.map(bucket => {
-        const stat = ditStats[bucket];
-        return stat.count ? stat.pnl / stat.count : 0;
-      });
-      drawOrReplace("ditExpectancy", {
-        ctx: document.getElementById("chart-dit-expectancy").getContext("2d"),
-        type: "bar",
-        data: {
-          labels: ditBuckets,
-          datasets: [
-            {
-              type: "bar",
-              label: "Win Rate %",
-              data: winRates,
-              backgroundColor: "rgba(56,189,248,0.5)",
-              borderColor: "#38bdf8",
-              borderWidth: 1,
-              yAxisID: "y",
-              borderRadius: 6
-            },
-            {
-              type: "line",
-              label: "Expectancy ($/trade)",
-              data: expectancy,
-              borderColor: "#22c55e",
-              backgroundColor: "rgba(34,197,94,0.14)",
-              borderWidth: 2,
-              tension: 0.2,
-              pointRadius: 3,
-              yAxisID: "y1"
-            }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          onClick: (_, elements, chart) => {
-            if (!elements.length) return;
-            const bucket = chart.data.labels[elements[0].index];
-            if (!bucket) return;
-            openFirstMatchingTrade(trade => trade.status === "CLOSED" && inBucketByLabel(getTradeDit(trade), bucket, getDitBucket));
-          },
-          plugins: { legend: { labels: { color: chartTextColor() } } },
-          scales: {
-            x: { ticks: { color: chartTextColor() }, grid: { display: false } },
-            y: {
-              position: "left",
-              max: 100,
-              ticks: { color: chartTextColor(), callback: value => `${Number(value).toFixed(0)}%` },
-              grid: { color: chartGridColor() }
-            },
-            y1: {
-              position: "right",
-              ticks: {
-                color: chartTextColor(),
-                callback: value => `$${Number(value).toLocaleString()}`
-              },
-              grid: { display: false }
-            }
-          }
-        }
-      });
-
-      const flowByGroup = {};
-      const flowByStrategy = {};
-      filteredTrades.forEach(trade => {
-        const group = trade.group || "Uncategorized";
-        const strategy = trade.strategy || group;
-        const net = Number(trade.netDebitCredit) || 0;
-        if (!flowByGroup[group]) flowByGroup[group] = { credit: 0, debit: 0 };
-        if (!flowByStrategy[strategy]) flowByStrategy[strategy] = { credit: 0, debit: 0 };
-        if (net >= 0) {
-          flowByGroup[group].credit += net;
-          flowByStrategy[strategy].credit += net;
-        } else {
-          flowByGroup[group].debit += Math.abs(net);
-          flowByStrategy[strategy].debit += Math.abs(net);
-        }
-      });
-
-      const groupFlowEntries = Object.entries(flowByGroup)
-        .sort((a, b) => Math.max(a[1].credit, a[1].debit) - Math.max(b[1].credit, b[1].debit))
-        .slice(-12);
-      drawOrReplace("creditDebitGroup", {
-        ctx: document.getElementById("chart-credit-debit-group").getContext("2d"),
-        type: "bar",
-        data: {
-          labels: groupFlowEntries.length ? groupFlowEntries.map(([k]) => k) : ["No Data"],
-          datasets: [
-            {
-              label: "Credit Received",
-              data: groupFlowEntries.length ? groupFlowEntries.map(([, v]) => v.credit) : [0],
-              backgroundColor: "rgba(34,197,94,0.55)",
-              borderColor: "#22c55e",
-              borderWidth: 1
-            },
-            {
-              label: "Debit Paid",
-              data: groupFlowEntries.length ? groupFlowEntries.map(([, v]) => -v.debit) : [0],
-              backgroundColor: "rgba(244,63,94,0.55)",
-              borderColor: "#f43f5e",
-              borderWidth: 1
-            }
-          ]
-        },
-        options: {
-          indexAxis: "y",
-          responsive: true,
-          maintainAspectRatio: false,
-          onClick: (_, elements, chart) => {
-            if (!elements.length) return;
-            const group = chart.data.labels[elements[0].index];
-            if (!group) return;
-            openFirstMatchingTrade(trade => trade.group === group);
-          },
-          plugins: { legend: { labels: { color: chartTextColor() } } },
-          scales: {
-            x: {
-              ticks: {
-                color: chartTextColor(),
-                callback: value => `$${Number(value).toLocaleString()}`
-              },
-              grid: { color: chartGridColor() }
-            },
-            y: { ticks: { color: chartTextColor() }, grid: { display: false } }
-          }
-        }
-      });
-
-      const strategyFlowEntries = Object.entries(flowByStrategy)
-        .sort((a, b) => Math.max(a[1].credit, a[1].debit) - Math.max(b[1].credit, b[1].debit))
-        .slice(-12);
-      drawOrReplace("creditDebitStrategy", {
-        ctx: document.getElementById("chart-credit-debit-strategy").getContext("2d"),
-        type: "bar",
-        data: {
-          labels: strategyFlowEntries.length ? strategyFlowEntries.map(([k]) => k) : ["No Data"],
-          datasets: [
-            {
-              label: "Credit Received",
-              data: strategyFlowEntries.length ? strategyFlowEntries.map(([, v]) => v.credit) : [0],
-              backgroundColor: "rgba(34,197,94,0.55)",
-              borderColor: "#22c55e",
-              borderWidth: 1
-            },
-            {
-              label: "Debit Paid",
-              data: strategyFlowEntries.length ? strategyFlowEntries.map(([, v]) => -v.debit) : [0],
-              backgroundColor: "rgba(244,63,94,0.55)",
-              borderColor: "#f43f5e",
-              borderWidth: 1
-            }
-          ]
-        },
-        options: {
-          indexAxis: "y",
-          responsive: true,
-          maintainAspectRatio: false,
-          onClick: (_, elements, chart) => {
-            if (!elements.length) return;
-            const strategy = chart.data.labels[elements[0].index];
-            if (!strategy) return;
-            openFirstMatchingTrade(trade => trade.strategy === strategy);
-          },
-          plugins: { legend: { labels: { color: chartTextColor() } } },
-          scales: {
-            x: {
-              ticks: {
-                color: chartTextColor(),
-                callback: value => `$${Number(value).toLocaleString()}`
-              },
-              grid: { color: chartGridColor() }
-            },
-            y: { ticks: { color: chartTextColor() }, grid: { display: false } }
-          }
-        }
-      });
-
       renderEdgeInsights(aggregates);
-      renderHeatmap(aggregates);
       ensureChartExpandButtons();
       applyRiskPackVisibility();
     }
@@ -4837,7 +5233,26 @@
       const debitSum = aggregates.filteredTrades.reduce((sum, trade) => sum + getDebitPaid(trade), 0);
       const netFlow = aggregates.filteredTrades.reduce((sum, trade) => sum + (Number(trade.netDebitCredit) || 0), 0);
       const flowOk = Math.abs((creditSum - debitSum) - netFlow) <= tolerance;
-      if (!(openOk && closedOk && combinedOk && heatCountOk && heatDeltaOk && heatThetaOk && heatPnlOk && tickerDeltaOk && tickerThetaOk && tickerPnlOk && ditCountOk && flowOk)) {
+      const monthlyStrategyRows = aggregates.monthlyStrategyRows || [];
+      const monthlyOpenedCount = monthlyStrategyRows.reduce((sum, row) => sum + (Number(row.openedCount) || 0), 0);
+      const monthlyOpenPnlSum = monthlyStrategyRows.reduce((sum, row) => sum + (Number(row.openUnrealized) || 0), 0);
+      const monthlyOpenMarginSum = monthlyStrategyRows.reduce((sum, row) => sum + (Number(row.openMaxRisk) || 0), 0);
+      const monthlyClosedCount = monthlyStrategyRows.reduce((sum, row) => sum + (Number(row.closedCount) || 0), 0);
+      const monthlyClosedPnlSum = monthlyStrategyRows.reduce((sum, row) => sum + (Number(row.closedRealized) || 0), 0);
+      const monthlyClosedMarginSum = monthlyStrategyRows.reduce((sum, row) => sum + (Number(row.closedMaxRisk) || 0), 0);
+      const openMarginSum = aggregates.openTrades.reduce((sum, trade) => sum + getMaxRisk(trade), 0);
+      const closedMarginSum = aggregates.closedTrades.reduce((sum, trade) => sum + getMaxRisk(trade), 0);
+      const monthlyOpenedCountOk = monthlyOpenedCount === aggregates.filteredTrades.length;
+      const monthlyOpenPnlOk = Math.abs(monthlyOpenPnlSum - aggregates.unrealized) <= tolerance;
+      const monthlyOpenMarginOk = Math.abs(monthlyOpenMarginSum - openMarginSum) <= tolerance;
+      const monthlyClosedCountOk = monthlyClosedCount === aggregates.closedTrades.length;
+      const monthlyClosedPnlOk = Math.abs(monthlyClosedPnlSum - aggregates.realized) <= tolerance;
+      const monthlyClosedMarginOk = Math.abs(monthlyClosedMarginSum - closedMarginSum) <= tolerance;
+      const closedByMonthSum = Object.values(aggregates.closedByMonth || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+      const openByMonthSum = Object.values(aggregates.openByMonth || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+      const closedByMonthOk = Math.abs(closedByMonthSum - aggregates.realized) <= tolerance;
+      const openByMonthOk = Math.abs(openByMonthSum - aggregates.unrealized) <= tolerance;
+      if (!(openOk && closedOk && combinedOk && heatCountOk && heatDeltaOk && heatThetaOk && heatPnlOk && tickerDeltaOk && tickerThetaOk && tickerPnlOk && ditCountOk && flowOk && monthlyOpenedCountOk && monthlyOpenPnlOk && monthlyOpenMarginOk && monthlyClosedCountOk && monthlyClosedPnlOk && monthlyClosedMarginOk && closedByMonthOk && openByMonthOk)) {
         console.warn("Calculation consistency check failed", {
           openOk,
           closedOk,
@@ -4851,6 +5266,14 @@
           tickerPnlOk,
           ditCountOk,
           flowOk,
+          monthlyOpenedCountOk,
+          monthlyOpenPnlOk,
+          monthlyOpenMarginOk,
+          monthlyClosedCountOk,
+          monthlyClosedPnlOk,
+          monthlyClosedMarginOk,
+          closedByMonthOk,
+          openByMonthOk,
           openSum,
           closedSum,
           allSum,
@@ -4866,6 +5289,16 @@
           creditSum,
           debitSum,
           netFlow,
+          monthlyOpenedCount,
+          monthlyOpenPnlSum,
+          monthlyOpenMarginSum,
+          monthlyClosedCount,
+          monthlyClosedPnlSum,
+          monthlyClosedMarginSum,
+          openMarginSum,
+          closedMarginSum,
+          openByMonthSum,
+          closedByMonthSum,
           realized: aggregates.realized,
           unrealized: aggregates.unrealized
         });
@@ -4875,7 +5308,9 @@
     function renderDashboard(state) {
       const aggregates = buildRiskAggregates(state.trades, state.filters);
       runCalculationChecks(aggregates);
+      renderGroupTilesPane(aggregates);
       renderRiskPane(aggregates);
+      renderBehaviorLab(aggregates);
       renderPositionsTable(aggregates.filteredTrades);
       renderClosedPane(aggregates);
       if (document.getElementById("group-modal-backdrop").classList.contains("open") && appState.groupModal.group) {
@@ -4898,7 +5333,7 @@
     }
 
     function refreshWarnings() {
-      const warnings = [];
+      const warnings = [...(appState.uploadNotes || [])];
       if (appState.parseResults.active) warnings.push(...appState.parseResults.active.warnings);
       if (appState.parseResults.expired) warnings.push(...appState.parseResults.expired.warnings);
       appState.warnings = warnings;
@@ -4920,6 +5355,113 @@
       } else {
         el.headerState.textContent = "Awaiting uploads";
       }
+      updateCombinedUploadState();
+    }
+
+    function updateCombinedUploadState() {
+      if (!el.bothUploadState) return;
+      const activeReady = !!(appState.parseResults.active && appState.parseResults.active.schemaValid);
+      const expiredReady = !!(appState.parseResults.expired && appState.parseResults.expired.schemaValid);
+      const activeSelected = !!appState.files.active;
+      const expiredSelected = !!appState.files.expired;
+      if (activeReady && expiredReady) {
+        el.bothUploadState.textContent = "Both parsed";
+      } else if (activeSelected && expiredSelected) {
+        el.bothUploadState.textContent = "2 files selected";
+      } else if (activeSelected || expiredSelected) {
+        el.bothUploadState.textContent = "1 of 2 selected";
+      } else {
+        el.bothUploadState.textContent = "Awaiting 2 files";
+      }
+    }
+
+    function inferWorkbookTypeFromFileName(fileName) {
+      const name = String(fileName || "").toLowerCase();
+      if (!name) return null;
+      const activeHints = ["active", "open", "current", "live"];
+      const expiredHints = ["expired", "closed", "close", "history", "archive"];
+      const activeScore = activeHints.reduce((sum, hint) => sum + (name.includes(hint) ? 1 : 0), 0);
+      const expiredScore = expiredHints.reduce((sum, hint) => sum + (name.includes(hint) ? 1 : 0), 0);
+      if (activeScore === expiredScore) return null;
+      return activeScore > expiredScore ? "active" : "expired";
+    }
+
+    function assignCombinedWorkbookFiles(files) {
+      const selected = Array.from(files || []).filter(Boolean);
+      const notes = [];
+      const assignment = { active: null, expired: null, notes };
+      if (!selected.length) return assignment;
+
+      const remainder = [];
+      selected.forEach(file => {
+        const inferred = inferWorkbookTypeFromFileName(file.name);
+        if (inferred === "active" && !assignment.active) {
+          assignment.active = file;
+          return;
+        }
+        if (inferred === "expired" && !assignment.expired) {
+          assignment.expired = file;
+          return;
+        }
+        remainder.push(file);
+      });
+
+      let fallbackUsed = false;
+      if (!assignment.active && remainder.length) {
+        assignment.active = remainder.shift();
+        fallbackUsed = true;
+      }
+      if (!assignment.expired && remainder.length) {
+        assignment.expired = remainder.shift();
+        fallbackUsed = true;
+      }
+
+      if (selected.length > 2) {
+        notes.push(`Combined upload selected ${selected.length} files. Only the first detected Active/Expired pair was used.`);
+      }
+      if (fallbackUsed) {
+        notes.push("Combined upload used selection order fallback because filenames were ambiguous.");
+      }
+      if (!assignment.active || !assignment.expired) {
+        notes.push("Please select both Active and Expired workbooks in the same picker selection.");
+      }
+      return assignment;
+    }
+
+    function clearWorkbookSlot(type) {
+      appState.files[type] = null;
+      appState.parseResults[type] = null;
+      if (type === "active") {
+        el.activeFileName.textContent = "No file selected";
+      } else {
+        el.expiredFileName.textContent = "No file selected";
+      }
+    }
+
+    async function setWorkbookFile(type, file) {
+      appState.files[type] = file;
+      if (type === "active") {
+        el.activeFileName.textContent = file.name;
+      } else {
+        el.expiredFileName.textContent = file.name;
+      }
+      await parseAndStoreFile(type, file);
+    }
+
+    async function handleCombinedWorkbookSelection(fileList) {
+      const assignment = assignCombinedWorkbookFiles(fileList);
+      appState.uploadNotes = assignment.notes;
+
+      if (assignment.active) await setWorkbookFile("active", assignment.active);
+      else clearWorkbookSlot("active");
+
+      if (assignment.expired) await setWorkbookFile("expired", assignment.expired);
+      else clearWorkbookSlot("expired");
+
+      refreshUploadSummary();
+      refreshWarnings();
+      refreshBuildButtonState();
+      if (el.bothFileInput) el.bothFileInput.value = "";
     }
 
     async function parseAndStoreFile(type, file) {
@@ -4951,12 +5493,13 @@
       appState.tableSort.groupPositions = { key: "openDate", dir: "desc" };
       appState.groupModal = { group: null, status: "ALL" };
       appState.riskPack = "core";
+      appState.closed = { selectedMonth: null };
       appState.edge = { selectedTradeId: null };
       document.getElementById("status-filter").value = "ALL";
       document.getElementById("closed-window-filter").value = "ALL";
       document.getElementById("position-search").value = "";
       renderGroupToggles();
-      setPane("risk-pane");
+      setPane("group-pane");
       renderDashboard(appState);
       el.dashboardRangeChip.textContent = "Closed range: All history";
     }
@@ -4966,6 +5509,7 @@
       hideGroupModal();
       appState.files = { active: null, expired: null };
       appState.parseResults = { active: null, expired: null };
+      appState.uploadNotes = [];
       appState.warnings = [];
       appState.trades = [];
       appState.groups = [];
@@ -4981,12 +5525,14 @@
       };
       appState.groupModal = { group: null, status: "ALL" };
       appState.riskPack = "core";
+      appState.closed = { selectedMonth: null };
       appState.edge = { selectedTradeId: null };
       Object.values(appState.charts).forEach(chart => chart && chart.destroy());
       appState.charts = {};
 
       el.activeFileInput.value = "";
       el.expiredFileInput.value = "";
+      if (el.bothFileInput) el.bothFileInput.value = "";
       el.activeFileName.textContent = "No file selected";
       el.expiredFileName.textContent = "No file selected";
       document.getElementById("sum-open-strat").textContent = "0";
@@ -5008,24 +5554,16 @@
       renderDashboard(appState);
     }
 
-    document.getElementById("pick-active-btn").addEventListener("click", () => el.activeFileInput.click());
-    document.getElementById("pick-expired-btn").addEventListener("click", () => el.expiredFileInput.click());
-
-    el.activeFileInput.addEventListener("change", async event => {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
-      appState.files.active = file;
-      el.activeFileName.textContent = file.name;
-      await parseAndStoreFile("active", file);
+    document.getElementById("pick-both-btn").addEventListener("click", () => {
+      if (el.bothFileInput) el.bothFileInput.click();
     });
-
-    el.expiredFileInput.addEventListener("change", async event => {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
-      appState.files.expired = file;
-      el.expiredFileName.textContent = file.name;
-      await parseAndStoreFile("expired", file);
-    });
+    if (el.bothFileInput) {
+      el.bothFileInput.addEventListener("change", async event => {
+        const files = event.target.files;
+        if (!files || !files.length) return;
+        await handleCombinedWorkbookSelection(files);
+      });
+    }
 
     el.buildDashboardBtn.addEventListener("click", () => {
       initializeDashboardState();
@@ -5205,6 +5743,7 @@
       renderTradeDrilldown(tradeId);
     });
 
+    rehomeDashboardCards();
     runIbkrCalculatorChecks();
     resetIbkrCalculator();
     refreshBuildButtonState();
@@ -5215,6 +5754,26 @@
     console.assert(typeof renderDashboard === "function", "renderDashboard must exist");
     console.assert(typeof renderTradeDrilldown === "function", "renderTradeDrilldown must exist");
     console.assert(typeof renderGroupDrilldown === "function", "renderGroupDrilldown must exist");
+    console.assert(typeof assignCombinedWorkbookFiles === "function", "assignCombinedWorkbookFiles must exist");
+    console.assert(typeof handleCombinedWorkbookSelection === "function", "handleCombinedWorkbookSelection must exist");
+    const combinedMappedCheck = assignCombinedWorkbookFiles([
+      { name: "active_workbook.xlsx" },
+      { name: "expired_workbook.xlsx" }
+    ]);
+    console.assert(
+      combinedMappedCheck.active && combinedMappedCheck.active.name === "active_workbook.xlsx"
+      && combinedMappedCheck.expired && combinedMappedCheck.expired.name === "expired_workbook.xlsx",
+      "Combined upload mapping by filename failed"
+    );
+    const combinedFallbackCheck = assignCombinedWorkbookFiles([
+      { name: "alpha.xlsx" },
+      { name: "beta.xlsx" }
+    ]);
+    console.assert(
+      combinedFallbackCheck.active && combinedFallbackCheck.active.name === "alpha.xlsx"
+      && combinedFallbackCheck.expired && combinedFallbackCheck.expired.name === "beta.xlsx",
+      "Combined upload fallback mapping failed"
+    );
     console.assert(REQUIRED_SCHEMA.length === 19, "Required schema column count mismatch");
   </script>
 </body>
